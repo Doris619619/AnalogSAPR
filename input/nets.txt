@@ -1,0 +1,13 @@
+# IO/input/nets.txt
+# 线网连接关系。priority: critical > symmetry > normal。
+# terminals: 空格分隔的 module.pin 列表。
+#
+# net          priority    terminals
+
+VDD            critical    M3.S M4.S
+GND            critical    M1.S M2.S R0.MINUS
+OUT            critical    M3.D M1.D
+IN_P           normal      M1.G
+IN_N           normal      M2.G
+TAIL           symmetry    M1.S M2.S M5.D
+BIAS           normal      M3.G M4.G M5.G

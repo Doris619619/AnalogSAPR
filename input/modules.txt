@@ -1,0 +1,13 @@
+# IO/input/modules.txt
+# 器件 BB 尺寸 + 有源区 + cell 原点偏移。
+# ox/oy: GDSII cell bbox 左下角在 cell-local 坐标系中的偏移（默认 0）。
+#
+# id          w       h       active(x1,y1,x2,y2)         # info
+
+M1           4.000   3.000   0.400,0.300,3.600,2.700  # nmos nch_ulvt_mac 4.0/1.0 ox=-0.300 oy=-0.210
+M2           4.000   3.000   0.400,0.300,3.600,2.700  # nmos nch_ulvt_mac 4.0/1.0 ox=-0.300 oy=-0.210
+M3           4.000   3.000   0.400,0.300,3.600,2.700  # pmos pch_ulvt_mac 4.0/0.4 ox=-0.300 oy=-0.210
+M4           4.000   3.000   0.400,0.300,3.600,2.700  # pmos pch_ulvt_mac 4.0/0.4 ox=-0.300 oy=-0.210
+M5           4.000   3.000   0.400,0.300,3.600,2.700  # nmos tail device placeholder ox=-0.300 oy=-0.210
+C0           28.750  10.420  0.521,0.521,28.229,9.899  # capacitor cfmom_2t ox=0.000 oy=0.000
+R0           10.740  29.160  0.190,1.065,10.550,28.095  # resistor rupolym ox=-0.190 oy=-0.530

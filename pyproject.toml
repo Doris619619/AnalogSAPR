@@ -1,0 +1,13 @@
+[project]
+name = "analog-sapr-reproduction"
+version = "0.1.0"
+description = "Reproduction scaffold for simultaneous analog placement and routing with current-flow and current-density constraints."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+sapr = "sapr.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

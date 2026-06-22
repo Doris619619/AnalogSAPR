@@ -1,0 +1,14 @@
+# IO/input/constraints.txt
+# 设计约束。需人工填写或从网表启发式推断。
+#
+# SYMMETRY_PAIR  name  axis       left   right    — 对称对，right 镜像自 left
+# SYMMETRY_SELF  name  axis       module          — 自对称器件
+# FLOW           net   out_pin    in_pin          — 电流流向约束
+# WIRE_WIDTH     net   min_w      max_w           — 线宽范围 (μm)
+
+SYMMETRY_PAIR    sg1   vertical   M1     M2
+SYMMETRY_SELF    sg3   vertical   M5
+FLOW             OUT   M3.D       M1.D
+FLOW             TAIL  M1.S       M5.D
+WIRE_WIDTH       VDD   2          8
+WIRE_WIDTH       GND   2          8
