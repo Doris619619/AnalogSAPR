@@ -1,0 +1,5 @@
+# C++ 构建产物
+cpp/build/
+
+# 阶段验证输出
+output/cpp_stage0/
