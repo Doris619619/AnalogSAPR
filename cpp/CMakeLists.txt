@@ -15,6 +15,8 @@ add_library(analog_sapr_core
     src/routing/layer.cpp
     src/routing/obstacle.cpp
     src/routing/routing_context.cpp
+    src/routing/astar.cpp
+    src/routing/topology.cpp
 )
 
 target_include_directories(analog_sapr_core
