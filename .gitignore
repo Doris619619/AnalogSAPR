@@ -1,5 +1,6 @@
 # C++ / CMake build artifacts
 build/
+build-cmake/
 cmake-build-*/
 CMakeFiles/
 CMakeCache.txt
