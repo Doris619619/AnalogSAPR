@@ -17,6 +17,7 @@ add_library(analog_sapr_core
     src/routing/routing_context.cpp
     src/routing/astar.cpp
     src/routing/topology.cpp
+    src/routing/global_router.cpp
 )
 
 target_include_directories(analog_sapr_core
