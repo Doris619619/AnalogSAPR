@@ -1,0 +1,18 @@
+# C++ / CMake build artifacts
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+Makefile
+*.exe
+*.o
+*.obj
+*.a
+*.lib
+
+# IDE and local files
+.idea/
+.vscode/
+*.user
+

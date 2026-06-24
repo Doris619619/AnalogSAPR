@@ -1,4 +1,26 @@
-# IO 格式说明 v2
+# AnalogSAPR-Repro
+
+论文 *Simultaneous Analog Placement and Routing with Current Flow and Current Density Considerations* 的 C++20 算法复现工程。当前版本完成标准 I/O、约束校验、链式 baseline placement、Manhattan routing 和指标统计；增强 B*-tree、DP routing 与模拟退火将在后续阶段实现。
+
+## 构建与运行
+
+正式构建使用 CMake：
+
+```powershell
+cmake -S . -B build -G Ninja
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+当前 Windows 环境也可直接使用 MinGW：
+
+```powershell
+g++ -std=c++20 -Wall -Wextra -Wpedantic -Iinclude src/*.cpp -o build/sapr.exe
+build/sapr.exe validate --input input
+build/sapr.exe run --input input --output output
+```
+
+## IO 格式说明 v2
 
 模拟电路 PnR 框架的标准输入输出格式。所有坐标单位 μm，空白字符分隔，`#` 开头为注释。
 
