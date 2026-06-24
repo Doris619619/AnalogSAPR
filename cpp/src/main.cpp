@@ -1,4 +1,4 @@
-// 文件职责：提供 C++ 命令行入口，串联输入解析、阶段 1 布线环境构建和 routing 写出。
+// 文件职责：提供 C++ 命令行入口，串联输入解析、布线环境构建和阶段调试输出。
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -8,6 +8,7 @@
 
 #include "io/parser.hpp"
 #include "io/writer.hpp"
+#include "routing/global_router.hpp"
 #include "routing/routing_context.hpp"
 #include "routing/topology.hpp"
 
@@ -21,6 +22,7 @@ struct CliOptions {
     bool help = false;
     bool dump_grid_info = false;
     bool dump_route_candidates = false;
+    bool dump_global_routing = false;
 };
 
 // 打印工具的用法说明。
@@ -28,9 +30,9 @@ void print_usage() {
     std::cout
         << "用法:\n"
         << "  analog_sapr --input <input_dir> --placement <placement.txt> --output <output_dir> "
-        << "[--dump-grid-info] [--dump-route-candidates]\n\n"
-        << "阶段 2 目标:\n"
-        << "  构建网格环境，并用 A* 为 net terminal pair 生成候选路径。\n";
+        << "[--dump-grid-info] [--dump-route-candidates] [--dump-global-routing]\n\n"
+        << "阶段 3 目标:\n"
+        << "  基于 A* 候选路径执行不计 via cost 的 DP-based global routing。\n";
 }
 
 // 解析最小命令行参数集合。
@@ -50,6 +52,8 @@ CliOptions parse_args(int argc, char** argv) {
             options.dump_grid_info = true;
         } else if (arg == "--dump-route-candidates") {
             options.dump_route_candidates = true;
+        } else if (arg == "--dump-global-routing") {
+            options.dump_global_routing = true;
         } else {
             throw std::runtime_error("未知或缺少值的参数: " + arg);
         }
@@ -114,9 +118,39 @@ void dump_route_candidates(const analog_sapr::Circuit& circuit, const analog_sap
               << " total=" << candidates.size() << "\n";
 }
 
+// 打印阶段 3 global routing 选择结果，via 只展示不参与 cost。
+void dump_global_routing(const analog_sapr::Circuit& circuit, const analog_sapr::RoutingContext& context) {
+    const auto candidates = analog_sapr::generate_route_candidates(circuit, context);
+    const auto result = analog_sapr::run_global_routing(circuit, context, candidates);
+
+    std::cout << std::fixed << std::setprecision(3)
+              << "阶段 3 DP-based Global Routing\n";
+    for (const auto& route : result.net_routes) {
+        std::cout << "  net=" << route.net
+                  << " success=" << (route.success ? "true" : "false")
+                  << " pairs=" << route.selected_candidates.size()
+                  << " wirelength=" << route.metrics.wirelength
+                  << " bends=" << route.metrics.bend_count
+                  << " vias=" << route.metrics.via_count
+                  << " penalty=" << route.penalty
+                  << " cost=" << route.metrics.cost;
+        if (!route.message.empty()) {
+            std::cout << " message=" << route.message;
+        }
+        std::cout << "\n";
+    }
+
+    std::cout << "  total_wirelength=" << result.total_metrics.wirelength << "\n"
+              << "  total_bends=" << result.total_metrics.bend_count << "\n"
+              << "  total_vias=" << result.total_metrics.via_count << "\n"
+              << "  total_penalty=" << result.total_penalty << "\n"
+              << "  failed_nets=" << result.failed_nets << "\n"
+              << "  total_cost=" << result.total_metrics.cost << "\n";
+}
+
 }  // namespace
 
-// 程序入口：完成阶段 2 的 A* 候选路径生成和 IO 闭环。
+// 程序入口：完成阶段 3 的 global routing 调试和 IO 闭环。
 int main(int argc, char** argv) {
     try {
         const auto options = parse_args(argc, argv);
@@ -133,7 +167,7 @@ int main(int argc, char** argv) {
         solution.placements = std::move(placements);
         analog_sapr::write_routes(solution, options.output_dir);
 
-        std::cout << "阶段 2 A* 候选路径环境构建完成\n"
+        std::cout << "阶段 3 DP-based Global Routing 环境构建完成\n"
                   << "  modules: " << circuit.modules.size() << "\n"
                   << "  pins: " << circuit.pins.size() << "\n"
                   << "  nets: " << circuit.nets.size() << "\n"
@@ -150,6 +184,9 @@ int main(int argc, char** argv) {
         }
         if (options.dump_route_candidates) {
             dump_route_candidates(circuit, routing_context);
+        }
+        if (options.dump_global_routing) {
+            dump_global_routing(circuit, routing_context);
         }
         return 0;
     } catch (const std::exception& error) {
