@@ -2,22 +2,110 @@
 
 论文 *Simultaneous Analog Placement and Routing with Current Flow and Current Density Considerations* 的 C++20 算法复现工程。当前版本完成标准 I/O、约束校验、链式 baseline placement、Manhattan routing 和指标统计；增强 B*-tree、DP routing 与模拟退火将在后续阶段实现。
 
-## 构建与运行
+## 环境要求
 
-正式构建使用 CMake：
+项目使用 C++20 和 CMake 构建，不依赖 Boost、JSON 库或其他第三方运行库。
+
+| 工具 | 最低要求 | 推荐/已验证版本 | 用途 |
+|------|----------|-----------------|------|
+| CMake | 3.20 | 4.3.3 | 配置项目和生成构建文件 |
+| Ninja | 1.10 | Miniconda/MSYS2 附带版本 | 执行增量构建 |
+| C++ 编译器 | 支持 C++20 | GCC 15.2.0（MinGW-w64） | 编译核心程序和测试 
+
+Windows 推荐使用以下组合：
+
+- CMake：推荐通过 `winget` 安装，安装程序会自动配置命令行入口：
+
+  ```powershell
+  winget install -e --id Kitware.CMake --source winget
+  ```
+
+  也可以从 [CMake 官网](https://cmake.org/download/)下载安装，安装时选择将 CMake 加入 `PATH`。
+- Ninja：可通过 MSYS2、Miniconda 或独立安装获得。
+- MinGW-w64 GCC：确保 `g++.exe` 所在目录已加入 `PATH`。
+
+安装完成后新开一个 PowerShell，检查环境：
 
 ```powershell
-cmake -S . -B build -G Ninja
+cmake --version
+ninja --version
+g++ --version
+```
+
+若命令仍提示“无法识别”，关闭并重新打开终端，使新的 `PATH` 生效。
+
+## 构建项目
+
+在仓库根目录执行：
+
+```powershell
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
+```
+
+构建完成后，Windows 可执行文件位于：
+
+```text
+build/sapr.exe
+build/sapr_tests.exe
+```
+
+重新构建时直接执行 `cmake --build build` 即可。需要完全重新配置时，可以删除 `build` 目录后再次运行上述命令。
+
+## 运行测试
+
+```powershell
 ctest --test-dir build --output-on-failure
 ```
 
-当前 Windows 环境也可直接使用 MinGW：
+当前测试包括输入解析、约束校验、几何变换、增强 B*-tree 基础结构、baseline placement、Manhattan routing、CLI 校验及端到端输出。
+
+## 运行程序
+
+验证输入文件：
 
 ```powershell
-g++ -std=c++20 -Wall -Wextra -Wpedantic -Iinclude src/*.cpp -o build/sapr.exe
-build/sapr.exe validate --input input
-build/sapr.exe run --input input --output output
+.\build\sapr.exe validate --input input
+```
+
+输入合法时输出：
+
+```text
+OK
+```
+
+运行 baseline 布局布线：
+
+```powershell
+.\build\sapr.exe run --input input --output output
+```
+
+指定器件间距和单行最大宽度：
+
+```powershell
+.\build\sapr.exe run `
+  --input input `
+  --output output `
+  --spacing 5 `
+  --row-width 40
+```
+
+程序会生成：
+
+- `output/placement.txt`：器件放置位置、角度和朝向。
+- `output/routing.txt`：线网、金属层、中心线坐标和线宽。
+- 标准输出：面积、线长、bend、via 和 penalty 指标。
+
+## 不使用 CMake 的临时编译方式
+
+仅用于快速排查编译环境，不建议作为日常构建方式：
+
+```powershell
+New-Item -ItemType Directory -Force build | Out-Null
+g++ -std=c++20 -Wall -Wextra -Wpedantic -Iinclude `
+  src/constraints.cpp src/geometry.cpp src/io.cpp `
+  src/optimizer.cpp src/router.cpp src/tree.cpp src/main.cpp `
+  -o build/sapr.exe
 ```
 
 ## IO 格式说明 v2
