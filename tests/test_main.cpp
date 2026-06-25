@@ -13,6 +13,8 @@ int main() {
         run_constraint_tests();
         std::cout << "[test] router\n";
         run_router_tests();
+        std::cout << "[test] routing evaluator\n";
+        run_routing_evaluator_tests();
         std::cout << "All tests passed\n";
         return 0;
     } catch (const std::exception& error) {

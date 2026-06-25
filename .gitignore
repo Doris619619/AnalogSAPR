@@ -11,6 +11,7 @@ Makefile
 *.obj
 *.a
 *.lib
+output/cpp_stage*/
 
 # IDE and local files
 .idea/

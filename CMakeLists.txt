@@ -11,7 +11,17 @@ add_library(sapr_core STATIC
     src/geometry.cpp
     src/io.cpp
     src/optimizer.cpp
+    src/routing/astar.cpp
+    src/routing/geometry.cpp
+    src/routing/global_router.cpp
+    src/routing/grid.cpp
+    src/routing/layer.cpp
+    src/routing/obstacle.cpp
+    src/routing/routing_context.cpp
+    src/routing/topology.cpp
+    src/routing/transform.cpp
     src/router.cpp
+    src/routing_evaluator.cpp
     src/tree.cpp
 )
 target_include_directories(sapr_core PUBLIC include)
@@ -36,6 +46,7 @@ if(BUILD_TESTING)
         tests/test_main.cpp
         tests/test_constraints.cpp
         tests/test_io.cpp
+        tests/test_routing_evaluator.cpp
         tests/test_router.cpp
     )
     target_link_libraries(sapr_tests PRIVATE sapr_core)

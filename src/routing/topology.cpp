@@ -1,0 +1,118 @@
+#include "sapr/routing/topology.hpp"
+
+#include <set>
+#include <sstream>
+#include <string>
+
+#include "sapr/routing/astar.hpp"
+
+namespace sapr::routing {
+namespace {
+
+std::string path_signature(const GridPath& path) {
+    std::ostringstream output;
+    for (const auto& point : path.points) {
+        output << point.ix << "," << point.iy << "," << point.layer << ";";
+    }
+    return output.str();
+}
+
+std::vector<AStarConfig> candidate_astar_configs() {
+    return {
+        AStarConfig{1.0, 3.0, 5.0, 200000},
+        AStarConfig{1.0, 8.0, 5.0, 200000},
+        AStarConfig{1.0, 3.0, 12.0, 200000},
+        AStarConfig{1.0, 1.0, 3.0, 200000},
+    };
+}
+
+const GlobalPin* find_global_pin(const RoutingContext& context, const std::string& terminal) {
+    const auto pin_it = context.global_pins().find(terminal);
+    if (pin_it == context.global_pins().end()) {
+        return nullptr;
+    }
+    return &pin_it->second;
+}
+
+std::vector<std::string> ordered_net_names(const Circuit& circuit) {
+    if (!circuit.net_order.empty()) {
+        return circuit.net_order;
+    }
+    std::vector<std::string> names;
+    names.reserve(circuit.nets.size());
+    for (const auto& [name, _] : circuit.nets) {
+        names.push_back(name);
+    }
+    return names;
+}
+
+}  // namespace
+
+std::vector<RouteCandidate> generate_route_candidates(
+    const Circuit& circuit,
+    const RoutingContext& context,
+    const CandidateConfig& config) {
+    std::vector<RouteCandidate> candidates;
+    const auto& grid = context.grid();
+    const auto& obstacles = context.obstacles();
+
+    for (const auto& net_name : ordered_net_names(circuit)) {
+        const auto net_it = circuit.nets.find(net_name);
+        if (net_it == circuit.nets.end()) {
+            continue;
+        }
+        const Net& net = net_it->second;
+        if (net.terminals.size() < 2) {
+            continue;
+        }
+
+        const std::string& root_terminal = net.terminals.front();
+        const GlobalPin* root_pin = find_global_pin(context, root_terminal);
+        if (root_pin == nullptr) {
+            candidates.push_back(RouteCandidate{net_name, root_terminal, "", GridPath{false, "root terminal has no global pin", {}, {}}});
+            continue;
+        }
+
+        for (std::size_t terminal_index = 1; terminal_index < net.terminals.size(); ++terminal_index) {
+            const std::string& target_terminal = net.terminals[terminal_index];
+            const GlobalPin* target_pin = find_global_pin(context, target_terminal);
+            if (target_pin == nullptr) {
+                candidates.push_back(RouteCandidate{net_name, root_terminal, target_terminal, GridPath{false, "target terminal has no global pin", {}, {}}});
+                continue;
+            }
+
+            const GridPoint start = grid.snap_to_grid(root_pin->location, root_pin->layer);
+            const GridPoint goal = grid.snap_to_grid(target_pin->location, target_pin->layer);
+            std::set<std::string> seen_paths;
+            int emitted = 0;
+            GridPath first_failure;
+            bool has_failure = false;
+            for (const auto& astar_config : candidate_astar_configs()) {
+                if (emitted >= config.max_candidates_per_pair) {
+                    break;
+                }
+                GridPath path = find_astar_path(grid, obstacles, start, goal, astar_config);
+                if (!path.success) {
+                    if (!has_failure) {
+                        first_failure = path;
+                        has_failure = true;
+                    }
+                    continue;
+                }
+
+                const std::string signature = path_signature(path);
+                if (seen_paths.insert(signature).second) {
+                    candidates.push_back(RouteCandidate{net_name, root_terminal, target_terminal, path});
+                    ++emitted;
+                }
+            }
+            if (emitted == 0 && has_failure) {
+                candidates.push_back(RouteCandidate{net_name, root_terminal, target_terminal, first_failure});
+            }
+        }
+    }
+
+    return candidates;
+}
+
+}  // namespace sapr::routing
