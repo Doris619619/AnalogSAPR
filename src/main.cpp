@@ -34,11 +34,30 @@ double option_double(const std::vector<std::string>& args, const std::string& op
     return parsed;
 }
 
+// 将字符串严格解析为 int 参数。
+int option_int(const std::vector<std::string>& args, const std::string& option, int fallback) {
+    const std::string value = option_value(args, option, "");
+    if (value.empty()) return fallback;
+    std::size_t consumed = 0;
+    const int parsed = std::stoi(value, &consumed);
+    if (consumed != value.size()) throw std::runtime_error("invalid value for " + option + ": " + value);
+    return parsed;
+}
+
+// 将字符串严格解析为 unsigned int 参数。
+unsigned int option_uint(const std::vector<std::string>& args, const std::string& option, unsigned int fallback) {
+    const int parsed = option_int(args, option, static_cast<int>(fallback));
+    if (parsed < 0) throw std::runtime_error("invalid value for " + option + ": must be non-negative");
+    return static_cast<unsigned int>(parsed);
+}
+
 // 输出 CLI 使用说明。
 void print_usage() {
     std::cerr << "Usage:\n"
               << "  sapr validate [--input input]\n"
-              << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n";
+              << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n"
+              << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
+              << "           [--cooling-rate 0.96]\n";
 }
 
 // 执行输入校验命令。
@@ -54,11 +73,18 @@ int run_validate(const std::vector<std::string>& args) {
     return 1;
 }
 
-// 执行 baseline 求解并输出结果与指标。
+// 执行论文 placement-aware 求解并输出结果与指标。
 int run_solver(const std::vector<std::string>& args) {
     const auto input = std::filesystem::path(option_value(args, "--input", "input"));
     const auto output = std::filesystem::path(option_value(args, "--output", "output"));
-    const sapr::SolverConfig config{option_double(args, "--spacing", 5.0), option_double(args, "--row-width", 40.0), 1};
+    sapr::SolverConfig config;
+    config.spacing = option_double(args, "--spacing", config.spacing);
+    config.row_width = option_double(args, "--row-width", config.row_width);
+    config.seed = option_uint(args, "--seed", config.seed);
+    config.sa_iterations = option_int(args, "--sa-iterations", config.sa_iterations);
+    config.initial_temperature = option_double(args, "--initial-temperature", config.initial_temperature);
+    config.cooling_rate = option_double(args, "--cooling-rate", config.cooling_rate);
+
     const auto circuit = sapr::load_circuit(input);
     const auto solution = sapr::solve_baseline(circuit, config);
     const auto errors = sapr::validate_solution(circuit, solution);
@@ -100,4 +126,3 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 }
-

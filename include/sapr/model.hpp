@@ -1,4 +1,4 @@
-// 定义模拟电路、约束、布局布线结果和评价指标的公共数据模型。
+// 定义模拟电路、约束、增强 B*-tree、布局布线结果和评价指标的公共数据模型。
 #pragma once
 
 #include <optional>
@@ -13,6 +13,9 @@ enum class Priority { Critical, Symmetry, Normal };
 
 // 表示对称约束的轴方向。
 enum class Axis { Vertical, Horizontal };
+
+// 表示增强 B*-tree 中预留布线空间的论文语义。
+enum class SpaceNodeKind { Right, Top, Group, Cluster };
 
 // 表示二维轴对齐矩形。
 struct Rect {
@@ -90,8 +93,8 @@ struct WireWidthConstraint {
 struct Constraints {
     std::vector<SymmetryPair> symmetry_pairs;
     std::vector<SymmetrySelf> symmetry_selfs;
-    std::vector<FlowConstraint> flows;
     std::unordered_map<std::string, WireWidthConstraint> wire_widths;
+    std::vector<FlowConstraint> flows;
 };
 
 // 表示完整的算法输入，并保存稳定的原始顺序。
@@ -141,11 +144,18 @@ struct Metrics {
     double penalty{};
 };
 
-// 配置 baseline 求解器的确定性参数。
+// 配置求解器的确定性参数和论文代价函数权重。
 struct SolverConfig {
     double spacing{5.0};
     double row_width{40.0};
     unsigned int seed{1};
+    int sa_iterations{250};
+    double initial_temperature{5.0};
+    double cooling_rate{0.96};
+    double area_weight{1.0};
+    double wirelength_weight{1.0};
+    double bend_weight{0.2};
+    double via_weight{0.2};
 };
 
 // 表示 linking-control point 连接的一条逻辑线段。
@@ -166,11 +176,11 @@ struct LinkingControlPoint {
     [[nodiscard]] double required_width() const;
 };
 
-// 表示器件右侧或上侧的预留布线空间。
+// 表示器件右侧、上侧或对称组内的预留布线空间。
 struct SpaceNode {
     std::string id;
     std::string owner;
-    std::string kind;
+    SpaceNodeKind kind{SpaceNodeKind::Right};
     std::vector<LinkingControlPoint> linking_points;
 
     // 按论文公式计算该空间节点需要预留的宽度。
@@ -180,6 +190,7 @@ struct SpaceNode {
 // 表示增强 B*-tree 的一个器件节点。
 struct BStarNode {
     std::string module;
+    std::optional<std::string> parent;
     std::optional<std::string> left;
     std::optional<std::string> right;
     int angle{};
@@ -187,11 +198,37 @@ struct BStarNode {
     SpaceNode top_space;
 };
 
+// 表示一个 ASF-B*-tree 对称组在主树中的约束摘要。
+struct SymmetryGroupNode {
+    std::string name;
+    Axis axis{Axis::Vertical};
+    std::string representative;
+    std::optional<std::string> mirror;
+    bool self_symmetric{};
+    SpaceNode space_group;
+    SpaceNode space_cluster;
+};
+
+// 表示一次候选布局的路由侧评价输入。
+struct RoutingEvaluationRequest {
+    std::unordered_map<std::string, Placement> placements;
+    std::vector<std::string> placement_order;
+    std::vector<SpaceNode> space_nodes;
+};
+
+// 表示路由 adapter 返回给 placement/SA 的反馈。
+struct RoutingFeedback {
+    std::vector<RouteSegment> routes;
+    Metrics metrics;
+    std::unordered_map<std::string, double> required_space_by_node;
+};
+
 // 表示当前阶段的增强 B*-tree 拓扑。
 struct EnhancedBStarTree {
     std::optional<std::string> root;
     std::unordered_map<std::string, BStarNode> nodes;
+    std::vector<std::string> representative_order;
+    std::vector<SymmetryGroupNode> symmetry_groups;
 };
 
 }  // namespace sapr
-

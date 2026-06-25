@@ -1,26 +1,42 @@
-// 实现器件旋转后的尺寸与引脚全局坐标计算。
+// 实现器件旋转、镜像后的尺寸与引脚全局坐标计算。
 #include "sapr/geometry.hpp"
 
 #include <stdexcept>
 
 namespace sapr {
 
-// 计算引脚经过器件旋转和平移后的全局坐标。
+// 计算引脚经过器件旋转、镜像和平移后的全局坐标。
 std::pair<double, double> placed_pin(const Module& module, const Pin& pin, const Placement& placement) {
     double x = pin.x;
     double y = pin.y;
-    switch ((placement.angle % 360 + 360) % 360) {
-        case 0: break;
-        case 90: x = module.height - pin.y; y = pin.x; break;
-        case 180: x = module.width - pin.x; y = module.height - pin.y; break;
-        case 270: x = pin.y; y = module.width - pin.x; break;
-        default: throw std::runtime_error("unsupported placement angle: " + std::to_string(placement.angle));
+    if (placement.orient == "MX") {
+        y = module.height - y;
+    } else if (placement.orient == "MY") {
+        x = module.width - x;
+    } else if (placement.orient == "MXR90") {
+        const double reflected_y = module.height - y;
+        x = module.height - reflected_y;
+        y = pin.x;
+    } else if (placement.orient == "MYR90") {
+        const double reflected_x = module.width - x;
+        x = pin.y;
+        y = module.width - reflected_x;
+    } else {
+        switch ((placement.angle % 360 + 360) % 360) {
+            case 0: break;
+            case 90: x = module.height - pin.y; y = pin.x; break;
+            case 180: x = module.width - pin.x; y = module.height - pin.y; break;
+            case 270: x = pin.y; y = module.width - pin.x; break;
+            default: throw std::runtime_error("unsupported placement angle: " + std::to_string(placement.angle));
+        }
     }
     return {placement.x + x, placement.y + y};
 }
 
-// 返回器件旋转后的宽度和高度。
+// 返回器件旋转或镜像后的宽度和高度。
 std::pair<double, double> placed_size(const Module& module, const Placement& placement) {
+    if (placement.orient == "MX" || placement.orient == "MY") return {module.width, module.height};
+    if (placement.orient == "MXR90" || placement.orient == "MYR90") return {module.height, module.width};
     const int angle = (placement.angle % 360 + 360) % 360;
     if (angle == 0 || angle == 180) return {module.width, module.height};
     if (angle == 90 || angle == 270) return {module.height, module.width};
@@ -28,4 +44,3 @@ std::pair<double, double> placed_size(const Module& module, const Placement& pla
 }
 
 }  // namespace sapr
-
