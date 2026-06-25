@@ -23,6 +23,12 @@ std::vector<SpaceNode> collect_space_nodes(const EnhancedBStarTree& tree);
 // 检查增强 B*-tree 是否仍是单根、无环且 parent/child 关系一致。
 bool is_valid_tree(const EnhancedBStarTree& tree);
 
+// 检查所有自对称代表是否位于主树的 right-most branch。
+bool self_symmetry_on_rightmost_branch(const EnhancedBStarTree& tree);
+
+// 将 routing adapter 返回的资源预留反馈写回对应 space node。
+void apply_routing_feedback(EnhancedBStarTree& tree, const RoutingFeedback& feedback);
+
 // 对增强 B*-tree 执行一次论文 placement 侧扰动：delete-insert、swap 或 rotate。
 void perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937& rng);
 

@@ -1,13 +1,10 @@
-// 实现论文增强 B*-tree、ASF 对称组摘要、space node 公式和 placement 扰动。
+// 实现论文增强 B*-tree、ASF 对称组、space node 公式、LCP 拓扑和 placement 扰动。
 #include "sapr/tree.hpp"
 
 #include <algorithm>
 #include <functional>
 #include <stdexcept>
-#include <unordered_map>
 #include <unordered_set>
-
-#include "sapr/router.hpp"
 
 namespace sapr {
 namespace {
@@ -19,7 +16,7 @@ std::pair<double, double> width_range_for_net(const Circuit& circuit, const std:
     return {found->second.min_width, found->second.max_width};
 }
 
-// 返回线段在 FLOW 约束中的方向标记，供后续 routing 侧常数时间检查使用。
+// 返回线段在 FLOW 约束中的方向标记，供 routing 侧常数时间检查使用。
 std::optional<std::string> flow_direction_for_net(const Circuit& circuit, const std::string& net) {
     for (const auto& flow : circuit.constraints.flows) {
         if (flow.net == net) return flow.out_pin + "->" + flow.in_pin;
@@ -27,27 +24,41 @@ std::optional<std::string> flow_direction_for_net(const Circuit& circuit, const 
     return std::nullopt;
 }
 
-// 为模块创建论文中的右侧和上侧 space node。
+// 判断线网是否触碰指定模块。
+bool net_touches_module(const Net& net, const std::string& module) {
+    for (const auto& terminal : net.terminals) {
+        const auto dot = terminal.find('.');
+        if (dot != std::string::npos && terminal.substr(0, dot) == module) return true;
+    }
+    return false;
+}
+
+// 根据线网端点生成 LCP 逻辑线段，保证每个 LCP 至少连接两个同网段。
+std::vector<WireSegmentRef> make_segments_for_net(const Circuit& circuit, const Net& net, const std::string& lcp_id) {
+    std::vector<WireSegmentRef> segments;
+    if (net.terminals.size() < 2) return segments;
+    const auto [min_width, max_width] = width_range_for_net(circuit, net.name);
+    const auto direction = flow_direction_for_net(circuit, net.name);
+    const std::string root = net.terminals.front();
+    for (std::size_t index = 1; index < net.terminals.size(); ++index) {
+        segments.push_back({net.name, root, lcp_id, min_width, max_width, direction});
+        segments.push_back({net.name, lcp_id, net.terminals[index], min_width, max_width, direction});
+    }
+    return segments;
+}
+
+// 为模块创建论文中的右侧和上侧 space node，并初始化触碰线网的 LCP。
 BStarNode make_node(const Circuit& circuit, const std::string& module) {
     BStarNode node;
     node.module = module;
-    node.right_space = {module + ":right", module, SpaceNodeKind::Right, {}};
-    node.top_space = {module + ":top", module, SpaceNodeKind::Top, {}};
+    node.right_space = {module + ":right", module, SpaceNodeKind::Right, {}, 0.0};
+    node.top_space = {module + ":top", module, SpaceNodeKind::Top, {}, 0.0};
     for (const auto& net_name : circuit.net_order) {
         const auto& net = circuit.nets.at(net_name);
-        bool touches_module = false;
-        for (const auto& terminal : net.terminals) {
-            const auto dot = terminal.find('.');
-            if (dot != std::string::npos && terminal.substr(0, dot) == module) {
-                touches_module = true;
-                break;
-            }
-        }
-        if (!touches_module || net.terminals.size() < 2) continue;
-        const auto [min_width, max_width] = width_range_for_net(circuit, net_name);
-        LinkingControlPoint point{module + ":" + net_name + ":lcp", node.right_space.id,
-                                  {{net_name, min_width, max_width, flow_direction_for_net(circuit, net_name)}}};
-        node.right_space.linking_points.push_back(std::move(point));
+        if (!net_touches_module(net, module) || net.terminals.size() < 2) continue;
+        const std::string lcp_id = module + ":" + net_name + ":lcp";
+        LinkingControlPoint point{lcp_id, node.right_space.id, make_segments_for_net(circuit, net, lcp_id), {}};
+        if (point.segments.size() >= 2) node.right_space.linking_points.push_back(std::move(point));
     }
     return node;
 }
@@ -62,8 +73,16 @@ void attach_child(EnhancedBStarTree& tree, const std::string& parent, const std:
     tree.nodes.at(child).parent = parent;
 }
 
-// 根据代表节点顺序重建一棵交替使用左/右孩子的确定性树。
-void rebuild_balanced_chain(EnhancedBStarTree& tree) {
+// 返回当前代表是否为自对称模块。
+bool is_self_module(const EnhancedBStarTree& tree, const std::string& module) {
+    for (const auto& group : tree.symmetry_groups) {
+        if (group.self_symmetric && group.representative == module) return true;
+    }
+    return false;
+}
+
+// 按 ASF 约束重建主树，并把自对称模块固定到 right-most branch。
+void rebuild_asf_tree(EnhancedBStarTree& tree) {
     for (auto& [id, node] : tree.nodes) {
         (void)id;
         node.parent.reset();
@@ -71,12 +90,31 @@ void rebuild_balanced_chain(EnhancedBStarTree& tree) {
         node.right.reset();
     }
     tree.root.reset();
+
+    std::vector<std::string> ordinary;
+    std::vector<std::string> selfs;
+    for (const auto& id : tree.representative_order) {
+        if (is_self_module(tree, id)) {
+            selfs.push_back(id);
+        } else {
+            ordinary.push_back(id);
+        }
+    }
+    tree.representative_order.clear();
+    tree.representative_order.insert(tree.representative_order.end(), ordinary.begin(), ordinary.end());
+    tree.representative_order.insert(tree.representative_order.end(), selfs.begin(), selfs.end());
     if (tree.representative_order.empty()) return;
-    tree.root = tree.representative_order.front();
-    for (std::size_t index = 1; index < tree.representative_order.size(); ++index) {
-        const std::string& parent = tree.representative_order[(index - 1) / 2];
-        const std::string& child = tree.representative_order[index];
-        attach_child(tree, parent, child, index % 2 == 1);
+
+    tree.root = ordinary.empty() ? selfs.front() : ordinary.front();
+    for (std::size_t index = 1; index < ordinary.size(); ++index) {
+        attach_child(tree, ordinary[index - 1], ordinary[index], true);
+    }
+
+    std::string right_parent = *tree.root;
+    for (const auto& self : selfs) {
+        if (self == *tree.root) continue;
+        attach_child(tree, right_parent, self, false);
+        right_parent = self;
     }
 }
 
@@ -95,6 +133,14 @@ std::size_t reachable_count(const EnhancedBStarTree& tree) {
     return seen.size();
 }
 
+// 给匹配的 space node 写入 routing resource 反馈。
+bool update_space_node(SpaceNode& space, const RoutingFeedback& feedback) {
+    const auto found = feedback.required_space_by_node.find(space.id);
+    if (found == feedback.required_space_by_node.end()) return false;
+    space.allocated_space = std::max(space.allocated_space, found->second);
+    return true;
+}
+
 }  // namespace
 
 // 返回该控制点需要的最大线宽。
@@ -106,11 +152,12 @@ double LinkingControlPoint::required_width() const {
 
 // 按论文公式计算该空间节点需要预留的宽度。
 double SpaceNode::required_space() const {
-    double result = 0.0;
+    double result = allocated_space;
+    double formula = 0.0;
     for (const auto& point : linking_points) {
-        result += point.required_width() * static_cast<double>(std::max<std::size_t>(point.segments.size(), 2)) / 2.0;
+        formula += point.required_width() * static_cast<double>(std::max<std::size_t>(point.segments.size(), 2)) / 2.0;
     }
-    return result;
+    return std::max(result, formula);
 }
 
 // 返回 space node 类型的稳定文本名称，供调试和测试使用。
@@ -142,8 +189,10 @@ EnhancedBStarTree make_enhanced_tree(const Circuit& circuit) {
                                         pair.left,
                                         pair.right,
                                         false,
-                                        {pair.name + ":space_group", pair.left, SpaceNodeKind::Group, {}},
-                                        {pair.name + ":space_cluster", pair.left, SpaceNodeKind::Cluster, {}}});
+                                        {pair.left},
+                                        std::nullopt,
+                                        {pair.name + ":space_group", pair.left, SpaceNodeKind::Group, {}, 0.0},
+                                        {pair.name + ":space_cluster", pair.left, SpaceNodeKind::Cluster, {}, 0.0}});
     }
     for (const auto& self : circuit.constraints.symmetry_selfs) {
         tree.symmetry_groups.push_back({self.name,
@@ -151,11 +200,13 @@ EnhancedBStarTree make_enhanced_tree(const Circuit& circuit) {
                                         self.module,
                                         std::nullopt,
                                         true,
-                                        {self.name + ":space_group", self.module, SpaceNodeKind::Group, {}},
-                                        {self.name + ":space_cluster", self.module, SpaceNodeKind::Cluster, {}}});
+                                        {self.module},
+                                        self.module,
+                                        {self.name + ":space_group", self.module, SpaceNodeKind::Group, {}, 0.0},
+                                        {self.name + ":space_cluster", self.module, SpaceNodeKind::Cluster, {}, 0.0}});
     }
 
-    rebuild_balanced_chain(tree);
+    rebuild_asf_tree(tree);
     return tree;
 }
 
@@ -202,7 +253,34 @@ bool is_valid_tree(const EnhancedBStarTree& tree) {
             if (tree.nodes.at(*child).parent != id) return false;
         }
     }
-    return reachable_count(tree) == tree.representative_order.size();
+    return reachable_count(tree) == tree.representative_order.size() && self_symmetry_on_rightmost_branch(tree);
+}
+
+// 检查所有自对称代表是否位于主树的 right-most branch。
+bool self_symmetry_on_rightmost_branch(const EnhancedBStarTree& tree) {
+    std::unordered_set<std::string> right_branch;
+    auto current = tree.root;
+    while (current.has_value()) {
+        right_branch.insert(*current);
+        current = tree.nodes.at(*current).right;
+    }
+    for (const auto& group : tree.symmetry_groups) {
+        if (group.self_symmetric && !right_branch.contains(group.representative)) return false;
+    }
+    return true;
+}
+
+// 将 routing adapter 返回的资源预留反馈写回对应 space node。
+void apply_routing_feedback(EnhancedBStarTree& tree, const RoutingFeedback& feedback) {
+    for (auto& [id, node] : tree.nodes) {
+        (void)id;
+        update_space_node(node.right_space, feedback);
+        update_space_node(node.top_space, feedback);
+    }
+    for (auto& group : tree.symmetry_groups) {
+        update_space_node(group.space_group, feedback);
+        update_space_node(group.space_cluster, feedback);
+    }
 }
 
 // 对增强 B*-tree 执行一次论文 placement 侧扰动：delete-insert、swap 或 rotate。
@@ -216,7 +294,7 @@ void perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937& rng) {
         auto second = index_dist(rng);
         if (first == second) second = (second + 1) % tree.representative_order.size();
         std::swap(tree.representative_order[first], tree.representative_order[second]);
-        rebuild_balanced_chain(tree);
+        rebuild_asf_tree(tree);
     } else if (move == 1 && tree.representative_order.size() > 1) {
         std::uniform_int_distribution<std::size_t> index_dist(0, tree.representative_order.size() - 1);
         const auto from = index_dist(rng);
@@ -225,7 +303,7 @@ void perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937& rng) {
         const auto id = tree.representative_order[from];
         tree.representative_order.erase(tree.representative_order.begin() + static_cast<std::ptrdiff_t>(from));
         tree.representative_order.insert(tree.representative_order.begin() + static_cast<std::ptrdiff_t>(to), id);
-        rebuild_balanced_chain(tree);
+        rebuild_asf_tree(tree);
     } else {
         std::uniform_int_distribution<std::size_t> index_dist(0, tree.representative_order.size() - 1);
         auto& node = tree.nodes.at(tree.representative_order[index_dist(rng)]);

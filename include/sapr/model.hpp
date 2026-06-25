@@ -135,13 +135,17 @@ struct Solution {
     std::vector<RouteSegment> routes;
 };
 
-// 表示当前解的基础评价指标。
+// 表示当前解的基础评价指标和论文约束违例统计。
 struct Metrics {
     double area{};
     double wirelength{};
     int bend_count{};
     int via_count{};
     double penalty{};
+    int flow_violations{};
+    int current_density_violations{};
+    int routing_failures{};
+    double congestion_penalty{};
 };
 
 // 配置求解器的确定性参数和论文代价函数权重。
@@ -161,9 +165,17 @@ struct SolverConfig {
 // 表示 linking-control point 连接的一条逻辑线段。
 struct WireSegmentRef {
     std::string net;
+    std::string from;
+    std::string to;
     double min_width{};
     double max_width{};
     std::optional<std::string> direction;
+};
+
+// 表示 linking-control point 在所属 space node 内的候选物理位置。
+struct PhysicalLocationCandidate {
+    double x{};
+    double y{};
 };
 
 // 表示增强 B*-tree 中的拓扑控制点。
@@ -171,6 +183,7 @@ struct LinkingControlPoint {
     std::string id;
     std::string space_node_id;
     std::vector<WireSegmentRef> segments;
+    std::vector<PhysicalLocationCandidate> location_candidates;
 
     // 返回该控制点需要的最大线宽。
     [[nodiscard]] double required_width() const;
@@ -182,6 +195,7 @@ struct SpaceNode {
     std::string owner;
     SpaceNodeKind kind{SpaceNodeKind::Right};
     std::vector<LinkingControlPoint> linking_points;
+    double allocated_space{};
 
     // 按论文公式计算该空间节点需要预留的宽度。
     [[nodiscard]] double required_space() const;
@@ -198,15 +212,27 @@ struct BStarNode {
     SpaceNode top_space;
 };
 
-// 表示一个 ASF-B*-tree 对称组在主树中的约束摘要。
+// 表示一个 ASF-B*-tree 对称组在主树中的层次约束摘要。
 struct SymmetryGroupNode {
     std::string name;
     Axis axis{Axis::Vertical};
     std::string representative;
     std::optional<std::string> mirror;
     bool self_symmetric{};
+    std::vector<std::string> stored_modules;
+    std::optional<std::string> right_most_module;
     SpaceNode space_group;
     SpaceNode space_cluster;
+};
+
+// 表示路由评价时已经展开到全局坐标的引脚。
+struct PlacedPin {
+    std::string key;
+    std::string module;
+    std::string pin;
+    double x{};
+    double y{};
+    std::string layer;
 };
 
 // 表示一次候选布局的路由侧评价输入。
@@ -214,6 +240,9 @@ struct RoutingEvaluationRequest {
     std::unordered_map<std::string, Placement> placements;
     std::vector<std::string> placement_order;
     std::vector<SpaceNode> space_nodes;
+    std::vector<PlacedPin> placed_pins;
+    std::vector<LinkingControlPoint> linking_points;
+    std::vector<Rect> active_region_blockers;
 };
 
 // 表示路由 adapter 返回给 placement/SA 的反馈。

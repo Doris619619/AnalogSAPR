@@ -91,6 +91,27 @@ PR 应该偏“本次改了什么”，可以使用下面结构：
 
 说明改动了那些文件，新增了什么函数，这个函数有什么作用，简要说明即可。要有代码树状图（这样比较清晰）。新增的文件要标注新增。
 
+样例：
+KnowledgePilot/
+├─ apps/
+│  ├─ web/
+│  │  └─ src/app/
+│  │     ├─ page.tsx                       # 开发环境跳过登录，问答请求走 /api/ask
+│  │     └─ api/ask/route.ts               # 新增：本地问答演示 API Route
+│  └─ api/
+│     └─ src/
+│        ├─ common/
+│        │  ├─ app-env.ts                  # 增加开发开关，修正布尔 env 解析
+│        │  ├─ redis.service.ts            # 开发环境 Redis 不可用时降级
+│        │  ├─ prisma.service.ts           # 开发环境数据库不可用时降级
+│        │  └─ object-storage.service.ts   # 开发环境对象存储不可用时降级
+│        └─ modules/
+│           ├─ auth/user-access-token.guard.ts # 开发环境可跳过 QA 鉴权
+│           ├─ qa/qa.service.ts                # 开发环境直连问答 fallback
+│           └─ search/search.service.ts        # 增加开放搜索方法
+├─ scripts/dev/start-local-api.cmd          # 新增：本地 API 启动辅助脚本
+└─ 启动文件.md                              # 新增：启动排障记录
+
 ## 技术内容要求
 
 - 结论要明确，不要模糊说“可能”“似乎”，除非确实不确定。
