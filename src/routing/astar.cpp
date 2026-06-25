@@ -1,3 +1,4 @@
+// 文件职责：实现多层网格上的 A* 单对端点寻路。
 #include "sapr/routing/astar.hpp"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 namespace sapr::routing {
 namespace {
 
+// 表示到达当前网格点时最后一步的移动方向。
 enum class Direction {
     None = 0,
     Left = 1,
@@ -19,16 +21,19 @@ enum class Direction {
     Via = 5,
 };
 
+// 表示 A* 搜索状态，包含位置和进入方向。
 struct SearchState {
     GridPoint point;
     Direction direction{Direction::None};
 };
 
+// 表示优先队列中的候选状态。
 struct QueueNode {
     SearchState state;
     double priority{};
 };
 
+// 记录某个状态的累计代价、前驱和路径指标。
 struct StateRecord {
     double g_cost{std::numeric_limits<double>::infinity()};
     SearchState previous;
@@ -36,12 +41,14 @@ struct StateRecord {
     PathMetrics metrics;
 };
 
+// 让优先队列按较小总代价优先弹出。
 struct QueueCompare {
     bool operator()(const QueueNode& lhs, const QueueNode& rhs) const {
         return lhs.priority > rhs.priority;
     }
 };
 
+// 将搜索状态编码为哈希表使用的整数 key。
 std::int64_t state_key(const SearchState& state, const Grid& grid) {
     const std::int64_t direction = static_cast<std::int64_t>(state.direction);
     const std::int64_t layer = static_cast<std::int64_t>(state.point.layer);
@@ -50,10 +57,12 @@ std::int64_t state_key(const SearchState& state, const Grid& grid) {
     return (((ix * grid.y_count() + iy) * grid.layer_count() + layer) * 8) + direction;
 }
 
+// 判断两个网格点是否相同。
 bool same_point(const GridPoint& lhs, const GridPoint& rhs) {
     return lhs.ix == rhs.ix && lhs.iy == rhs.iy && lhs.layer == rhs.layer;
 }
 
+// 根据相邻网格点推导移动方向。
 Direction direction_between(const GridPoint& from, const GridPoint& to) {
     if (from.layer != to.layer) return Direction::Via;
     if (to.ix < from.ix) return Direction::Left;
@@ -63,6 +72,7 @@ Direction direction_between(const GridPoint& from, const GridPoint& to) {
     return Direction::None;
 }
 
+// 判断方向变化是否构成平面拐弯。
 bool is_bend(Direction previous, Direction current) {
     if (previous == Direction::None || previous == Direction::Via || current == Direction::Via) {
         return false;
@@ -70,12 +80,14 @@ bool is_bend(Direction previous, Direction current) {
     return previous != current;
 }
 
+// 估计当前点到目标点的乐观剩余代价。
 double heuristic(const GridPoint& current, const GridPoint& goal, const Grid& grid, const AStarConfig& config) {
     const double planar = (std::abs(current.ix - goal.ix) + std::abs(current.iy - goal.iy)) * grid.step();
     const int layer_distance = std::abs(current.layer - goal.layer);
     return config.wirelength_weight * planar + config.via_weight * static_cast<double>(layer_distance);
 }
 
+// 从目标状态沿前驱记录回溯完整路径。
 GridPath reconstruct_path(
     const SearchState& goal_state,
     const std::unordered_map<std::int64_t, StateRecord>& records,
@@ -107,6 +119,7 @@ GridPath reconstruct_path(
 
 }  // namespace
 
+// 在网格中从 start 到 goal 执行 A* 搜索。
 GridPath find_astar_path(
     const Grid& grid,
     const ObstacleMap& obstacles,

@@ -1,3 +1,4 @@
+// 文件职责：实现由 Circuit 和 placement 构建多层布线环境的逻辑。
 #include "sapr/routing/routing_context.hpp"
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 namespace sapr::routing {
 namespace {
 
+// 将一个点纳入连续坐标边界统计。
 void include_point(Point point, double& min_x, double& min_y, double& max_x, double& max_y, bool& has_bounds) {
     if (!has_bounds) {
         min_x = max_x = point.x;
@@ -22,6 +24,7 @@ void include_point(Point point, double& min_x, double& min_y, double& max_x, dou
     max_y = std::max(max_y, point.y);
 }
 
+// 将一个矩形纳入连续坐标边界统计。
 void include_rect(Rect rect, double& min_x, double& min_y, double& max_x, double& max_y, bool& has_bounds) {
     const Rect normalized = normalize_rect(rect);
     include_point(Point{normalized.x1, normalized.y1}, min_x, min_y, max_x, max_y, has_bounds);
@@ -30,6 +33,7 @@ void include_rect(Rect rect, double& min_x, double& min_y, double& max_x, double
 
 }  // namespace
 
+// 构建网格、障碍物、全局 pin 和 terminal 例外点。
 RoutingContext::RoutingContext(
     const Circuit& circuit,
     const std::unordered_map<std::string, Placement>& placements,
@@ -101,6 +105,7 @@ RoutingContext::RoutingContext(
     }
 }
 
+// 返回已构建的规则网格。
 const Grid& RoutingContext::grid() const {
     if (!grid_) {
         throw std::runtime_error("RoutingContext grid has not been built");
@@ -108,14 +113,17 @@ const Grid& RoutingContext::grid() const {
     return *grid_;
 }
 
+// 返回障碍物地图。
 const ObstacleMap& RoutingContext::obstacles() const {
     return obstacles_;
 }
 
+// 返回全局 pin 查询表。
 const std::unordered_map<std::string, GlobalPin>& RoutingContext::global_pins() const {
     return global_pins_;
 }
 
+// 根据 WIRE_WIDTH 约束返回 net 默认线宽。
 double RoutingContext::default_width_for_net(const std::string& net) const {
     const auto width_it = circuit_.constraints.wire_widths.find(net);
     if (width_it != circuit_.constraints.wire_widths.end()) {
@@ -124,6 +132,7 @@ double RoutingContext::default_width_for_net(const std::string& net) const {
     return 1.0;
 }
 
+// 返回构建上下文时记录的非致命警告。
 const std::vector<std::string>& RoutingContext::warnings() const {
     return warnings_;
 }

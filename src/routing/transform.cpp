@@ -1,3 +1,4 @@
+// 文件职责：实现器件局部坐标到全局 placement 坐标的转换。
 #include "sapr/routing/transform.hpp"
 
 #include <algorithm>
@@ -8,10 +9,12 @@
 namespace sapr::routing {
 namespace {
 
+// 对局部点执行 X 轴镜像。
 Point reflect_x(const Point& point) {
     return Point{point.x, -point.y};
 }
 
+// 对局部点执行逆时针旋转。
 Point rotate_ccw(const Point& point, int angle) {
     const int normalized = ((angle % 360) + 360) % 360;
     switch (normalized) {
@@ -28,6 +31,7 @@ Point rotate_ccw(const Point& point, int angle) {
     }
 }
 
+// 将 placement 的 orient 解码为是否镜像和旋转角度。
 std::pair<bool, int> decode_orient(const Placement& placement) {
     if (placement.orient == "R0") return {false, 0};
     if (placement.orient == "R90") return {false, 90};
@@ -40,6 +44,7 @@ std::pair<bool, int> decode_orient(const Placement& placement) {
     return {false, placement.angle};
 }
 
+// 将局部矩形四角变换后重新包围成全局轴对齐矩形。
 Rect transform_rect_to_global(const Module& module, const Rect& rect, const Placement& placement) {
     const Rect normalized = normalize_rect(rect);
     const std::array<Point, 4> corners = {
@@ -72,6 +77,7 @@ Rect transform_rect_to_global(const Module& module, const Rect& rect, const Plac
 
 }  // namespace
 
+// 将局部点先镜像、再旋转、最后平移到全局坐标。
 Point transform_local_point_to_global(const Module& module, const Point& local_point, const Placement& placement) {
     (void)module;
     const auto [has_reflection, rotation] = decode_orient(placement);
@@ -83,14 +89,17 @@ Point transform_local_point_to_global(const Module& module, const Point& local_p
     return Point{transformed.x + placement.x, transformed.y + placement.y};
 }
 
+// 将 pin 坐标从器件局部坐标转换为全局坐标。
 Point transform_pin_to_global(const Module& module, const Pin& pin, const Placement& placement) {
     return transform_local_point_to_global(module, Point{pin.x, pin.y}, placement);
 }
 
+// 将器件 active region 转换为全局坐标矩形。
 Rect transform_active_to_global(const Module& module, const Placement& placement) {
     return transform_rect_to_global(module, module.active, placement);
 }
 
+// 将器件外接框转换为全局坐标矩形。
 Rect transform_module_bbox_to_global(const Module& module, const Placement& placement) {
     return transform_rect_to_global(module, Rect{0.0, 0.0, module.width, module.height}, placement);
 }

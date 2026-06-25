@@ -1,3 +1,4 @@
+// 文件职责：实现不计 via cost 的 DP-based global routing 选择逻辑。
 #include "sapr/routing/global_router.hpp"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 namespace sapr::routing {
 namespace {
 
+// 表示同一 net 的同一 terminal pair 候选集合。
 struct CandidateGroup {
     std::string net;
     std::string from_terminal;
@@ -17,6 +19,7 @@ struct CandidateGroup {
     std::vector<RouteCandidate> candidates;
 };
 
+// 将 net 优先级转换为排序权重。
 int priority_rank(Priority priority) {
     switch (priority) {
         case Priority::Critical:
@@ -29,19 +32,23 @@ int priority_rank(Priority priority) {
     return 2;
 }
 
+// 构造 terminal pair 分组 key。
 std::string group_key(const RouteCandidate& candidate) {
     return candidate.net + "|" + candidate.from_terminal + "|" + candidate.to_terminal;
 }
 
+// 将网格点编码为全局占用表 key。
 std::int64_t point_key(const GridPoint& point) {
     return ((static_cast<std::int64_t>(point.ix) * 1000003 + point.iy) * 31) + point.layer;
 }
 
+// 计算候选路径的 DP 代价，不包含 via cost。
 double candidate_dp_cost(const RouteCandidate& candidate, const GlobalRouterConfig& config) {
     return config.wirelength_weight * candidate.path.metrics.wirelength +
            config.bend_weight * static_cast<double>(candidate.path.metrics.bend_count);
 }
 
+// 将路径指标累加到 net 指标中，via 只统计不进入 cost。
 void add_metrics(PathMetrics& target, const PathMetrics& source, const GlobalRouterConfig& config) {
     target.wirelength += source.wirelength;
     target.bend_count += source.bend_count;
@@ -50,6 +57,7 @@ void add_metrics(PathMetrics& target, const PathMetrics& source, const GlobalRou
                   config.bend_weight * static_cast<double>(target.bend_count);
 }
 
+// 将候选路径按 net 和 terminal pair 分组。
 std::vector<CandidateGroup> groups_for_net(const std::string& net_name, const std::vector<RouteCandidate>& candidates) {
     std::vector<CandidateGroup> groups;
     std::unordered_map<std::string, std::size_t> index_by_key;
@@ -75,6 +83,7 @@ std::vector<CandidateGroup> groups_for_net(const std::string& net_name, const st
     return groups;
 }
 
+// 按 priority 和输入顺序返回需要布线的 net。
 std::vector<const Net*> ordered_nets(const Circuit& circuit) {
     std::vector<const Net*> nets;
     if (!circuit.net_order.empty()) {
@@ -97,6 +106,7 @@ std::vector<const Net*> ordered_nets(const Circuit& circuit) {
     return nets;
 }
 
+// 计算候选路径与已选其它 net 路径的网格点冲突惩罚。
 double conflict_penalty(
     const RouteCandidate& candidate,
     const std::unordered_map<std::int64_t, std::string>& occupied_by_net,
@@ -111,12 +121,14 @@ double conflict_penalty(
     return penalty;
 }
 
+// 将选中的候选路径写入全局占用表。
 void occupy_path(const RouteCandidate& candidate, std::unordered_map<std::int64_t, std::string>& occupied_by_net) {
     for (const auto& point : candidate.path.points) {
         occupied_by_net.emplace(point_key(point), candidate.net);
     }
 }
 
+// 从一个 terminal pair group 中选择 DP cost 最低的成功候选。
 const RouteCandidate* choose_best_candidate(
     const CandidateGroup& group,
     const std::unordered_map<std::int64_t, std::string>& occupied_by_net,
@@ -141,6 +153,7 @@ const RouteCandidate* choose_best_candidate(
     return best;
 }
 
+// 拼接失败信息，方便 CLI 或测试输出。
 std::string append_message(const std::string& current, const std::string& next) {
     if (current.empty()) {
         return next;
@@ -150,6 +163,7 @@ std::string append_message(const std::string& current, const std::string& next) 
 
 }  // namespace
 
+// 为所有 net 运行全局路径选择并汇总线长、拐弯、via 和惩罚。
 GlobalRoutingResult run_global_routing(
     const Circuit& circuit,
     const RoutingContext& context,

@@ -52,6 +52,7 @@ unsigned int option_uint(const std::vector<std::string>& args, const std::string
     return static_cast<unsigned int>(parsed);
 }
 
+// 判断某个无值命令行选项是否存在。
 bool has_option(const std::vector<std::string>& args, const std::string& option) {
     for (const auto& arg : args) {
         if (arg == option) return true;

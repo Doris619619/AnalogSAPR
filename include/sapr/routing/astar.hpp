@@ -1,3 +1,4 @@
+// 文件职责：声明基于多层网格和障碍物的 A* 单对端点寻路接口。
 #pragma once
 
 #include "sapr/routing/grid.hpp"
@@ -6,6 +7,7 @@
 
 namespace sapr::routing {
 
+// 表示 A* 搜索的代价权重和搜索规模限制。
 struct AStarConfig {
     double wirelength_weight{1.0};
     double bend_weight{3.0};
@@ -13,6 +15,7 @@ struct AStarConfig {
     int max_expanded_nodes{200000};
 };
 
+// 在多层网格上从 start 搜索到 goal，并避开障碍物。
 GridPath find_astar_path(
     const Grid& grid,
     const ObstacleMap& obstacles,

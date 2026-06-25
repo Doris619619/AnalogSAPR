@@ -1,3 +1,4 @@
+// 文件职责：验证 routing evaluator 可以在样例输入上完成 A*/DP 布线评估。
 #include <filesystem>
 
 #include "sapr/io.hpp"
@@ -7,12 +8,14 @@
 
 namespace {
 
+// 返回测试使用的输入目录。
 std::filesystem::path source_input_dir() {
     return std::filesystem::path(SAPR_SOURCE_DIR) / "input";
 }
 
 }  // namespace
 
+// 运行 routing evaluator 的集成测试。
 void run_routing_evaluator_tests() {
     const auto circuit = sapr::load_circuit(source_input_dir());
     const auto solution = sapr::solve_baseline(circuit);

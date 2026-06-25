@@ -1,3 +1,4 @@
+// 文件职责：实现从 net terminal 生成多条 A* 候选路径的逻辑。
 #include "sapr/routing/topology.hpp"
 
 #include <set>
@@ -9,6 +10,7 @@
 namespace sapr::routing {
 namespace {
 
+// 将路径编码为字符串，用于候选路径去重。
 std::string path_signature(const GridPath& path) {
     std::ostringstream output;
     for (const auto& point : path.points) {
@@ -17,6 +19,7 @@ std::string path_signature(const GridPath& path) {
     return output.str();
 }
 
+// 返回用于产生不同候选路径的 A* 权重组合。
 std::vector<AStarConfig> candidate_astar_configs() {
     return {
         AStarConfig{1.0, 3.0, 5.0, 200000},
@@ -26,6 +29,7 @@ std::vector<AStarConfig> candidate_astar_configs() {
     };
 }
 
+// 从 RoutingContext 的全局 pin 表中查找 terminal。
 const GlobalPin* find_global_pin(const RoutingContext& context, const std::string& terminal) {
     const auto pin_it = context.global_pins().find(terminal);
     if (pin_it == context.global_pins().end()) {
@@ -34,6 +38,7 @@ const GlobalPin* find_global_pin(const RoutingContext& context, const std::strin
     return &pin_it->second;
 }
 
+// 返回稳定的 net 遍历顺序，优先使用输入文件顺序。
 std::vector<std::string> ordered_net_names(const Circuit& circuit) {
     if (!circuit.net_order.empty()) {
         return circuit.net_order;
@@ -48,6 +53,7 @@ std::vector<std::string> ordered_net_names(const Circuit& circuit) {
 
 }  // namespace
 
+// 为每条 net 生成 root terminal 到其它 terminal 的 A* 候选路径。
 std::vector<RouteCandidate> generate_route_candidates(
     const Circuit& circuit,
     const RoutingContext& context,
