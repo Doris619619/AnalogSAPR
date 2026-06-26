@@ -2,6 +2,7 @@
 #include "sapr/routing_evaluator.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <iterator>
 #include <optional>
 #include <string>
@@ -9,6 +10,7 @@
 #include <utility>
 
 #include "sapr/routing/astar.hpp"
+#include "sapr/routing/geometry.hpp"
 #include "sapr/routing/layer.hpp"
 #include "sapr/routing/topology.hpp"
 
@@ -180,6 +182,50 @@ bool same_line_direction(
 }
 
 // 向输出追加一条非零长度中心线线段。
+// 判断两个连续坐标是否可视为同一点，避免浮点误差影响线段合并和检查。
+bool same_coord(double lhs, double rhs) {
+    return std::abs(lhs - rhs) <= 1e-9;
+}
+
+// 判断 route segment 是否为水平中心线。
+bool route_is_horizontal(const RouteSegment& route) {
+    return same_coord(route.y1, route.y2);
+}
+
+// 判断 route segment 是否为垂直中心线。
+bool route_is_vertical(const RouteSegment& route) {
+    return same_coord(route.x1, route.x2);
+}
+
+// 返回 detailed routing 阶段实际写入的线宽，优先满足 WIRE_WIDTH 约束范围。
+double detailed_width_for_candidate(
+    const Circuit& circuit,
+    const RoutingEvaluation& evaluation,
+    const routing::RouteCandidate& candidate) {
+    double width = candidate.wire_width > 0.0 ? candidate.wire_width : evaluation.context.default_width_for_net(candidate.net);
+    const auto constraint = circuit.constraints.wire_widths.find(candidate.net);
+    if (constraint == circuit.constraints.wire_widths.end()) return width;
+    width = std::max(width, constraint->second.min_width);
+    if (constraint->second.max_width > 0.0) width = std::min(width, constraint->second.max_width);
+    return width;
+}
+
+// 返回旧调试接口使用的线宽，不依赖 Circuit 以保持公开函数签名稳定。
+double selected_width_for_candidate(
+    const RoutingEvaluation& evaluation,
+    const routing::RouteCandidate& candidate) {
+    return candidate.wire_width > 0.0 ? candidate.wire_width : evaluation.context.default_width_for_net(candidate.net);
+}
+
+// 判断新线段是否能和上一条线段合并为同一条中心线。
+bool can_merge_with_last(const RouteSegment& last, const RouteSegment& edge) {
+    if (last.net != edge.net || last.layer != edge.layer || !same_coord(last.width, edge.width)) return false;
+    if (!same_coord(last.x2, edge.x1) || !same_coord(last.y2, edge.y1)) return false;
+    const bool horizontal = route_is_horizontal(last) && route_is_horizontal(edge) && same_coord(last.y1, edge.y1);
+    const bool vertical = route_is_vertical(last) && route_is_vertical(edge) && same_coord(last.x1, edge.x1);
+    return horizontal || vertical;
+}
+
 void append_segment(
     std::vector<RouteSegment>& routes,
     const routing::Grid& grid,
@@ -191,13 +237,19 @@ void append_segment(
     const auto start_xy = grid.grid_to_point(start);
     const auto end_xy = grid.grid_to_point(end);
     if (start_xy.x == end_xy.x && start_xy.y == end_xy.y) return;
+    RouteSegment edge{net, routing::index_to_layer(layer), start_xy.x, start_xy.y, end_xy.x, end_xy.y, width};
+    if (!routes.empty() && can_merge_with_last(routes.back(), edge)) {
+        routes.back().x2 = edge.x2;
+        routes.back().y2 = edge.y2;
+        return;
+    }
     for (const auto& route : routes) {
-        if (route.net != net || route.layer != routing::index_to_layer(layer)) continue;
+        if (route.net != net || route.layer != edge.layer) continue;
         const bool same_direction = route.x1 == start_xy.x && route.y1 == start_xy.y && route.x2 == end_xy.x && route.y2 == end_xy.y;
         const bool reverse_direction = route.x1 == end_xy.x && route.y1 == end_xy.y && route.x2 == start_xy.x && route.y2 == start_xy.y;
         if (same_direction || reverse_direction) return;
     }
-    routes.push_back({net, routing::index_to_layer(layer), start_xy.x, start_xy.y, end_xy.x, end_xy.y, width});
+    routes.push_back(std::move(edge));
 }
 
 // 将一条 A* 网格路径压缩为同层共线的 routing segment。
@@ -208,7 +260,7 @@ void append_path_segments(
     const auto points = prune_backtracks(candidate.path.points);
     if (points.size() < 2) return;
 
-    const double width = candidate.wire_width > 0.0 ? candidate.wire_width : evaluation.context.default_width_for_net(candidate.net);
+    const double width = selected_width_for_candidate(evaluation, candidate);
     std::size_t start = 0;
     std::size_t cursor = 1;
     while (cursor < points.size()) {
@@ -224,6 +276,104 @@ void append_path_segments(
         start = cursor;
         ++cursor;
     }
+}
+
+// 将一条 A* 网格路径按 detailed routing 线宽规则压缩成 route segment。
+void append_detailed_path_segments(
+    std::vector<RouteSegment>& routes,
+    const Circuit& circuit,
+    const RoutingEvaluation& evaluation,
+    const routing::RouteCandidate& candidate) {
+    const auto points = prune_backtracks(candidate.path.points);
+    if (points.size() < 2) return;
+
+    const double width = detailed_width_for_candidate(circuit, evaluation, candidate);
+    std::size_t start = 0;
+    std::size_t cursor = 1;
+    while (cursor < points.size()) {
+        if (points[start].layer != points[cursor].layer) {
+            start = cursor;
+            ++cursor;
+            continue;
+        }
+        while (cursor + 1 < points.size() && same_line_direction(points[cursor - 1], points[cursor], points[cursor + 1])) {
+            ++cursor;
+        }
+        append_segment(routes, evaluation.context.grid(), candidate.net, points[start].layer, points[start], points[cursor], width);
+        start = cursor;
+        ++cursor;
+    }
+}
+
+// 检查 detailed route 是否违反 WIRE_WIDTH 范围。
+int count_detailed_width_violations(const Circuit& circuit, const std::vector<RouteSegment>& routes) {
+    int violations = 0;
+    for (const auto& route : routes) {
+        const auto constraint = circuit.constraints.wire_widths.find(route.net);
+        if (constraint == circuit.constraints.wire_widths.end()) continue;
+        if (route.width < constraint->second.min_width || route.width > constraint->second.max_width) ++violations;
+    }
+    return violations;
+}
+
+// 将 route segment 转为金属占用矩形，用于 DRC 和 coupling 检查。
+Rect route_to_rect(const RouteSegment& route) {
+    return routing::segment_to_rect(
+        routing::Segment{routing::Point{route.x1, route.y1}, routing::Point{route.x2, route.y2}},
+        route.width);
+}
+
+// 判断 route segment 端点是否位于指定 active region 内，允许 pin access corridor 从 active 内出入。
+bool route_endpoint_inside(const RouteSegment& route, const Rect& active) {
+    return routing::contains_point(active, routing::Point{route.x1, route.y1}) ||
+           routing::contains_point(active, routing::Point{route.x2, route.y2});
+}
+
+// 统计 detailed route 穿越 active region 的基础 DRC 违反数量。
+int count_active_region_crossings(
+    const RoutingEvaluationRequest& request,
+    const std::vector<RouteSegment>& routes) {
+    int violations = 0;
+    for (const auto& route : routes) {
+        const Rect metal = route_to_rect(route);
+        for (const auto& active : request.active_region_blockers) {
+            if (!routing::intersects(metal, active)) continue;
+            if (route_endpoint_inside(route, active)) continue;
+            ++violations;
+        }
+    }
+    return violations;
+}
+
+// 判断两条同层异网线段是否存在近距离平行耦合风险。
+bool near_parallel_coupling(const RouteSegment& lhs, const RouteSegment& rhs, double spacing) {
+    if (lhs.net == rhs.net || lhs.layer != rhs.layer) return false;
+    const bool lhs_horizontal = route_is_horizontal(lhs);
+    const bool rhs_horizontal = route_is_horizontal(rhs);
+    if (lhs_horizontal != rhs_horizontal) return false;
+    if (lhs_horizontal) {
+        const double distance = std::abs(lhs.y1 - rhs.y1) - (lhs.width + rhs.width) / 2.0;
+        const bool overlap = std::max(std::min(lhs.x1, lhs.x2), std::min(rhs.x1, rhs.x2)) <=
+                             std::min(std::max(lhs.x1, lhs.x2), std::max(rhs.x1, rhs.x2));
+        return distance < spacing && overlap;
+    }
+    const double distance = std::abs(lhs.x1 - rhs.x1) - (lhs.width + rhs.width) / 2.0;
+    const bool overlap = std::max(std::min(lhs.y1, lhs.y2), std::min(rhs.y1, rhs.y2)) <=
+                         std::min(std::max(lhs.y1, lhs.y2), std::max(rhs.y1, rhs.y2));
+    return distance < spacing && overlap;
+}
+
+// 统计 detailed route 的同层平行耦合惩罚。
+double estimate_detailed_coupling_penalty(const std::vector<RouteSegment>& routes) {
+    constexpr double kSpacing = 1.0;
+    constexpr double kPenaltyPerPair = 100.0;
+    double penalty = 0.0;
+    for (std::size_t i = 0; i < routes.size(); ++i) {
+        for (std::size_t j = i + 1; j < routes.size(); ++j) {
+            if (near_parallel_coupling(routes[i], routes[j], kSpacing)) penalty += kPenaltyPerPair;
+        }
+    }
+    return penalty;
 }
 
 }  // namespace
@@ -301,18 +451,19 @@ DetailedRoutingResult run_detailed_routing(
     const Circuit& circuit,
     const RoutingEvaluationRequest& request,
     const RoutingEvaluation& evaluation) {
-    (void)request;
     DetailedRoutingResult result;
     for (const auto* net_route : ordered_detailed_routes(circuit, evaluation)) {
         if (!net_route->success) continue;
         for (const auto& candidate : net_route->selected_candidates) {
-            append_path_segments(result.routes, evaluation, candidate);
-            result.coupling_penalty += candidate.coupling_cost;
+            append_detailed_path_segments(result.routes, circuit, evaluation, candidate);
             if (!candidate.flow_ok) ++result.flow_violations;
             if (!candidate.current_density_ok) ++result.current_density_violations;
         }
-        result.coupling_penalty += net_route->coupling_penalty;
     }
+    result.current_density_violations += count_detailed_width_violations(circuit, result.routes);
+    result.design_rule_violations = count_active_region_crossings(request, result.routes);
+    result.design_rule_penalty = 100000.0 * static_cast<double>(result.design_rule_violations);
+    result.coupling_penalty = estimate_detailed_coupling_penalty(result.routes);
     result.used_global_fallback = false;
     return result;
 }

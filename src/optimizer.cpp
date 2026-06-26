@@ -319,13 +319,15 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.metrics.current_density_violations = count_current_density_violations(circuit, feedback.routes);
     feedback.metrics.flow_violations += detailed.flow_violations;
     feedback.metrics.current_density_violations += detailed.current_density_violations;
+    feedback.metrics.design_rule_violations = detailed.design_rule_violations;
+    feedback.metrics.design_rule_penalty = detailed.design_rule_penalty;
     feedback.metrics.routing_failures = routing_evaluation.failed_nets;
     feedback.metrics.congestion_penalty = 0.0;
     feedback.metrics.flow_penalty = routing_evaluation.global_routing.flow_penalty;
     feedback.metrics.current_density_penalty = routing_evaluation.global_routing.current_density_penalty;
-    feedback.metrics.coupling_penalty = routing_evaluation.global_routing.coupling_penalty;
+    feedback.metrics.coupling_penalty = routing_evaluation.global_routing.coupling_penalty + detailed.coupling_penalty;
     feedback.metrics.routing_failure_penalty = routing_evaluation.global_routing.routing_failure_penalty;
-    feedback.metrics.penalty += routing_evaluation.global_routing.total_penalty;
+    feedback.metrics.penalty += routing_evaluation.global_routing.total_penalty + detailed.design_rule_penalty + detailed.coupling_penalty;
     feedback.routing_cost = routing_evaluation.routing_cost;
     feedback.routing_candidate_count = routing_evaluation.candidates.size();
 

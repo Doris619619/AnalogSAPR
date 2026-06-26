@@ -146,6 +146,7 @@ struct Metrics {
     double design_rule_penalty{};
     int flow_violations{};
     int current_density_violations{};
+    int design_rule_violations{};
     int routing_failures{};
     double congestion_penalty{};
 };
@@ -296,8 +297,10 @@ struct RoutingFeedback {
 struct DetailedRoutingResult {
     std::vector<RouteSegment> routes;
     double coupling_penalty{};
+    double design_rule_penalty{};
     int flow_violations{};
     int current_density_violations{};
+    int design_rule_violations{};
     bool used_global_fallback{};
 };
 
