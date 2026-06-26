@@ -1,6 +1,7 @@
 // 定义模拟电路、约束、增强 B*-tree、布局布线结果和评价指标的公共数据模型。
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -128,13 +129,6 @@ struct RouteSegment {
     double width{};
 };
 
-// 汇总布局和布线结果，并保存放置输出顺序。
-struct Solution {
-    std::unordered_map<std::string, Placement> placements;
-    std::vector<std::string> placement_order;
-    std::vector<RouteSegment> routes;
-};
-
 // 表示当前解的基础评价指标和论文约束违例统计。
 struct Metrics {
     double area{};
@@ -146,6 +140,16 @@ struct Metrics {
     int current_density_violations{};
     int routing_failures{};
     double congestion_penalty{};
+};
+
+// 汇总布局和布线结果，并可保存求解时的路由评价快照。
+struct Solution {
+    std::unordered_map<std::string, Placement> placements;
+    std::vector<std::string> placement_order;
+    std::vector<RouteSegment> routes;
+    std::optional<Metrics> metrics;
+    std::optional<double> routing_cost;
+    std::optional<std::size_t> routing_candidate_count;
 };
 
 // 配置求解器的确定性参数和论文代价函数权重。
@@ -250,6 +254,8 @@ struct RoutingFeedback {
     std::vector<RouteSegment> routes;
     Metrics metrics;
     std::unordered_map<std::string, double> required_space_by_node;
+    double routing_cost{};
+    std::size_t routing_candidate_count{};
 };
 
 // 表示当前阶段的增强 B*-tree 拓扑。

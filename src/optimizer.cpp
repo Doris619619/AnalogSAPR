@@ -13,6 +13,7 @@
 #include "sapr/constraints.hpp"
 #include "sapr/geometry.hpp"
 #include "sapr/router.hpp"
+#include "sapr/routing_evaluator.hpp"
 #include "sapr/tree.hpp"
 
 namespace sapr {
@@ -190,6 +191,9 @@ Solution make_solution(const CandidateState& state) {
     solution.placements = state.request.placements;
     solution.placement_order = state.request.placement_order;
     solution.routes = state.feedback.routes;
+    solution.metrics = state.feedback.metrics;
+    solution.routing_cost = state.feedback.routing_cost;
+    solution.routing_candidate_count = state.feedback.routing_candidate_count;
     return solution;
 }
 
@@ -272,16 +276,29 @@ RoutingEvaluationRequest pack_enhanced_tree(
 // 使用 routing adapter 评价当前 placement candidate。
 RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const RoutingEvaluationRequest& request) {
     RoutingFeedback feedback;
-    feedback.routes = route_manhattan(circuit, request.placements);
-    Solution solution{request.placements, request.placement_order, feedback.routes};
+    const auto routing_evaluation = evaluate_routing(circuit, request);
+    feedback.routes = selected_candidates_to_segments(routing_evaluation);
+    if (feedback.routes.empty() && routing_evaluation.failed_nets > 0) {
+        feedback.routes = route_manhattan(circuit, request.placements);
+    }
+    Solution solution;
+    solution.placements = request.placements;
+    solution.placement_order = request.placement_order;
+    solution.routes = feedback.routes;
     feedback.metrics = measure(circuit, solution);
+    feedback.metrics.wirelength = routing_evaluation.global_routing.total_metrics.wirelength;
+    feedback.metrics.bend_count = routing_evaluation.global_routing.total_metrics.bend_count;
+    feedback.metrics.via_count = routing_evaluation.global_routing.total_metrics.via_count;
     feedback.metrics.flow_violations = count_flow_violations(circuit, request, feedback.routes);
     feedback.metrics.current_density_violations = count_current_density_violations(circuit, feedback.routes);
-    feedback.metrics.routing_failures = feedback.routes.empty() && !circuit.net_order.empty() ? 1 : 0;
+    feedback.metrics.routing_failures = routing_evaluation.failed_nets;
     feedback.metrics.congestion_penalty = 0.0;
-    feedback.metrics.penalty += 1000.0 * static_cast<double>(
-                                           feedback.metrics.flow_violations + feedback.metrics.current_density_violations +
-                                           feedback.metrics.routing_failures);
+    feedback.metrics.penalty += routing_evaluation.global_routing.total_penalty +
+                                1000.0 * static_cast<double>(
+                                             feedback.metrics.flow_violations + feedback.metrics.current_density_violations +
+                                             feedback.metrics.routing_failures);
+    feedback.routing_cost = routing_evaluation.routing_cost;
+    feedback.routing_candidate_count = routing_evaluation.candidates.size();
 
     for (const auto& space : request.space_nodes) {
         double required = space.required_space();

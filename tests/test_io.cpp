@@ -17,7 +17,9 @@ void run_io_tests() {
     require(approx(circuit.modules.at("M1").ox, -0.3), "M1 ox should be parsed from comment");
     require(approx(circuit.modules.at("M1").oy, -0.21), "M1 oy should be parsed from comment");
 
-    const auto solution = sapr::solve_baseline(circuit);
+    sapr::SolverConfig config;
+    config.sa_iterations = 20;
+    const auto solution = sapr::solve_baseline(circuit, config);
     const std::filesystem::path roundtrip = std::filesystem::path(SAPR_BINARY_DIR) / "test-roundtrip";
     std::filesystem::remove_all(roundtrip);
     sapr::write_solution(solution, roundtrip);
@@ -26,4 +28,3 @@ void run_io_tests() {
     require(loaded.routes.size() == solution.routes.size(), "route count should survive round-trip");
     std::filesystem::remove_all(roundtrip);
 }
-
