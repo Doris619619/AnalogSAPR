@@ -350,10 +350,140 @@ void apply_routing_feedback(EnhancedBStarTree& tree, const RoutingFeedback& feed
     }
 }
 
-// 对增强 B*-tree 执行一次论文 placement 侧扰动：delete-insert、swap 或 rotate。
+// 收集增强 B*-tree 中所有可容纳 LCP 的 space node。
+std::vector<SpaceNode*> collect_mutable_spaces(EnhancedBStarTree& tree) {
+    std::vector<SpaceNode*> spaces;
+    for (auto& [id, node] : tree.nodes) {
+        (void)id;
+        spaces.push_back(&node.right_space);
+        spaces.push_back(&node.top_space);
+    }
+    for (auto& group : tree.symmetry_groups) {
+        spaces.push_back(&group.space_group);
+        spaces.push_back(&group.space_cluster);
+        for (auto& space : group.space_group_bundle.spaces) spaces.push_back(&space);
+        for (auto& space : group.space_cluster_bundle.spaces) spaces.push_back(&space);
+    }
+    return spaces;
+}
+
+// 表示一个 LCP 在某个 space node 中的位置。
+struct LcpSlot {
+    SpaceNode* space{};
+    std::size_t index{};
+};
+
+// 收集当前树中全部 LCP 的可变位置。
+std::vector<LcpSlot> collect_lcp_slots(std::vector<SpaceNode*>& spaces) {
+    std::vector<LcpSlot> slots;
+    for (auto* space : spaces) {
+        for (std::size_t index = 0; index < space->linking_points.size(); ++index) {
+            slots.push_back({space, index});
+        }
+    }
+    return slots;
+}
+
+// 判断 LCP 是否仍满足论文同一 interconnect 且至少两条 wire segment 的约束。
+bool is_valid_lcp(const LinkingControlPoint& point) {
+    if (point.segments.size() < 2) return false;
+    const std::string& net = point.segments.front().net;
+    for (const auto& segment : point.segments) {
+        if (segment.net != net) return false;
+    }
+    return true;
+}
+
+// 将一个 LCP 移入新的 space node，并维护归属 id。
+void move_lcp_to_space(LinkingControlPoint& point, SpaceNode& target) {
+    point.space_node_id = target.id;
+    target.linking_points.push_back(std::move(point));
+}
+
+// 执行论文 LCP delete-insert 扰动。
+bool perturb_lcp_delete_insert(EnhancedBStarTree& tree, std::mt19937& rng) {
+    auto spaces = collect_mutable_spaces(tree);
+    auto slots = collect_lcp_slots(spaces);
+    if (slots.empty() || spaces.size() < 2) return false;
+    std::uniform_int_distribution<std::size_t> slot_dist(0, slots.size() - 1);
+    std::uniform_int_distribution<std::size_t> space_dist(0, spaces.size() - 1);
+    const auto slot = slots[slot_dist(rng)];
+    SpaceNode* target = spaces[space_dist(rng)];
+    if (target == slot.space && spaces.size() > 1) target = spaces[(space_dist(rng) + 1) % spaces.size()];
+
+    auto point = std::move(slot.space->linking_points[slot.index]);
+    slot.space->linking_points.erase(slot.space->linking_points.begin() + static_cast<std::ptrdiff_t>(slot.index));
+    move_lcp_to_space(point, *target);
+    return true;
+}
+
+// 执行论文 LCP swap 扰动。
+bool perturb_lcp_swap(EnhancedBStarTree& tree, std::mt19937& rng) {
+    auto spaces = collect_mutable_spaces(tree);
+    auto slots = collect_lcp_slots(spaces);
+    if (slots.size() < 2) return false;
+    std::uniform_int_distribution<std::size_t> slot_dist(0, slots.size() - 1);
+    const auto first = slots[slot_dist(rng)];
+    auto second = slots[slot_dist(rng)];
+    if (first.space == second.space && first.index == second.index) second = slots[(slot_dist(rng) + 1) % slots.size()];
+    std::swap(first.space->linking_points[first.index], second.space->linking_points[second.index]);
+    first.space->linking_points[first.index].space_node_id = first.space->id;
+    second.space->linking_points[second.index].space_node_id = second.space->id;
+    return true;
+}
+
+// 执行论文 LCP split 扰动。
+bool perturb_lcp_split(EnhancedBStarTree& tree, std::mt19937& rng) {
+    auto spaces = collect_mutable_spaces(tree);
+    auto slots = collect_lcp_slots(spaces);
+    std::vector<LcpSlot> splittable;
+    for (const auto& slot : slots) {
+        if (slot.space->linking_points[slot.index].segments.size() >= 4) splittable.push_back(slot);
+    }
+    if (splittable.empty()) return false;
+    std::uniform_int_distribution<std::size_t> slot_dist(0, splittable.size() - 1);
+    const auto slot = splittable[slot_dist(rng)];
+    auto& point = slot.space->linking_points[slot.index];
+    const std::size_t half = point.segments.size() / 2;
+    LinkingControlPoint split = point;
+    split.id = point.id + ":split";
+    split.segments.assign(point.segments.begin() + static_cast<std::ptrdiff_t>(half), point.segments.end());
+    point.segments.erase(point.segments.begin() + static_cast<std::ptrdiff_t>(half), point.segments.end());
+    if (!is_valid_lcp(point) || !is_valid_lcp(split)) return false;
+    slot.space->linking_points.push_back(std::move(split));
+    return true;
+}
+
+// 执行论文 LCP merge 扰动。
+bool perturb_lcp_merge(EnhancedBStarTree& tree, std::mt19937& rng) {
+    auto spaces = collect_mutable_spaces(tree);
+    auto slots = collect_lcp_slots(spaces);
+    if (slots.size() < 2) return false;
+    std::uniform_int_distribution<std::size_t> slot_dist(0, slots.size() - 1);
+    const auto first = slots[slot_dist(rng)];
+    for (std::size_t attempts = 0; attempts < slots.size(); ++attempts) {
+        const auto second = slots[(slot_dist(rng) + attempts) % slots.size()];
+        if (first.space == second.space && first.index == second.index) continue;
+        const auto& first_point = first.space->linking_points[first.index];
+        const auto& second_point = second.space->linking_points[second.index];
+        if (first_point.segments.empty() || second_point.segments.empty()) continue;
+        if (first_point.segments.front().net != second_point.segments.front().net) continue;
+        const auto second_segments = second_point.segments;
+        first.space->linking_points[first.index].segments.insert(
+            first.space->linking_points[first.index].segments.end(),
+            second_segments.begin(),
+            second_segments.end());
+        const bool valid = is_valid_lcp(first.space->linking_points[first.index]);
+        second.space->linking_points.erase(second.space->linking_points.begin() + static_cast<std::ptrdiff_t>(second.index));
+        return valid;
+    }
+    return false;
+}
+
+// 对增强 B*-tree 执行一次论文 placement 侧扰动：module 或 LCP 的 hybrid move。
 void perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937& rng) {
     if (tree.representative_order.empty()) return;
-    std::uniform_int_distribution<int> move_dist(0, 2);
+    std::uniform_int_distribution<int> move_dist(0, 6);
     const int move = move_dist(rng);
     if (move == 0 && tree.representative_order.size() > 1) {
         std::uniform_int_distribution<std::size_t> index_dist(0, tree.representative_order.size() - 1);
@@ -371,10 +501,18 @@ void perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937& rng) {
         tree.representative_order.erase(tree.representative_order.begin() + static_cast<std::ptrdiff_t>(from));
         tree.representative_order.insert(tree.representative_order.begin() + static_cast<std::ptrdiff_t>(to), id);
         rebuild_asf_tree(tree);
-    } else {
+    } else if (move == 2) {
         std::uniform_int_distribution<std::size_t> index_dist(0, tree.representative_order.size() - 1);
         auto& node = tree.nodes.at(tree.representative_order[index_dist(rng)]);
         node.angle = (node.angle + 90) % 360;
+    } else if (move == 3) {
+        perturb_lcp_delete_insert(tree, rng);
+    } else if (move == 4) {
+        perturb_lcp_swap(tree, rng);
+    } else if (move == 5) {
+        perturb_lcp_split(tree, rng);
+    } else {
+        perturb_lcp_merge(tree, rng);
     }
     if (!is_valid_tree(tree)) throw std::runtime_error("invalid enhanced B*-tree after perturbation");
 }
