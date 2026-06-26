@@ -183,13 +183,17 @@ void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& 
 }
 
 // 计算当前 metrics 的论文归一化总代价。
-double normalized_cost(const Metrics& metrics, const Metrics& base, const SolverConfig& config) {
-    const double area = metrics.area / std::max(base.area, 1.0);
-    const double wire = metrics.wirelength / std::max(base.wirelength, 1.0);
-    const double bend = static_cast<double>(metrics.bend_count) / std::max(base.bend_count, 1);
-    const double via = static_cast<double>(metrics.via_count) / std::max(base.via_count, 1);
-    return config.area_weight * area + config.wirelength_weight * wire + config.bend_weight * bend +
-           config.via_weight * via + metrics.penalty + metrics.congestion_penalty;
+double compute_phi_cost(Metrics& metrics, const Metrics& base, const SolverConfig& config) {
+    metrics.normalized_area = metrics.area / std::max(base.area, 1.0);
+    metrics.normalized_wirelength = metrics.wirelength / std::max(base.wirelength, 1.0);
+    metrics.normalized_bend = static_cast<double>(metrics.bend_count) / std::max(base.bend_count, 1);
+    metrics.normalized_via = static_cast<double>(metrics.via_count) / std::max(base.via_count, 1);
+    metrics.phi_cost = config.area_weight * metrics.normalized_area +
+                       config.wirelength_weight * metrics.normalized_wirelength +
+                       config.bend_weight * metrics.normalized_bend +
+                       config.via_weight * metrics.normalized_via +
+                       metrics.penalty;
+    return metrics.phi_cost;
 }
 
 // 评价一棵增强 B*-tree 对应的候选状态。
@@ -203,7 +207,7 @@ CandidateState evaluate_candidate(
     state.request = pack_enhanced_tree(circuit, state.tree, config);
     state.feedback = evaluate_with_routing_adapter(circuit, state.request);
     apply_routing_feedback(state.tree, state.feedback);
-    state.cost = normalized_cost(state.feedback.metrics, base_metrics, config);
+    state.cost = compute_phi_cost(state.feedback.metrics, base_metrics, config);
     return state;
 }
 
@@ -319,13 +323,15 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.metrics.current_density_violations = count_current_density_violations(circuit, feedback.routes);
     feedback.metrics.flow_violations += detailed.flow_violations;
     feedback.metrics.current_density_violations += detailed.current_density_violations;
+    feedback.metrics.design_rule_violations = detailed.design_rule_violations;
+    feedback.metrics.design_rule_penalty = detailed.design_rule_penalty;
     feedback.metrics.routing_failures = routing_evaluation.failed_nets;
     feedback.metrics.congestion_penalty = 0.0;
     feedback.metrics.flow_penalty = routing_evaluation.global_routing.flow_penalty;
     feedback.metrics.current_density_penalty = routing_evaluation.global_routing.current_density_penalty;
-    feedback.metrics.coupling_penalty = routing_evaluation.global_routing.coupling_penalty;
+    feedback.metrics.coupling_penalty = routing_evaluation.global_routing.coupling_penalty + detailed.coupling_penalty;
     feedback.metrics.routing_failure_penalty = routing_evaluation.global_routing.routing_failure_penalty;
-    feedback.metrics.penalty += routing_evaluation.global_routing.total_penalty;
+    feedback.metrics.penalty += routing_evaluation.global_routing.total_penalty + detailed.design_rule_penalty + detailed.coupling_penalty;
     feedback.routing_cost = routing_evaluation.routing_cost;
     feedback.routing_candidate_count = routing_evaluation.candidates.size();
 
@@ -350,10 +356,11 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     auto initial_feedback = evaluate_with_routing_adapter(circuit, initial_request);
     apply_routing_feedback(initial_tree, initial_feedback);
     const Metrics base_metrics = initial_feedback.metrics;
+    const double initial_cost = compute_phi_cost(initial_feedback.metrics, base_metrics, config);
     CandidateState current{initial_tree,
                            std::move(initial_request),
                            std::move(initial_feedback),
-                           normalized_cost(base_metrics, base_metrics, config)};
+                           initial_cost};
     CandidateState best = current;
 
     std::mt19937 rng(config.seed);

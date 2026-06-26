@@ -2,7 +2,9 @@
 #include "sapr/routing/routing_context.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
+#include <unordered_map>
 
 #include "sapr/routing/layer.hpp"
 #include "sapr/routing/transform.hpp"
@@ -31,6 +33,53 @@ void include_rect(Rect rect, double& min_x, double& min_y, double& max_x, double
     include_point(Point{normalized.x2, normalized.y2}, min_x, min_y, max_x, max_y, has_bounds);
 }
 
+// 在指定网格段上放行 terminal access 点，让 active 内部 pin 可以逃逸到模块外。
+void add_access_line(ObstacleMap& obstacles, const Grid& grid, GridPoint start, GridPoint end) {
+    const int dx = (end.ix > start.ix) ? 1 : (end.ix < start.ix ? -1 : 0);
+    const int dy = (end.iy > start.iy) ? 1 : (end.iy < start.iy ? -1 : 0);
+    GridPoint current = start;
+    while (true) {
+        for (int layer = 0; layer < grid.layer_count(); ++layer) {
+            obstacles.add_terminal_point(GridPoint{current.ix, current.iy, layer});
+        }
+        if (current.ix == end.ix && current.iy == end.iy) break;
+        current.ix += dx;
+        current.iy += dy;
+    }
+}
+
+// 为 pin 选择离 active region 最近的一侧，并放行一条到 active 外的短 access corridor。
+void add_pin_access(
+    ObstacleMap& obstacles,
+    const Grid& grid,
+    const GlobalPin& pin,
+    const Rect& active) {
+    const Rect rect = normalize_rect(active);
+    GridPoint start = grid.snap_to_grid(pin.location, pin.layer);
+    for (int layer = 0; layer < grid.layer_count(); ++layer) {
+        obstacles.add_terminal_point(GridPoint{start.ix, start.iy, layer});
+    }
+
+    const double escape = 2.0 * grid.step();
+    const double left = std::abs(pin.location.x - rect.x1);
+    const double right = std::abs(rect.x2 - pin.location.x);
+    const double bottom = std::abs(pin.location.y - rect.y1);
+    const double top = std::abs(rect.y2 - pin.location.y);
+    const double best = std::min({left, right, bottom, top});
+
+    Point target = pin.location;
+    if (best == left) {
+        target.x = rect.x1 - escape;
+    } else if (best == right) {
+        target.x = rect.x2 + escape;
+    } else if (best == bottom) {
+        target.y = rect.y1 - escape;
+    } else {
+        target.y = rect.y2 + escape;
+    }
+    add_access_line(obstacles, grid, start, grid.snap_to_grid(target, pin.layer));
+}
+
 }  // namespace
 
 // 构建网格、障碍物、全局 pin 和 terminal 例外点。
@@ -46,6 +95,7 @@ RoutingContext::RoutingContext(
     bool has_bounds = false;
 
     std::vector<std::pair<std::string, Rect>> active_regions;
+    std::unordered_map<std::string, Rect> active_by_module;
     for (const auto& [module_id, placement] : placements) {
         const auto module_it = circuit_.modules.find(module_id);
         if (module_it == circuit_.modules.end()) {
@@ -58,6 +108,7 @@ RoutingContext::RoutingContext(
         include_rect(bbox, min_x, min_y, max_x, max_y, has_bounds);
         include_rect(active, min_x, min_y, max_x, max_y, has_bounds);
         active_regions.push_back({module_id, active});
+        active_by_module[module_id] = active;
     }
 
     for (const auto& [key, pin] : circuit_.pins) {
@@ -101,7 +152,12 @@ RoutingContext::RoutingContext(
 
     for (const auto& [key, global_pin] : global_pins_) {
         (void)key;
-        obstacles_.add_terminal_point(grid_->snap_to_grid(global_pin.location, global_pin.layer));
+        const auto active_it = active_by_module.find(global_pin.module);
+        if (active_it != active_by_module.end() && contains_point(active_it->second, global_pin.location)) {
+            add_pin_access(obstacles_, *grid_, global_pin, active_it->second);
+        } else {
+            obstacles_.add_terminal_point(grid_->snap_to_grid(global_pin.location, global_pin.layer));
+        }
     }
 }
 

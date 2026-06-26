@@ -23,10 +23,10 @@ std::string path_signature(const GridPath& path) {
 // 返回用于产生不同候选路径的 A* 权重组合。
 std::vector<AStarConfig> candidate_astar_configs() {
     return {
-        AStarConfig{1.0, 3.0, 5.0, 1.0, 20000},
-        AStarConfig{1.0, 8.0, 5.0, 1.0, 20000},
-        AStarConfig{1.0, 3.0, 12.0, 1.0, 20000},
-        AStarConfig{1.0, 1.0, 3.0, 1.0, 20000},
+        AStarConfig{1.0, 3.0, 5.0, 1.0, 500000},
+        AStarConfig{1.0, 8.0, 5.0, 1.0, 500000},
+        AStarConfig{1.0, 3.0, 12.0, 1.0, 500000},
+        AStarConfig{1.0, 1.0, 3.0, 1.0, 500000},
     };
 }
 

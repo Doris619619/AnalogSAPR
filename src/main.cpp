@@ -117,6 +117,11 @@ int run_solver(const std::vector<std::string>& args) {
             metrics.wirelength + 0.2 * static_cast<double>(metrics.bend_count) + metrics.penalty);
         std::cout << std::fixed << std::setprecision(2)
                   << "routing_evaluation:\n"
+                  << "  phi_cost: " << metrics.phi_cost << '\n'
+                  << "  normalized_area: " << metrics.normalized_area << '\n'
+                  << "  normalized_wirelength: " << metrics.normalized_wirelength << '\n'
+                  << "  normalized_bend: " << metrics.normalized_bend << '\n'
+                  << "  normalized_via: " << metrics.normalized_via << '\n'
                   << "  routing_cost: " << routing_cost << '\n'
                   << "  failed_nets: " << metrics.routing_failures << '\n'
                   << "  candidate_count: " << solution.routing_candidate_count.value_or(0) << '\n'
@@ -127,6 +132,8 @@ int run_solver(const std::vector<std::string>& args) {
                   << "  flow_penalty: " << metrics.flow_penalty << '\n'
                   << "  current_density_penalty: " << metrics.current_density_penalty << '\n'
                   << "  coupling_penalty: " << metrics.coupling_penalty << '\n'
+                  << "  design_rule_violations: " << metrics.design_rule_violations << '\n'
+                  << "  design_rule_penalty: " << metrics.design_rule_penalty << '\n'
                   << "  routing_failure_penalty: " << metrics.routing_failure_penalty << '\n';
     }
     return 0;

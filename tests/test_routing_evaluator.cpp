@@ -21,6 +21,16 @@ void run_routing_evaluator_tests() {
     sapr::SolverConfig config;
     config.sa_iterations = 3;
     const auto solution = sapr::solve_baseline(circuit, config);
+    require(solution.metrics.has_value(), "solution should expose optimizer metrics");
+    const auto& metrics = *solution.metrics;
+    const double expected_phi =
+        config.area_weight * metrics.normalized_area +
+        config.wirelength_weight * metrics.normalized_wirelength +
+        config.bend_weight * metrics.normalized_bend +
+        config.via_weight * metrics.normalized_via +
+        metrics.penalty;
+    require(metrics.phi_cost > 0.0, "optimizer should expose positive phi cost");
+    require(approx(metrics.phi_cost, expected_phi), "phi cost should match the paper total-cost formula");
     const auto evaluation = sapr::evaluate_routing(circuit, solution.placements);
     const auto selected_segments = sapr::selected_candidates_to_segments(evaluation);
     sapr::RoutingEvaluationRequest request;
@@ -29,10 +39,14 @@ void run_routing_evaluator_tests() {
     const auto detailed = sapr::run_detailed_routing(circuit, request, evaluation);
 
     require(!evaluation.candidates.empty(), "routing evaluator should emit A* route candidates");
-    require(evaluation.failed_nets >= 0, "routing evaluator should report failed net count");
+    require(evaluation.failed_nets == 0, "routing evaluator should route all nets in the sample input");
     require(evaluation.routing_cost > 0.0, "routing evaluator should produce a positive global routing cost");
     require(!selected_segments.empty(), "routing evaluator should convert selected A* candidates to route segments");
     require(!detailed.routes.empty(), "detailed routing should emit selected route segments");
+    require(detailed.coupling_penalty >= 0.0, "detailed routing should report coupling penalty");
+    require(detailed.design_rule_penalty >= 0.0, "detailed routing should report DRC penalty");
+    require(detailed.design_rule_violations >= 0, "detailed routing should report DRC violations");
+    require(detailed.current_density_violations == 0, "detailed routing should keep route widths inside constraints");
     require(evaluation.global_routing.total_penalty >= evaluation.global_routing.flow_penalty, "flow penalty should be part of total penalty");
     require(evaluation.global_routing.total_penalty >= evaluation.global_routing.current_density_penalty, "current-density penalty should be part of total penalty");
     require(evaluation.global_routing.total_penalty >= evaluation.global_routing.coupling_penalty, "coupling penalty should be part of total penalty");
@@ -46,6 +60,14 @@ void run_routing_evaluator_tests() {
             require(segment.width >= width->second.min_width, "selected segment width should satisfy min width");
             require(segment.width <= width->second.max_width, "selected segment width should satisfy max width");
         }
+    }
+    for (const auto& segment : detailed.routes) {
+        const auto width = circuit.constraints.wire_widths.find(segment.net);
+        if (width != circuit.constraints.wire_widths.end()) {
+            require(segment.width >= width->second.min_width, "detailed segment width should satisfy min width");
+            require(segment.width <= width->second.max_width, "detailed segment width should satisfy max width");
+        }
+        require(segment.x1 != segment.x2 || segment.y1 != segment.y2, "detailed routing should not emit zero-length segments");
     }
 
     const double expected_cost =
