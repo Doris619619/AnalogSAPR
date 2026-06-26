@@ -13,7 +13,7 @@ struct AStarConfig {
     double bend_weight{3.0};
     double via_weight{5.0};
     double wire_width{1.0};
-    int max_expanded_nodes{20000};
+    int max_expanded_nodes{500000};
 };
 
 // 在多层网格上从 start 搜索到 goal，并避开障碍物。

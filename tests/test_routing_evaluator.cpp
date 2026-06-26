@@ -29,7 +29,7 @@ void run_routing_evaluator_tests() {
     const auto detailed = sapr::run_detailed_routing(circuit, request, evaluation);
 
     require(!evaluation.candidates.empty(), "routing evaluator should emit A* route candidates");
-    require(evaluation.failed_nets >= 0, "routing evaluator should report failed net count");
+    require(evaluation.failed_nets == 0, "routing evaluator should route all nets in the sample input");
     require(evaluation.routing_cost > 0.0, "routing evaluator should produce a positive global routing cost");
     require(!selected_segments.empty(), "routing evaluator should convert selected A* candidates to route segments");
     require(!detailed.routes.empty(), "detailed routing should emit selected route segments");
