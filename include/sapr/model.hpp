@@ -138,6 +138,11 @@ struct Metrics {
     double wirelength{};
     int bend_count{};
     int via_count{};
+    double phi_cost{};
+    double normalized_area{};
+    double normalized_wirelength{};
+    double normalized_bend{};
+    double normalized_via{};
     double penalty{};
     double flow_penalty{};
     double current_density_penalty{};

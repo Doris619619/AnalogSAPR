@@ -21,6 +21,16 @@ void run_routing_evaluator_tests() {
     sapr::SolverConfig config;
     config.sa_iterations = 3;
     const auto solution = sapr::solve_baseline(circuit, config);
+    require(solution.metrics.has_value(), "solution should expose optimizer metrics");
+    const auto& metrics = *solution.metrics;
+    const double expected_phi =
+        config.area_weight * metrics.normalized_area +
+        config.wirelength_weight * metrics.normalized_wirelength +
+        config.bend_weight * metrics.normalized_bend +
+        config.via_weight * metrics.normalized_via +
+        metrics.penalty;
+    require(metrics.phi_cost > 0.0, "optimizer should expose positive phi cost");
+    require(approx(metrics.phi_cost, expected_phi), "phi cost should match the paper total-cost formula");
     const auto evaluation = sapr::evaluate_routing(circuit, solution.placements);
     const auto selected_segments = sapr::selected_candidates_to_segments(evaluation);
     sapr::RoutingEvaluationRequest request;
