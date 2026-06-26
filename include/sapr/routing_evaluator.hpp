@@ -34,4 +34,10 @@ RoutingEvaluation evaluate_routing(
 std::vector<RouteSegment> selected_candidates_to_segments(
     const RoutingEvaluation& evaluation);
 
+// 执行论文 top-down detailed routing 阶段，当前基于 DP 选中子问题回溯并清理路径。
+DetailedRoutingResult run_detailed_routing(
+    const Circuit& circuit,
+    const RoutingEvaluationRequest& request,
+    const RoutingEvaluation& evaluation);
+
 }  // namespace sapr

@@ -16,6 +16,8 @@ struct GlobalRouterConfig {
     double bend_weight{3.0};
     double conflict_penalty_per_point{100.0};
     double failed_pair_penalty{100000.0};
+    double flow_violation_penalty{50000.0};
+    double current_density_penalty{50000.0};
 };
 
 // 表示一条 net 在全局布线阶段选中的候选路径集合。
@@ -24,6 +26,10 @@ struct NetRouteChoice {
     std::vector<RouteCandidate> selected_candidates;
     PathMetrics metrics;
     double penalty{};
+    double flow_penalty{};
+    double current_density_penalty{};
+    double coupling_penalty{};
+    double routing_failure_penalty{};
     bool success{true};
     std::string message;
 };
@@ -33,6 +39,10 @@ struct GlobalRoutingResult {
     std::vector<NetRouteChoice> net_routes;
     PathMetrics total_metrics;
     double total_penalty{};
+    double flow_penalty{};
+    double current_density_penalty{};
+    double coupling_penalty{};
+    double routing_failure_penalty{};
     int failed_nets{};
 };
 

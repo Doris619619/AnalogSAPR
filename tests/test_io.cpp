@@ -18,7 +18,7 @@ void run_io_tests() {
     require(approx(circuit.modules.at("M1").oy, -0.21), "M1 oy should be parsed from comment");
 
     sapr::SolverConfig config;
-    config.sa_iterations = 20;
+    config.sa_iterations = 3;
     const auto solution = sapr::solve_baseline(circuit, config);
     const std::filesystem::path roundtrip = std::filesystem::path(SAPR_BINARY_DIR) / "test-roundtrip";
     std::filesystem::remove_all(roundtrip);

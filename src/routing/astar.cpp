@@ -161,7 +161,7 @@ GridPath find_astar_path(
 
         const StateRecord current_record = current_record_it->second;
         for (const auto& neighbor : grid.neighbors(current_node.state.point)) {
-            if (!same_point(neighbor, goal) && obstacles.is_blocked(neighbor, grid)) {
+            if (!same_point(neighbor, goal) && obstacles.is_blocked(neighbor, grid, config.wire_width)) {
                 continue;
             }
 

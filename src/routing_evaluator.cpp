@@ -42,24 +42,11 @@ std::unordered_set<std::string> nets_with_lcp_topology(const RoutingEvaluationRe
     return result;
 }
 
-// 过滤掉已由 LCP 拓扑接管的 net 的直接 terminal-to-terminal 候选。
-std::vector<routing::RouteCandidate> remove_direct_candidates_for_lcp_nets(
-    std::vector<routing::RouteCandidate> candidates,
-    const std::unordered_set<std::string>& lcp_nets) {
-    candidates.erase(
-        std::remove_if(candidates.begin(), candidates.end(), [&](const auto& candidate) {
-            return lcp_nets.contains(candidate.net);
-        }),
-        candidates.end());
-    return candidates;
-}
-
 // 把 LCP 的连续候选位置转换为指定层上的网格点。
 routing::GridPoint lcp_grid_point(
     const routing::RoutingContext& context,
-    const LinkingControlPoint& point,
+    const PhysicalLocationCandidate& location,
     int layer) {
-    const auto location = point.location_candidates.empty() ? PhysicalLocationCandidate{} : point.location_candidates.front();
     return context.grid().snap_to_grid(routing::Point{location.x, location.y}, layer);
 }
 
@@ -87,30 +74,96 @@ int layer_for_lcp_segment(
 std::optional<routing::GridPoint> endpoint_grid_point(
     const routing::RoutingContext& context,
     const LinkingControlPoint& point,
+    const PhysicalLocationCandidate& location,
     const WireSegmentRef& segment,
     const std::string& endpoint) {
-    if (endpoint == point.id) return lcp_grid_point(context, point, layer_for_lcp_segment(context, segment));
+    if (endpoint == point.id) return lcp_grid_point(context, location, layer_for_lcp_segment(context, segment));
     return pin_grid_point(context, endpoint);
+}
+
+// 查找 net 的 FLOW 约束。
+std::optional<FlowConstraint> flow_for_net(const Circuit& circuit, const std::string& net) {
+    for (const auto& flow : circuit.constraints.flows) {
+        if (flow.net == net) return flow;
+    }
+    return std::nullopt;
+}
+
+// 判断候选拓扑方向是否满足 FLOW 逻辑方向。
+bool flow_ok_for_candidate(const Circuit& circuit, const routing::RouteCandidate& candidate) {
+    const auto flow = flow_for_net(circuit, candidate.net);
+    if (!flow.has_value()) return true;
+    if (candidate.from_terminal == flow->in_pin && candidate.to_terminal == flow->out_pin) return false;
+    if (candidate.from_terminal == flow->out_pin || candidate.to_terminal == flow->in_pin) return true;
+    return true;
+}
+
+// 补充候选路径的论文 penalty 分项。
+void annotate_candidate(const Circuit& circuit, routing::RouteCandidate& candidate, double current_density_penalty, double flow_penalty) {
+    candidate.flow_ok = flow_ok_for_candidate(circuit, candidate);
+    candidate.current_density_ok = candidate.path.success;
+    candidate.flow_penalty = candidate.flow_ok ? 0.0 : flow_penalty;
+    candidate.current_density_penalty = candidate.current_density_ok ? 0.0 : current_density_penalty;
 }
 
 // 为 LCP 拓扑中的每条逻辑 segment 生成 A* 候选路径。
 std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
     const routing::RoutingContext& context,
-    const RoutingEvaluationRequest& request) {
+    const RoutingEvaluationRequest& request,
+    const Circuit& circuit) {
     std::vector<routing::RouteCandidate> candidates;
     for (const auto& point : request.linking_points) {
+        const auto locations = point.location_candidates.empty()
+                                   ? std::vector<PhysicalLocationCandidate>{{0.0, 0.0, point.id + ":fallback"}}
+                                   : point.location_candidates;
         for (const auto& segment : point.segments) {
-            const auto start = endpoint_grid_point(context, point, segment, segment.from);
-            const auto goal = endpoint_grid_point(context, point, segment, segment.to);
-            if (!start.has_value() || !goal.has_value()) {
-                candidates.push_back({segment.net, segment.from, segment.to, routing::GridPath{false, "LCP endpoint cannot be resolved", {}, {}}});
-                continue;
+            for (const auto& location : locations) {
+                const auto start = endpoint_grid_point(context, point, location, segment, segment.from);
+                const auto goal = endpoint_grid_point(context, point, location, segment, segment.to);
+                routing::RouteCandidate candidate;
+                candidate.net = segment.net;
+                candidate.from_terminal = segment.from;
+                candidate.to_terminal = segment.to;
+                candidate.segment_id = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
+                candidate.lcp_candidate_id = location.id;
+                candidate.wire_width = std::max(segment.min_width, 1.0);
+                if (!start.has_value() || !goal.has_value()) {
+                    candidate.path = routing::GridPath{false, "LCP endpoint cannot be resolved", {}, {}};
+                    annotate_candidate(circuit, candidate, 50000.0, 50000.0);
+                    candidates.push_back(std::move(candidate));
+                    continue;
+                }
+                routing::AStarConfig config;
+                config.wire_width = candidate.wire_width;
+                candidate.path = routing::find_astar_path(context.grid(), context.obstacles(), *start, *goal, config);
+                annotate_candidate(circuit, candidate, 50000.0, 50000.0);
+                candidates.push_back(std::move(candidate));
             }
-            auto path = routing::find_astar_path(context.grid(), context.obstacles(), *start, *goal);
-            candidates.push_back({segment.net, segment.from, segment.to, std::move(path)});
         }
     }
     return candidates;
+}
+
+// 移除 A-B-A 型即时回折，减少 detailed routing 输出中的重复线段。
+std::vector<routing::GridPoint> prune_backtracks(std::vector<routing::GridPoint> points) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        std::vector<routing::GridPoint> pruned;
+        for (const auto& point : points) {
+            if (pruned.size() >= 2) {
+                const auto& before = pruned[pruned.size() - 2];
+                if (before.ix == point.ix && before.iy == point.iy && before.layer == point.layer) {
+                    pruned.pop_back();
+                    changed = true;
+                    continue;
+                }
+            }
+            pruned.push_back(point);
+        }
+        points = std::move(pruned);
+    }
+    return points;
 }
 
 // 判断两个网格步进是否在同一金属层上共线。
@@ -138,6 +191,12 @@ void append_segment(
     const auto start_xy = grid.grid_to_point(start);
     const auto end_xy = grid.grid_to_point(end);
     if (start_xy.x == end_xy.x && start_xy.y == end_xy.y) return;
+    for (const auto& route : routes) {
+        if (route.net != net || route.layer != routing::index_to_layer(layer)) continue;
+        const bool same_direction = route.x1 == start_xy.x && route.y1 == start_xy.y && route.x2 == end_xy.x && route.y2 == end_xy.y;
+        const bool reverse_direction = route.x1 == end_xy.x && route.y1 == end_xy.y && route.x2 == start_xy.x && route.y2 == start_xy.y;
+        if (same_direction || reverse_direction) return;
+    }
     routes.push_back({net, routing::index_to_layer(layer), start_xy.x, start_xy.y, end_xy.x, end_xy.y, width});
 }
 
@@ -146,10 +205,10 @@ void append_path_segments(
     std::vector<RouteSegment>& routes,
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate) {
-    const auto& points = candidate.path.points;
+    const auto points = prune_backtracks(candidate.path.points);
     if (points.size() < 2) return;
 
-    const double width = evaluation.context.default_width_for_net(candidate.net);
+    const double width = candidate.wire_width > 0.0 ? candidate.wire_width : evaluation.context.default_width_for_net(candidate.net);
     std::size_t start = 0;
     std::size_t cursor = 1;
     while (cursor < points.size()) {
@@ -169,12 +228,38 @@ void append_path_segments(
 
 }  // namespace
 
+// 返回 net priority 的 detailed routing 回溯顺序权重。
+int detailed_priority_rank(Priority priority) {
+    if (priority == Priority::Symmetry) return 0;
+    if (priority == Priority::Critical) return 1;
+    return 2;
+}
+
+// 按论文 detailed routing 优先级排序 net route。
+std::vector<const routing::NetRouteChoice*> ordered_detailed_routes(
+    const Circuit& circuit,
+    const RoutingEvaluation& evaluation) {
+    std::vector<const routing::NetRouteChoice*> routes;
+    for (const auto& route : evaluation.global_routing.net_routes) routes.push_back(&route);
+    std::stable_sort(routes.begin(), routes.end(), [&](const auto* left, const auto* right) {
+        const auto left_it = circuit.nets.find(left->net);
+        const auto right_it = circuit.nets.find(right->net);
+        const Priority left_priority = left_it == circuit.nets.end() ? Priority::Normal : left_it->second.priority;
+        const Priority right_priority = right_it == circuit.nets.end() ? Priority::Normal : right_it->second.priority;
+        return detailed_priority_rank(left_priority) < detailed_priority_rank(right_priority);
+    });
+    return routes;
+}
+
 // 根据当前 placement 执行布线上下文构建、候选路径生成和全局路径选择。
 RoutingEvaluation evaluate_routing(
     const Circuit& circuit,
     const std::unordered_map<std::string, Placement>& placements) {
     routing::RoutingContext context(circuit, placements);
     auto candidates = routing::generate_route_candidates(circuit, context);
+    for (auto& candidate : candidates) {
+        annotate_candidate(circuit, candidate, 50000.0, 50000.0);
+    }
     return make_evaluation(std::move(context), std::move(candidates), circuit);
 }
 
@@ -184,10 +269,12 @@ RoutingEvaluation evaluate_routing(
     const RoutingEvaluationRequest& request) {
     routing::RoutingContext context(circuit, request.placements);
     auto candidates = routing::generate_route_candidates(circuit, context);
+    for (auto& candidate : candidates) {
+        annotate_candidate(circuit, candidate, 50000.0, 50000.0);
+    }
     const auto lcp_nets = nets_with_lcp_topology(request);
     if (!lcp_nets.empty()) {
-        candidates = remove_direct_candidates_for_lcp_nets(std::move(candidates), lcp_nets);
-        auto lcp_candidates = generate_lcp_route_candidates(context, request);
+        auto lcp_candidates = generate_lcp_route_candidates(context, request, circuit);
         candidates.insert(
             candidates.end(),
             std::make_move_iterator(lcp_candidates.begin()),
@@ -207,6 +294,27 @@ std::vector<RouteSegment> selected_candidates_to_segments(
         }
     }
     return routes;
+}
+
+// 执行论文 top-down detailed routing 阶段，当前基于 DP 选中子问题回溯并清理路径。
+DetailedRoutingResult run_detailed_routing(
+    const Circuit& circuit,
+    const RoutingEvaluationRequest& request,
+    const RoutingEvaluation& evaluation) {
+    (void)request;
+    DetailedRoutingResult result;
+    for (const auto* net_route : ordered_detailed_routes(circuit, evaluation)) {
+        if (!net_route->success) continue;
+        for (const auto& candidate : net_route->selected_candidates) {
+            append_path_segments(result.routes, evaluation, candidate);
+            result.coupling_penalty += candidate.coupling_cost;
+            if (!candidate.flow_ok) ++result.flow_violations;
+            if (!candidate.current_density_ok) ++result.current_density_violations;
+        }
+        result.coupling_penalty += net_route->coupling_penalty;
+    }
+    result.used_global_fallback = false;
+    return result;
 }
 
 }  // namespace sapr

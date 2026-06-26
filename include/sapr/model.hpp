@@ -18,6 +18,9 @@ enum class Axis { Vertical, Horizontal };
 // 表示增强 B*-tree 中预留布线空间的论文语义。
 enum class SpaceNodeKind { Right, Top, Group, Cluster };
 
+// 表示 LCP 线段相对 FLOW 约束的逻辑电流方向。
+enum class CurrentDirection { Unknown, In, Out };
+
 // 表示二维轴对齐矩形。
 struct Rect {
     double x1{};
@@ -136,6 +139,11 @@ struct Metrics {
     int bend_count{};
     int via_count{};
     double penalty{};
+    double flow_penalty{};
+    double current_density_penalty{};
+    double coupling_penalty{};
+    double routing_failure_penalty{};
+    double design_rule_penalty{};
     int flow_violations{};
     int current_density_violations{};
     int routing_failures{};
@@ -174,12 +182,15 @@ struct WireSegmentRef {
     double min_width{};
     double max_width{};
     std::optional<std::string> direction;
+    CurrentDirection current_direction{CurrentDirection::Unknown};
+    std::string id;
 };
 
 // 表示 linking-control point 在所属 space node 内的候选物理位置。
 struct PhysicalLocationCandidate {
     double x{};
     double y{};
+    std::string id;
 };
 
 // 表示增强 B*-tree 中的拓扑控制点。
@@ -200,9 +211,16 @@ struct SpaceNode {
     SpaceNodeKind kind{SpaceNodeKind::Right};
     std::vector<LinkingControlPoint> linking_points;
     double allocated_space{};
+    std::vector<PhysicalLocationCandidate> location_candidates;
+    double coupling_extra_space{};
 
     // 按论文公式计算该空间节点需要预留的宽度。
     [[nodiscard]] double required_space() const;
+};
+
+// 表示 ASF 对称组中的一组镜像或轴间 space node。
+struct SpaceNodeBundle {
+    std::vector<SpaceNode> spaces;
 };
 
 // 表示增强 B*-tree 的一个器件节点。
@@ -227,6 +245,20 @@ struct SymmetryGroupNode {
     std::optional<std::string> right_most_module;
     SpaceNode space_group;
     SpaceNode space_cluster;
+    std::vector<std::string> half_tree_nodes;
+    std::unordered_map<std::string, std::string> mirror_map;
+    std::vector<std::string> self_nodes;
+    std::vector<std::string> right_most_branch;
+    SpaceNodeBundle space_group_bundle;
+    SpaceNodeBundle space_cluster_bundle;
+};
+
+// 表示一条 net 在增强 B*-tree 中的 LCP 拓扑摘要。
+struct NetTopology {
+    std::string net;
+    std::vector<std::string> pins;
+    std::vector<LinkingControlPoint> linking_points;
+    std::vector<WireSegmentRef> segments;
 };
 
 // 表示路由评价时已经展开到全局坐标的引脚。
@@ -246,6 +278,7 @@ struct RoutingEvaluationRequest {
     std::vector<SpaceNode> space_nodes;
     std::vector<PlacedPin> placed_pins;
     std::vector<LinkingControlPoint> linking_points;
+    std::vector<NetTopology> net_topologies;
     std::vector<Rect> active_region_blockers;
 };
 
@@ -254,8 +287,18 @@ struct RoutingFeedback {
     std::vector<RouteSegment> routes;
     Metrics metrics;
     std::unordered_map<std::string, double> required_space_by_node;
+    std::unordered_map<std::string, double> coupling_space_by_node;
     double routing_cost{};
     std::size_t routing_candidate_count{};
+};
+
+// 表示 top-down performance-aware detailed routing 的输出。
+struct DetailedRoutingResult {
+    std::vector<RouteSegment> routes;
+    double coupling_penalty{};
+    int flow_violations{};
+    int current_density_violations{};
+    bool used_global_fallback{};
 };
 
 // 表示当前阶段的增强 B*-tree 拓扑。

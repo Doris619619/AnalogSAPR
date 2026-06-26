@@ -123,7 +123,11 @@ int run_solver(const std::vector<std::string>& args) {
                   << "  global_wirelength: " << metrics.wirelength << '\n'
                   << "  global_bends: " << metrics.bend_count << '\n'
                   << "  global_vias: " << metrics.via_count << '\n'
-                  << "  global_penalty: " << metrics.penalty << '\n';
+                  << "  global_penalty: " << metrics.penalty << '\n'
+                  << "  flow_penalty: " << metrics.flow_penalty << '\n'
+                  << "  current_density_penalty: " << metrics.current_density_penalty << '\n'
+                  << "  coupling_penalty: " << metrics.coupling_penalty << '\n'
+                  << "  routing_failure_penalty: " << metrics.routing_failure_penalty << '\n';
     }
     return 0;
 }
