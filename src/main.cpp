@@ -10,7 +10,6 @@
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
 #include "sapr/router.hpp"
-#include "sapr/routing_evaluator.hpp"
 
 namespace {
 
@@ -104,7 +103,7 @@ int run_solver(const std::vector<std::string>& args) {
         return 1;
     }
     sapr::write_solution(solution, output);
-    const auto metrics = sapr::measure(circuit, solution);
+    const auto metrics = solution.metrics.value_or(sapr::measure(circuit, solution));
     std::cout << std::fixed << std::setprecision(2)
               << "{\n"
               << "  \"area\": " << metrics.area << ",\n"
@@ -114,16 +113,21 @@ int run_solver(const std::vector<std::string>& args) {
               << "  \"wirelength\": " << metrics.wirelength << "\n"
               << "}\n";
     if (dump_routing_eval) {
-        const auto evaluation = sapr::evaluate_routing(circuit, solution.placements);
+        const double routing_cost = solution.routing_cost.value_or(
+            metrics.wirelength + 0.2 * static_cast<double>(metrics.bend_count) + metrics.penalty);
         std::cout << std::fixed << std::setprecision(2)
                   << "routing_evaluation:\n"
-                  << "  routing_cost: " << evaluation.routing_cost << '\n'
-                  << "  failed_nets: " << evaluation.failed_nets << '\n'
-                  << "  candidate_count: " << evaluation.candidates.size() << '\n'
-                  << "  global_wirelength: " << evaluation.global_routing.total_metrics.wirelength << '\n'
-                  << "  global_bends: " << evaluation.global_routing.total_metrics.bend_count << '\n'
-                  << "  global_vias: " << evaluation.global_routing.total_metrics.via_count << '\n'
-                  << "  global_penalty: " << evaluation.global_routing.total_penalty << '\n';
+                  << "  routing_cost: " << routing_cost << '\n'
+                  << "  failed_nets: " << metrics.routing_failures << '\n'
+                  << "  candidate_count: " << solution.routing_candidate_count.value_or(0) << '\n'
+                  << "  global_wirelength: " << metrics.wirelength << '\n'
+                  << "  global_bends: " << metrics.bend_count << '\n'
+                  << "  global_vias: " << metrics.via_count << '\n'
+                  << "  global_penalty: " << metrics.penalty << '\n'
+                  << "  flow_penalty: " << metrics.flow_penalty << '\n'
+                  << "  current_density_penalty: " << metrics.current_density_penalty << '\n'
+                  << "  coupling_penalty: " << metrics.coupling_penalty << '\n'
+                  << "  routing_failure_penalty: " << metrics.routing_failure_penalty << '\n';
     }
     return 0;
 }

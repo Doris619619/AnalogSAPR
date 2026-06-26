@@ -26,8 +26,12 @@ public:
 
     // 查询连续坐标在指定层是否被障碍物阻塞。
     [[nodiscard]] bool is_blocked(const Point& point, int layer) const;
+    // 按线宽半径膨胀障碍物后查询连续坐标是否被阻塞。
+    [[nodiscard]] bool is_blocked(const Point& point, int layer, double wire_width) const;
     // 查询网格点是否被阻塞，terminal 点会作为例外放行。
     [[nodiscard]] bool is_blocked(const GridPoint& point, const Grid& grid) const;
+    // 按线宽半径膨胀障碍物后查询网格点是否被阻塞。
+    [[nodiscard]] bool is_blocked(const GridPoint& point, const Grid& grid, double wire_width) const;
     // 返回所有障碍物，供调试和可视化使用。
     [[nodiscard]] const std::vector<Obstacle>& obstacles() const;
     // 估算当前网格中被障碍物阻塞的网格点数量。

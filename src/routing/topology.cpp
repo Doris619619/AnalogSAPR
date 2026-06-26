@@ -4,6 +4,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #include "sapr/routing/astar.hpp"
 
@@ -22,10 +23,10 @@ std::string path_signature(const GridPath& path) {
 // 返回用于产生不同候选路径的 A* 权重组合。
 std::vector<AStarConfig> candidate_astar_configs() {
     return {
-        AStarConfig{1.0, 3.0, 5.0, 200000},
-        AStarConfig{1.0, 8.0, 5.0, 200000},
-        AStarConfig{1.0, 3.0, 12.0, 200000},
-        AStarConfig{1.0, 1.0, 3.0, 200000},
+        AStarConfig{1.0, 3.0, 5.0, 1.0, 20000},
+        AStarConfig{1.0, 8.0, 5.0, 1.0, 20000},
+        AStarConfig{1.0, 3.0, 12.0, 1.0, 20000},
+        AStarConfig{1.0, 1.0, 3.0, 1.0, 20000},
     };
 }
 
@@ -75,7 +76,13 @@ std::vector<RouteCandidate> generate_route_candidates(
         const std::string& root_terminal = net.terminals.front();
         const GlobalPin* root_pin = find_global_pin(context, root_terminal);
         if (root_pin == nullptr) {
-            candidates.push_back(RouteCandidate{net_name, root_terminal, "", GridPath{false, "root terminal has no global pin", {}, {}}});
+            RouteCandidate candidate;
+            candidate.net = net_name;
+            candidate.from_terminal = root_terminal;
+            candidate.path = GridPath{false, "root terminal has no global pin", {}, {}};
+            candidate.segment_id = net_name + ":" + root_terminal + "->";
+            candidate.current_density_ok = false;
+            candidates.push_back(std::move(candidate));
             continue;
         }
 
@@ -83,20 +90,29 @@ std::vector<RouteCandidate> generate_route_candidates(
             const std::string& target_terminal = net.terminals[terminal_index];
             const GlobalPin* target_pin = find_global_pin(context, target_terminal);
             if (target_pin == nullptr) {
-                candidates.push_back(RouteCandidate{net_name, root_terminal, target_terminal, GridPath{false, "target terminal has no global pin", {}, {}}});
+                RouteCandidate candidate;
+                candidate.net = net_name;
+                candidate.from_terminal = root_terminal;
+                candidate.to_terminal = target_terminal;
+                candidate.path = GridPath{false, "target terminal has no global pin", {}, {}};
+                candidate.segment_id = net_name + ":" + root_terminal + "->" + target_terminal;
+                candidate.current_density_ok = false;
+                candidates.push_back(std::move(candidate));
                 continue;
             }
 
             const GridPoint start = grid.snap_to_grid(root_pin->location, root_pin->layer);
             const GridPoint goal = grid.snap_to_grid(target_pin->location, target_pin->layer);
+            const double wire_width = context.default_width_for_net(net_name);
             std::set<std::string> seen_paths;
             int emitted = 0;
             GridPath first_failure;
             bool has_failure = false;
-            for (const auto& astar_config : candidate_astar_configs()) {
+            for (auto astar_config : candidate_astar_configs()) {
                 if (emitted >= config.max_candidates_per_pair) {
                     break;
                 }
+                astar_config.wire_width = wire_width;
                 GridPath path = find_astar_path(grid, obstacles, start, goal, astar_config);
                 if (!path.success) {
                     if (!has_failure) {
@@ -108,12 +124,28 @@ std::vector<RouteCandidate> generate_route_candidates(
 
                 const std::string signature = path_signature(path);
                 if (seen_paths.insert(signature).second) {
-                    candidates.push_back(RouteCandidate{net_name, root_terminal, target_terminal, path});
+                    RouteCandidate candidate;
+                    candidate.net = net_name;
+                    candidate.from_terminal = root_terminal;
+                    candidate.to_terminal = target_terminal;
+                    candidate.path = std::move(path);
+                    candidate.segment_id = net_name + ":" + root_terminal + "->" + target_terminal;
+                    candidate.wire_width = wire_width;
+                    candidate.current_density_ok = path.success;
+                    candidates.push_back(candidate);
                     ++emitted;
                 }
             }
             if (emitted == 0 && has_failure) {
-                candidates.push_back(RouteCandidate{net_name, root_terminal, target_terminal, first_failure});
+                RouteCandidate candidate;
+                candidate.net = net_name;
+                candidate.from_terminal = root_terminal;
+                candidate.to_terminal = target_terminal;
+                candidate.path = std::move(first_failure);
+                candidate.segment_id = net_name + ":" + root_terminal + "->" + target_terminal;
+                candidate.wire_width = wire_width;
+                candidate.current_density_ok = false;
+                candidates.push_back(candidate);
             }
         }
     }

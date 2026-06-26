@@ -30,6 +30,14 @@ struct RouteCandidate {
     std::string from_terminal;
     std::string to_terminal;
     GridPath path;
+    std::string segment_id;
+    std::string lcp_candidate_id;
+    double wire_width{1.0};
+    bool flow_ok{true};
+    bool current_density_ok{true};
+    double flow_penalty{};
+    double current_density_penalty{};
+    double coupling_cost{};
 };
 
 }  // namespace sapr::routing

@@ -13,6 +13,7 @@
 #include "sapr/constraints.hpp"
 #include "sapr/geometry.hpp"
 #include "sapr/router.hpp"
+#include "sapr/routing_evaluator.hpp"
 #include "sapr/tree.hpp"
 
 namespace sapr {
@@ -145,17 +146,39 @@ void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& 
     for (auto space : request.space_nodes) {
         const auto center = module_centers.contains(space.owner) ? module_centers.at(space.owner) : std::pair<double, double>{0.0, 0.0};
         const double offset = std::max(space.required_space(), 1.0);
+        space.location_candidates.clear();
+        space.location_candidates.push_back({center.first + offset, center.second, space.id + ":edge"});
+        space.location_candidates.push_back({center.first, center.second + offset, space.id + ":top"});
+        space.location_candidates.push_back({center.first + offset / 2.0, center.second + offset / 2.0, space.id + ":center"});
         for (auto point : space.linking_points) {
             point.location_candidates.clear();
             if (space.kind == SpaceNodeKind::Top) {
-                point.location_candidates.push_back({center.first, center.second + offset});
+                point.location_candidates.push_back({center.first, center.second + offset, point.id + ":top"});
             } else if (space.kind == SpaceNodeKind::Cluster) {
-                point.location_candidates.push_back({center.first + offset / 2.0, center.second});
+                point.location_candidates.push_back({center.first + offset / 2.0, center.second, point.id + ":axis"});
             } else {
-                point.location_candidates.push_back({center.first + offset, center.second});
+                point.location_candidates.push_back({center.first + offset, center.second, point.id + ":right"});
             }
+            point.location_candidates.push_back({center.first + offset / 2.0, center.second + offset / 2.0, point.id + ":center"});
+            point.location_candidates.push_back({center.first, center.second + offset, point.id + ":pin_projection"});
             request.linking_points.push_back(std::move(point));
         }
+    }
+    std::unordered_map<std::string, NetTopology> topologies;
+    for (const auto& [name, net] : circuit.nets) {
+        topologies[name].net = name;
+        topologies[name].pins = net.terminals;
+    }
+    for (const auto& point : request.linking_points) {
+        for (const auto& segment : point.segments) {
+            auto& topology = topologies[segment.net];
+            topology.net = segment.net;
+            topology.linking_points.push_back(point);
+            topology.segments.push_back(segment);
+        }
+    }
+    for (auto& [_, topology] : topologies) {
+        if (!topology.segments.empty()) request.net_topologies.push_back(std::move(topology));
     }
 }
 
@@ -190,6 +213,9 @@ Solution make_solution(const CandidateState& state) {
     solution.placements = state.request.placements;
     solution.placement_order = state.request.placement_order;
     solution.routes = state.feedback.routes;
+    solution.metrics = state.feedback.metrics;
+    solution.routing_cost = state.feedback.routing_cost;
+    solution.routing_candidate_count = state.feedback.routing_candidate_count;
     return solution;
 }
 
@@ -272,21 +298,40 @@ RoutingEvaluationRequest pack_enhanced_tree(
 // 使用 routing adapter 评价当前 placement candidate。
 RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const RoutingEvaluationRequest& request) {
     RoutingFeedback feedback;
-    feedback.routes = route_manhattan(circuit, request.placements);
-    Solution solution{request.placements, request.placement_order, feedback.routes};
+    const auto routing_evaluation = evaluate_routing(circuit, request);
+    const auto detailed = run_detailed_routing(circuit, request, routing_evaluation);
+    feedback.routes = detailed.routes;
+    if (feedback.routes.empty() && routing_evaluation.failed_nets > 0) {
+        feedback.routes = selected_candidates_to_segments(routing_evaluation);
+    }
+    if (feedback.routes.empty() && routing_evaluation.failed_nets > 0) {
+        feedback.routes = route_manhattan(circuit, request.placements);
+    }
+    Solution solution;
+    solution.placements = request.placements;
+    solution.placement_order = request.placement_order;
+    solution.routes = feedback.routes;
     feedback.metrics = measure(circuit, solution);
+    feedback.metrics.wirelength = routing_evaluation.global_routing.total_metrics.wirelength;
+    feedback.metrics.bend_count = routing_evaluation.global_routing.total_metrics.bend_count;
+    feedback.metrics.via_count = routing_evaluation.global_routing.total_metrics.via_count;
     feedback.metrics.flow_violations = count_flow_violations(circuit, request, feedback.routes);
     feedback.metrics.current_density_violations = count_current_density_violations(circuit, feedback.routes);
-    feedback.metrics.routing_failures = feedback.routes.empty() && !circuit.net_order.empty() ? 1 : 0;
+    feedback.metrics.flow_violations += detailed.flow_violations;
+    feedback.metrics.current_density_violations += detailed.current_density_violations;
+    feedback.metrics.routing_failures = routing_evaluation.failed_nets;
     feedback.metrics.congestion_penalty = 0.0;
-    feedback.metrics.penalty += 1000.0 * static_cast<double>(
-                                           feedback.metrics.flow_violations + feedback.metrics.current_density_violations +
-                                           feedback.metrics.routing_failures);
+    feedback.metrics.flow_penalty = routing_evaluation.global_routing.flow_penalty;
+    feedback.metrics.current_density_penalty = routing_evaluation.global_routing.current_density_penalty;
+    feedback.metrics.coupling_penalty = routing_evaluation.global_routing.coupling_penalty;
+    feedback.metrics.routing_failure_penalty = routing_evaluation.global_routing.routing_failure_penalty;
+    feedback.metrics.penalty += routing_evaluation.global_routing.total_penalty;
+    feedback.routing_cost = routing_evaluation.routing_cost;
+    feedback.routing_candidate_count = routing_evaluation.candidates.size();
 
     for (const auto& space : request.space_nodes) {
-        double required = space.required_space();
-        for (const auto& point : space.linking_points) required += 0.1 * static_cast<double>(point.segments.size());
-        feedback.required_space_by_node[space.id] = required;
+        feedback.required_space_by_node[space.id] = space.required_space();
+        feedback.coupling_space_by_node[space.id] = routing_evaluation.global_routing.coupling_penalty > 0.0 ? 1.0 : 0.0;
     }
     return feedback;
 }

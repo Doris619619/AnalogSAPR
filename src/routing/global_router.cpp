@@ -45,7 +45,8 @@ std::int64_t point_key(const GridPoint& point) {
 // 计算候选路径的 DP 代价，不包含 via cost。
 double candidate_dp_cost(const RouteCandidate& candidate, const GlobalRouterConfig& config) {
     return config.wirelength_weight * candidate.path.metrics.wirelength +
-           config.bend_weight * static_cast<double>(candidate.path.metrics.bend_count);
+           config.bend_weight * static_cast<double>(candidate.path.metrics.bend_count) +
+           candidate.flow_penalty + candidate.current_density_penalty + candidate.coupling_cost;
 }
 
 // 将路径指标累加到 net 指标中，via 只统计不进入 cost。
@@ -182,6 +183,7 @@ GlobalRoutingResult run_global_routing(
         const auto groups = groups_for_net(net->name, candidates);
         if (groups.empty()) {
             choice.success = false;
+            choice.routing_failure_penalty += config.failed_pair_penalty;
             choice.penalty += config.failed_pair_penalty;
             choice.message = "no terminal-pair candidates";
         }
@@ -191,6 +193,7 @@ GlobalRoutingResult run_global_routing(
             const RouteCandidate* selected = choose_best_candidate(group, occupied_by_net, config, penalty);
             if (selected == nullptr) {
                 choice.success = false;
+                choice.routing_failure_penalty += config.failed_pair_penalty;
                 choice.penalty += config.failed_pair_penalty;
                 choice.message = append_message(
                     choice.message,
@@ -199,7 +202,11 @@ GlobalRoutingResult run_global_routing(
             }
 
             choice.selected_candidates.push_back(*selected);
+            choice.flow_penalty += selected->flow_penalty;
+            choice.current_density_penalty += selected->current_density_penalty;
+            choice.coupling_penalty += penalty + selected->coupling_cost;
             choice.penalty += penalty;
+            choice.penalty += selected->flow_penalty + selected->current_density_penalty + selected->coupling_cost;
             add_metrics(choice.metrics, selected->path.metrics, config);
         }
 
@@ -213,6 +220,10 @@ GlobalRoutingResult run_global_routing(
         }
 
         result.total_penalty += choice.penalty;
+        result.flow_penalty += choice.flow_penalty;
+        result.current_density_penalty += choice.current_density_penalty;
+        result.coupling_penalty += choice.coupling_penalty;
+        result.routing_failure_penalty += choice.routing_failure_penalty;
         result.total_metrics.wirelength += choice.metrics.wirelength;
         result.total_metrics.bend_count += choice.metrics.bend_count;
         result.total_metrics.via_count += choice.metrics.via_count;

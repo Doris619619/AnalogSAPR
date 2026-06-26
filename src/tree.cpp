@@ -24,6 +24,16 @@ std::optional<std::string> flow_direction_for_net(const Circuit& circuit, const 
     return std::nullopt;
 }
 
+// 返回端点相对 FLOW 约束的方向标记。
+CurrentDirection current_direction_for_endpoint(const Circuit& circuit, const std::string& net, const std::string& endpoint) {
+    for (const auto& flow : circuit.constraints.flows) {
+        if (flow.net != net) continue;
+        if (flow.out_pin == endpoint) return CurrentDirection::Out;
+        if (flow.in_pin == endpoint) return CurrentDirection::In;
+    }
+    return CurrentDirection::Unknown;
+}
+
 // 判断线网是否触碰指定模块。
 bool net_touches_module(const Net& net, const std::string& module) {
     for (const auto& terminal : net.terminals) {
@@ -41,18 +51,51 @@ std::vector<WireSegmentRef> make_segments_for_net(const Circuit& circuit, const 
     const auto direction = flow_direction_for_net(circuit, net.name);
     const std::string root = net.terminals.front();
     for (std::size_t index = 1; index < net.terminals.size(); ++index) {
-        segments.push_back({net.name, root, lcp_id, min_width, max_width, direction});
-        segments.push_back({net.name, lcp_id, net.terminals[index], min_width, max_width, direction});
+        segments.push_back({net.name,
+                            root,
+                            lcp_id,
+                            min_width,
+                            max_width,
+                            direction,
+                            current_direction_for_endpoint(circuit, net.name, root),
+                            net.name + ":" + root + "->" + lcp_id});
+        segments.push_back({net.name,
+                            lcp_id,
+                            net.terminals[index],
+                            min_width,
+                            max_width,
+                            direction,
+                            current_direction_for_endpoint(circuit, net.name, net.terminals[index]),
+                            net.name + ":" + lcp_id + "->" + net.terminals[index]});
     }
     return segments;
+}
+
+// 创建一个带稳定候选容器的 space node。
+SpaceNode make_space_node(const std::string& id, const std::string& owner, SpaceNodeKind kind) {
+    return {id, owner, kind, {}, 0.0, {}, 0.0};
+}
+
+// 为对称组构造论文 Fig. 5 中的 mirrored space node group。
+SpaceNodeBundle make_space_group_bundle(const std::string& group_name, const std::string& owner) {
+    return {{{group_name + ":group:right_left", owner, SpaceNodeKind::Group, {}, 0.0, {}, 0.0},
+             {group_name + ":group:top_pair", owner, SpaceNodeKind::Group, {}, 0.0, {}, 0.0}}};
+}
+
+// 为对称组构造论文 Fig. 5 中的四空间 cluster。
+SpaceNodeBundle make_space_cluster_bundle(const std::string& group_name, const std::string& owner) {
+    return {{{group_name + ":cluster:left_right", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0},
+             {group_name + ":cluster:left_top", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0},
+             {group_name + ":cluster:right_right", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0},
+             {group_name + ":cluster:right_top", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0}}};
 }
 
 // 为模块创建论文中的右侧和上侧 space node，并初始化触碰线网的 LCP。
 BStarNode make_node(const Circuit& circuit, const std::string& module) {
     BStarNode node;
     node.module = module;
-    node.right_space = {module + ":right", module, SpaceNodeKind::Right, {}, 0.0};
-    node.top_space = {module + ":top", module, SpaceNodeKind::Top, {}, 0.0};
+    node.right_space = make_space_node(module + ":right", module, SpaceNodeKind::Right);
+    node.top_space = make_space_node(module + ":top", module, SpaceNodeKind::Top);
     for (const auto& net_name : circuit.net_order) {
         const auto& net = circuit.nets.at(net_name);
         if (!net_touches_module(net, module) || net.terminals.size() < 2) continue;
@@ -136,9 +179,17 @@ std::size_t reachable_count(const EnhancedBStarTree& tree) {
 // 给匹配的 space node 写入 routing resource 反馈。
 bool update_space_node(SpaceNode& space, const RoutingFeedback& feedback) {
     const auto found = feedback.required_space_by_node.find(space.id);
-    if (found == feedback.required_space_by_node.end()) return false;
-    space.allocated_space = std::max(space.allocated_space, found->second);
-    return true;
+    const auto coupling_found = feedback.coupling_space_by_node.find(space.id);
+    bool updated = false;
+    if (found != feedback.required_space_by_node.end()) {
+        space.allocated_space = std::max(space.allocated_space, found->second);
+        updated = true;
+    }
+    if (coupling_found != feedback.coupling_space_by_node.end()) {
+        space.coupling_extra_space = std::max(space.coupling_extra_space, coupling_found->second);
+        updated = true;
+    }
+    return updated;
 }
 
 }  // namespace
@@ -152,7 +203,7 @@ double LinkingControlPoint::required_width() const {
 
 // 按论文公式计算该空间节点需要预留的宽度。
 double SpaceNode::required_space() const {
-    double result = allocated_space;
+    double result = allocated_space + coupling_extra_space;
     double formula = 0.0;
     for (const auto& point : linking_points) {
         formula += point.required_width() * static_cast<double>(std::max<std::size_t>(point.segments.size(), 2)) / 2.0;
@@ -191,8 +242,14 @@ EnhancedBStarTree make_enhanced_tree(const Circuit& circuit) {
                                         false,
                                         {pair.left},
                                         std::nullopt,
-                                        {pair.name + ":space_group", pair.left, SpaceNodeKind::Group, {}, 0.0},
-                                        {pair.name + ":space_cluster", pair.left, SpaceNodeKind::Cluster, {}, 0.0}});
+                                        make_space_node(pair.name + ":space_group", pair.left, SpaceNodeKind::Group),
+                                        make_space_node(pair.name + ":space_cluster", pair.left, SpaceNodeKind::Cluster),
+                                        {pair.left},
+                                        {{pair.left, pair.right}},
+                                        {},
+                                        {},
+                                        make_space_group_bundle(pair.name, pair.left),
+                                        make_space_cluster_bundle(pair.name, pair.left)});
     }
     for (const auto& self : circuit.constraints.symmetry_selfs) {
         tree.symmetry_groups.push_back({self.name,
@@ -202,8 +259,14 @@ EnhancedBStarTree make_enhanced_tree(const Circuit& circuit) {
                                         true,
                                         {self.module},
                                         self.module,
-                                        {self.name + ":space_group", self.module, SpaceNodeKind::Group, {}, 0.0},
-                                        {self.name + ":space_cluster", self.module, SpaceNodeKind::Cluster, {}, 0.0}});
+                                        make_space_node(self.name + ":space_group", self.module, SpaceNodeKind::Group),
+                                        make_space_node(self.name + ":space_cluster", self.module, SpaceNodeKind::Cluster),
+                                        {self.module},
+                                        {},
+                                        {self.module},
+                                        {self.module},
+                                        make_space_group_bundle(self.name, self.module),
+                                        make_space_cluster_bundle(self.name, self.module)});
     }
 
     rebuild_asf_tree(tree);
@@ -235,6 +298,8 @@ std::vector<SpaceNode> collect_space_nodes(const EnhancedBStarTree& tree) {
     for (const auto& group : tree.symmetry_groups) {
         result.push_back(group.space_group);
         result.push_back(group.space_cluster);
+        for (const auto& space : group.space_group_bundle.spaces) result.push_back(space);
+        for (const auto& space : group.space_cluster_bundle.spaces) result.push_back(space);
     }
     return result;
 }
@@ -280,6 +345,8 @@ void apply_routing_feedback(EnhancedBStarTree& tree, const RoutingFeedback& feed
     for (auto& group : tree.symmetry_groups) {
         update_space_node(group.space_group, feedback);
         update_space_node(group.space_cluster, feedback);
+        for (auto& space : group.space_group_bundle.spaces) update_space_node(space, feedback);
+        for (auto& space : group.space_cluster_bundle.spaces) update_space_node(space, feedback);
     }
 }
 

@@ -25,4 +25,19 @@ RoutingEvaluation evaluate_routing(
     const Circuit& circuit,
     const std::unordered_map<std::string, Placement>& placements);
 
+// 根据 placement candidate 中的 LCP 拓扑执行 A*/DP 布线评估。
+RoutingEvaluation evaluate_routing(
+    const Circuit& circuit,
+    const RoutingEvaluationRequest& request);
+
+// 将 DP 全局布线选中的 A* 网格路径转换为当前 routing.txt 使用的中心线线段。
+std::vector<RouteSegment> selected_candidates_to_segments(
+    const RoutingEvaluation& evaluation);
+
+// 执行论文 top-down detailed routing 阶段，当前基于 DP 选中子问题回溯并清理路径。
+DetailedRoutingResult run_detailed_routing(
+    const Circuit& circuit,
+    const RoutingEvaluationRequest& request,
+    const RoutingEvaluation& evaluation);
+
 }  // namespace sapr
