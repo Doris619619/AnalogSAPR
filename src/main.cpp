@@ -10,6 +10,7 @@
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
 #include "sapr/router.hpp"
+#include "sapr/routing_evaluator.hpp"
 
 namespace {
 
@@ -51,13 +52,21 @@ unsigned int option_uint(const std::vector<std::string>& args, const std::string
     return static_cast<unsigned int>(parsed);
 }
 
+// 判断某个无值命令行选项是否存在。
+bool has_option(const std::vector<std::string>& args, const std::string& option) {
+    for (const auto& arg : args) {
+        if (arg == option) return true;
+    }
+    return false;
+}
+
 // 输出 CLI 使用说明。
 void print_usage() {
     std::cerr << "Usage:\n"
               << "  sapr validate [--input input]\n"
               << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n"
               << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
-              << "           [--cooling-rate 0.96]\n";
+              << "           [--cooling-rate 0.96] [--dump-routing-eval]\n";
 }
 
 // 执行输入校验命令。
@@ -84,6 +93,7 @@ int run_solver(const std::vector<std::string>& args) {
     config.sa_iterations = option_int(args, "--sa-iterations", config.sa_iterations);
     config.initial_temperature = option_double(args, "--initial-temperature", config.initial_temperature);
     config.cooling_rate = option_double(args, "--cooling-rate", config.cooling_rate);
+    const bool dump_routing_eval = has_option(args, "--dump-routing-eval");
 
     const auto circuit = sapr::load_circuit(input);
     const auto solution = sapr::solve_baseline(circuit, config);
@@ -103,6 +113,18 @@ int run_solver(const std::vector<std::string>& args) {
               << "  \"via_count\": " << metrics.via_count << ",\n"
               << "  \"wirelength\": " << metrics.wirelength << "\n"
               << "}\n";
+    if (dump_routing_eval) {
+        const auto evaluation = sapr::evaluate_routing(circuit, solution.placements);
+        std::cout << std::fixed << std::setprecision(2)
+                  << "routing_evaluation:\n"
+                  << "  routing_cost: " << evaluation.routing_cost << '\n'
+                  << "  failed_nets: " << evaluation.failed_nets << '\n'
+                  << "  candidate_count: " << evaluation.candidates.size() << '\n'
+                  << "  global_wirelength: " << evaluation.global_routing.total_metrics.wirelength << '\n'
+                  << "  global_bends: " << evaluation.global_routing.total_metrics.bend_count << '\n'
+                  << "  global_vias: " << evaluation.global_routing.total_metrics.via_count << '\n'
+                  << "  global_penalty: " << evaluation.global_routing.total_penalty << '\n';
+    }
     return 0;
 }
 

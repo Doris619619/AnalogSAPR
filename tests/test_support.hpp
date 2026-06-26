@@ -29,3 +29,5 @@ void run_io_tests();
 void run_constraint_tests();
 // 运行几何、树、路由和指标测试。
 void run_router_tests();
+// 运行 A*/DP 布线评估集成测试。
+void run_routing_evaluator_tests();
