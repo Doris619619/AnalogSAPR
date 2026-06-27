@@ -13,6 +13,7 @@
 #include "sapr/constraints.hpp"
 #include "sapr/geometry.hpp"
 #include "sapr/router.hpp"
+#include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
 #include "sapr/tree.hpp"
 
@@ -124,8 +125,7 @@ std::vector<std::string> ordered_placements(const Circuit& circuit, const Routin
 
 // 返回已放置模块的 active blocker 近似全局矩形。
 Rect placed_active_rect(const Module& module, const Placement& placement) {
-    const auto size = placed_size(module, placement);
-    return {placement.x, placement.y, placement.x + size.first, placement.y + size.second};
+    return routing::transform_active_to_global(module, placement);
 }
 
 // 填充 routing request 中面向 DP/A* 的全局 pin、blocker 和 LCP 候选位置。

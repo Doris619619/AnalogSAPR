@@ -1,8 +1,10 @@
 // 文件职责：验证 routing evaluator 可以在样例输入上完成 A*/DP 布线评估。
 #include <filesystem>
+#include <unordered_map>
 
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
+#include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
 #include "test_support.hpp"
 
@@ -11,6 +13,55 @@ namespace {
 // 返回测试使用的输入目录。
 std::filesystem::path source_input_dir() {
     return std::filesystem::path(SAPR_SOURCE_DIR) / "input";
+}
+
+// 构造一个 active 小于 bbox 的最小电路，用于检查 DRC blocker 是否使用真实 active。
+sapr::Circuit make_active_region_test_circuit() {
+    sapr::Circuit circuit;
+    circuit.modules.emplace("M", sapr::Module{"M", 10.0, 10.0, sapr::Rect{4.0, 4.0, 6.0, 6.0}, 0.0, 0.0, ""});
+    circuit.module_order.push_back("M");
+    circuit.pins.emplace("M.A", sapr::Pin{"M", "A", 0.0, 1.0, "M1"});
+    circuit.pins.emplace("M.B", sapr::Pin{"M", "B", 9.0, 1.0, "M1"});
+    circuit.pin_order = {"M.A", "M.B"};
+    circuit.nets.emplace("N", sapr::Net{"N", sapr::Priority::Normal, {"M.A", "M.B"}});
+    circuit.net_order.push_back("N");
+    return circuit;
+}
+
+// 构造一条水平 selected candidate，让 detailed routing 只测试 DRC 统计逻辑。
+sapr::RoutingEvaluation make_line_evaluation(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements,
+    double y) {
+    sapr::routing::RoutingContext context(circuit, placements);
+    sapr::routing::RouteCandidate candidate;
+    candidate.net = "N";
+    candidate.from_terminal = "M.A";
+    candidate.to_terminal = "M.B";
+    candidate.wire_width = 1.0;
+    candidate.path.success = true;
+    candidate.path.points = {
+        context.grid().snap_to_grid(sapr::routing::Point{0.0, y}, 0),
+        context.grid().snap_to_grid(sapr::routing::Point{9.0, y}, 0),
+    };
+    candidate.path.metrics.wirelength = 9.0;
+
+    sapr::routing::NetRouteChoice choice;
+    choice.net = "N";
+    choice.selected_candidates.push_back(candidate);
+
+    sapr::routing::GlobalRoutingResult global;
+    global.net_routes.push_back(choice);
+    global.total_metrics.wirelength = 9.0;
+
+    sapr::RoutingEvaluation evaluation{
+        std::move(context),
+        {candidate},
+        std::move(global),
+        9.0,
+        0,
+    };
+    return evaluation;
 }
 
 }  // namespace
@@ -75,4 +126,22 @@ void run_routing_evaluator_tests() {
         3.0 * static_cast<double>(evaluation.global_routing.total_metrics.bend_count) +
         evaluation.global_routing.total_penalty;
     require(approx(evaluation.routing_cost, expected_cost), "global routing cost must not include via count");
+
+    const auto drc_circuit = make_active_region_test_circuit();
+    const std::unordered_map<std::string, sapr::Placement> drc_placements{
+        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+    };
+    sapr::RoutingEvaluationRequest drc_request;
+    drc_request.placements = drc_placements;
+    drc_request.placement_order = {"M"};
+    drc_request.active_region_blockers.push_back(
+        sapr::routing::transform_active_to_global(drc_circuit.modules.at("M"), drc_placements.at("M")));
+
+    auto bbox_margin_eval = make_line_evaluation(drc_circuit, drc_placements, 1.0);
+    const auto bbox_margin_detail = sapr::run_detailed_routing(drc_circuit, drc_request, bbox_margin_eval);
+    require(bbox_margin_detail.design_rule_violations == 0, "bbox margin route should not count as active-region DRC");
+
+    auto active_crossing_eval = make_line_evaluation(drc_circuit, drc_placements, 5.0);
+    const auto active_crossing_detail = sapr::run_detailed_routing(drc_circuit, drc_request, active_crossing_eval);
+    require(active_crossing_detail.design_rule_violations > 0, "active crossing route should count as DRC");
 }

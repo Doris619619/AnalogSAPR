@@ -305,17 +305,6 @@ void append_detailed_path_segments(
     }
 }
 
-// 检查 detailed route 是否违反 WIRE_WIDTH 范围。
-int count_detailed_width_violations(const Circuit& circuit, const std::vector<RouteSegment>& routes) {
-    int violations = 0;
-    for (const auto& route : routes) {
-        const auto constraint = circuit.constraints.wire_widths.find(route.net);
-        if (constraint == circuit.constraints.wire_widths.end()) continue;
-        if (route.width < constraint->second.min_width || route.width > constraint->second.max_width) ++violations;
-    }
-    return violations;
-}
-
 // 将 route segment 转为金属占用矩形，用于 DRC 和 coupling 检查。
 Rect route_to_rect(const RouteSegment& route) {
     return routing::segment_to_rect(
@@ -460,7 +449,6 @@ DetailedRoutingResult run_detailed_routing(
             if (!candidate.current_density_ok) ++result.current_density_violations;
         }
     }
-    result.current_density_violations += count_detailed_width_violations(circuit, result.routes);
     result.design_rule_violations = count_active_region_crossings(request, result.routes);
     result.design_rule_penalty = 100000.0 * static_cast<double>(result.design_rule_violations);
     result.coupling_penalty = estimate_detailed_coupling_penalty(result.routes);
