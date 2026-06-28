@@ -589,6 +589,38 @@ std::vector<routing::RouteCandidate> selected_candidates_for_detailed_routing(
     return candidates;
 }
 
+// 按 NetTopology 中的 wire segment 顺序恢复 detailed routing 候选，体现 top-down traceback 顺序。
+std::vector<routing::RouteCandidate> order_candidates_by_topology(
+    const RoutingEvaluationRequest& request,
+    const std::vector<routing::RouteCandidate>& candidates) {
+    if (request.net_topologies.empty()) return candidates;
+
+    std::vector<routing::RouteCandidate> ordered;
+    std::vector<bool> used(candidates.size(), false);
+    for (const auto& topology : request.net_topologies) {
+        for (const auto& segment : topology.segments) {
+            for (std::size_t index = 0; index < candidates.size(); ++index) {
+                if (used[index]) continue;
+                const auto& candidate = candidates[index];
+                if (candidate.net != segment.net) continue;
+                const bool same_id = !segment.id.empty() && candidate.segment_id == segment.id;
+                const bool same_direction =
+                    candidate.from_terminal == segment.from && candidate.to_terminal == segment.to;
+                const bool reverse_direction =
+                    candidate.from_terminal == segment.to && candidate.to_terminal == segment.from;
+                if (!same_id && !same_direction && !reverse_direction) continue;
+                ordered.push_back(candidate);
+                used[index] = true;
+                break;
+            }
+        }
+    }
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        if (!used[index]) ordered.push_back(candidates[index]);
+    }
+    return ordered;
+}
+
 // 根据当前 placement 执行布线上下文构建、候选路径生成和全局路径选择。
 RoutingEvaluation evaluate_routing(
     const Circuit& circuit,
@@ -646,7 +678,8 @@ DetailedRoutingResult run_detailed_routing(
     DetailedRoutingResult result;
     const auto topology_index = build_detailed_topology_index(request);
     std::unordered_set<std::string> routed_space_nodes;
-    const auto selected_candidates = selected_candidates_for_detailed_routing(evaluation);
+    const auto selected_candidates =
+        order_candidates_by_topology(request, selected_candidates_for_detailed_routing(evaluation));
     const bool has_dp_traceback = evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->success;
     const int dp_state_id = has_dp_traceback ? evaluation.bottom_up_dp->best_state.id : -1;
     const std::string tree_node = has_dp_traceback ? evaluation.bottom_up_dp->best_state.tree_node : std::string{};

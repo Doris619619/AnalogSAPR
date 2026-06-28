@@ -16,6 +16,14 @@ struct RoutingDpState {
     int id{};
     std::string tree_node;
     std::unordered_map<std::string, std::string> lcp_location_by_id;
+    // 记录当前 state 已覆盖的 pin/LCP terminal，供 traceback 和测试检查。
+    std::vector<std::string> covered_terminals;
+    // 记录当前 state 已完成的逻辑 wire segment。
+    std::vector<std::string> covered_wire_segments;
+    // 记录当前 state 在各个 DP transition 中选择的 segment。
+    std::vector<std::string> selected_transitions;
+    // 记录缺失 candidate 或 transition 失败的原因。
+    std::vector<std::string> failure_messages;
     std::vector<RouteCandidate> selected_candidates;
     PathMetrics metrics;
     double penalty{};

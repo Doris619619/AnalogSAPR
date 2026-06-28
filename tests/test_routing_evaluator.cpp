@@ -5,6 +5,7 @@
 
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
+#include "sapr/routing/dp_router.hpp"
 #include "sapr/routing/global_router.hpp"
 #include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
@@ -201,6 +202,12 @@ void run_routing_evaluator_tests() {
     require(dp_evaluation.used_bottom_up_dp, "routing evaluator should use bottom-up DP when tree snapshot exists");
     require(dp_evaluation.bottom_up_dp.has_value(), "routing evaluator should expose bottom-up DP result");
     require(dp_evaluation.bottom_up_dp->success, "bottom-up DP should succeed on sample input");
+    require(
+        !dp_evaluation.bottom_up_dp->best_state.covered_wire_segments.empty(),
+        "bottom-up DP state should record covered wire segments");
+    require(
+        !dp_evaluation.bottom_up_dp->best_state.selected_transitions.empty(),
+        "bottom-up DP state should record selected transitions");
     for (const auto& node_result : dp_evaluation.bottom_up_dp->node_results) {
         require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
     }
@@ -296,4 +303,20 @@ void run_routing_evaluator_tests() {
     for (const auto& candidate : lcp_global.net_routes.front().selected_candidates) {
         require(candidate.lcp_candidate_id == selected_location, "all selected segments of one LCP should share one location");
     }
+
+    auto missing_segment_request = make_lcp_request(drc_circuit, drc_placements, true);
+    missing_segment_request.tree.root = "M";
+    missing_segment_request.tree.nodes.push_back({"M", "M", std::nullopt, std::nullopt});
+    const std::vector<sapr::routing::RouteCandidate> incomplete_candidates{
+        make_manual_lcp_candidate(lcp_context, "LCP1", "M.B", "LCP1:first", 5.0, 1.0),
+    };
+    const auto missing_segment_dp =
+        sapr::routing::run_bottom_up_routing_dp(drc_circuit, missing_segment_request, lcp_context, incomplete_candidates);
+    require(!missing_segment_dp.success, "bottom-up DP should fail when a required wire segment has no candidate");
+    require(
+        missing_segment_dp.best_state.penalty >= 100000.0,
+        "missing required wire segment should add routing failure penalty");
+    require(
+        !missing_segment_dp.best_state.failure_messages.empty(),
+        "missing required wire segment should be recorded in DP failure messages");
 }
