@@ -8,6 +8,7 @@
 #include "sapr/routing/global_router.hpp"
 #include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
+#include "sapr/tree.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -60,8 +61,10 @@ sapr::RoutingEvaluation make_line_evaluation(
         std::move(context),
         {candidate},
         std::move(global),
+        std::nullopt,
         9.0,
         0,
+        false,
     };
     return evaluation;
 }
@@ -137,8 +140,10 @@ sapr::RoutingEvaluation make_lcp_evaluation(
         std::move(context),
         {first, second},
         std::move(global),
+        std::nullopt,
         9.0,
         0,
+        false,
     };
     return evaluation;
 }
@@ -186,6 +191,19 @@ void run_routing_evaluator_tests() {
         metrics.penalty;
     require(metrics.phi_cost > 0.0, "optimizer should expose positive phi cost");
     require(approx(metrics.phi_cost, expected_phi), "phi cost should match the paper total-cost formula");
+    require(metrics.dp_used, "placement-aware routing should use bottom-up DP traceback");
+    require(metrics.dp_nodes > 0, "bottom-up DP should visit B*-tree nodes");
+    require(metrics.dp_states > 0, "bottom-up DP should keep candidate states");
+    require(metrics.dp_traceback_segments > 0, "bottom-up DP should produce traceback candidates");
+    require(metrics.dp_states >= metrics.dp_nodes, "bottom-up DP should keep at least one state per visited node");
+    const auto request_for_dp = sapr::pack_enhanced_tree(circuit, sapr::make_enhanced_tree(circuit), config);
+    const auto dp_evaluation = sapr::evaluate_routing(circuit, request_for_dp);
+    require(dp_evaluation.used_bottom_up_dp, "routing evaluator should use bottom-up DP when tree snapshot exists");
+    require(dp_evaluation.bottom_up_dp.has_value(), "routing evaluator should expose bottom-up DP result");
+    require(dp_evaluation.bottom_up_dp->success, "bottom-up DP should succeed on sample input");
+    for (const auto& node_result : dp_evaluation.bottom_up_dp->node_results) {
+        require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
+    }
     const auto evaluation = sapr::evaluate_routing(circuit, solution.placements);
     const auto selected_segments = sapr::selected_candidates_to_segments(evaluation);
     sapr::RoutingEvaluationRequest request;

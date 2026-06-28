@@ -34,14 +34,20 @@ struct DetailedTopologyIndex {
 RoutingEvaluation make_evaluation(
     routing::RoutingContext context,
     std::vector<routing::RouteCandidate> candidates,
-    const Circuit& circuit) {
-    auto global_routing = routing::run_global_routing(circuit, context, candidates);
+    const Circuit& circuit,
+    std::optional<routing::RoutingDpResult> bottom_up_dp = std::nullopt) {
+    const bool use_dp = bottom_up_dp.has_value() && bottom_up_dp->success;
+    auto global_routing = use_dp
+                              ? routing::run_global_routing(circuit, context, bottom_up_dp->traceback_candidates)
+                              : routing::run_global_routing(circuit, context, candidates);
     RoutingEvaluation evaluation{
         std::move(context),
         std::move(candidates),
         std::move(global_routing),
+        std::move(bottom_up_dp),
         0.0,
         0,
+        use_dp,
     };
     evaluation.routing_cost = evaluation.global_routing.total_metrics.cost;
     evaluation.failed_nets = evaluation.global_routing.failed_nets;
@@ -436,7 +442,9 @@ void append_traced_detailed_path(
     const DetailedTopologyIndex& index,
     const Circuit& circuit,
     const RoutingEvaluation& evaluation,
-    const routing::RouteCandidate& candidate) {
+    const routing::RouteCandidate& candidate,
+    int dp_state_id,
+    const std::string& tree_node) {
     append_trace_node(trace, index, evaluation.context, candidate.from_terminal);
     append_trace_node(trace, index, evaluation.context, candidate.to_terminal);
     const std::size_t first_route = result.routes.size();
@@ -446,9 +454,11 @@ void append_traced_detailed_path(
     for (std::size_t route_index = first_route; route_index < result.routes.size(); ++route_index) {
         trace.segments.push_back(DetailedRouteSegment{
             route_index,
+            dp_state_id,
             candidate.net,
             candidate.from_terminal,
             candidate.to_terminal,
+            tree_node,
             candidate.segment_id,
             lcp_id,
             candidate.lcp_candidate_id,
@@ -565,6 +575,20 @@ std::vector<const routing::NetRouteChoice*> ordered_detailed_routes(
     return routes;
 }
 
+// 返回 detailed routing 应使用的候选路径，优先使用 bottom-up DP traceback。
+std::vector<routing::RouteCandidate> selected_candidates_for_detailed_routing(
+    const RoutingEvaluation& evaluation) {
+    if (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->success) {
+        return evaluation.bottom_up_dp->traceback_candidates;
+    }
+    std::vector<routing::RouteCandidate> candidates;
+    for (const auto& net_route : evaluation.global_routing.net_routes) {
+        if (!net_route.success) continue;
+        candidates.insert(candidates.end(), net_route.selected_candidates.begin(), net_route.selected_candidates.end());
+    }
+    return candidates;
+}
+
 // 根据当前 placement 执行布线上下文构建、候选路径生成和全局路径选择。
 RoutingEvaluation evaluate_routing(
     const Circuit& circuit,
@@ -600,18 +624,16 @@ RoutingEvaluation evaluate_routing(
             std::make_move_iterator(lcp_candidates.begin()),
             std::make_move_iterator(lcp_candidates.end()));
     }
-    return make_evaluation(std::move(context), std::move(candidates), circuit);
+    auto bottom_up_dp = routing::run_bottom_up_routing_dp(circuit, request, context, candidates);
+    return make_evaluation(std::move(context), std::move(candidates), circuit, std::move(bottom_up_dp));
 }
 
 // 将 DP 全局布线选中的 A* 网格路径转换为当前 routing.txt 使用的中心线线段。
 std::vector<RouteSegment> selected_candidates_to_segments(
     const RoutingEvaluation& evaluation) {
     std::vector<RouteSegment> routes;
-    for (const auto& net_route : evaluation.global_routing.net_routes) {
-        if (!net_route.success) continue;
-        for (const auto& candidate : net_route.selected_candidates) {
-            append_path_segments(routes, evaluation, candidate);
-        }
+    for (const auto& candidate : selected_candidates_for_detailed_routing(evaluation)) {
+        append_path_segments(routes, evaluation, candidate);
     }
     return routes;
 }
@@ -624,30 +646,31 @@ DetailedRoutingResult run_detailed_routing(
     DetailedRoutingResult result;
     const auto topology_index = build_detailed_topology_index(request);
     std::unordered_set<std::string> routed_space_nodes;
-    for (const auto* net_route : ordered_detailed_routes(circuit, evaluation)) {
-        if (!net_route->success) continue;
-        auto& trace = trace_for_net(result.report, net_route->net);
-        for (const auto& candidate : net_route->selected_candidates) {
-            append_traced_detailed_path(result, trace, topology_index, circuit, evaluation, candidate);
-            const std::string lcp_id = lcp_id_for_candidate(topology_index, candidate);
-            const std::string space_node_id = space_node_for_candidate(topology_index, candidate);
-            if (!space_node_id.empty()) {
-                routed_space_nodes.insert(space_node_id);
-                update_space_requirement(result, space_node_id, detailed_width_for_candidate(circuit, evaluation, candidate));
-            }
-            if (!lcp_id.empty() && topology_index.lcp_without_location.contains(lcp_id)) {
-                add_traceback_failure(result, trace, "LCP " + lcp_id + " has no location candidate");
-            }
-            if (!candidate_matches_lcp_topology(topology_index, candidate)) {
-                add_traceback_failure(
-                    result,
-                    trace,
-                    "selected candidate does not match LCP topology: " + candidate.net + " " +
-                        candidate.from_terminal + " -> " + candidate.to_terminal);
-            }
-            if (!candidate.flow_ok) ++result.flow_violations;
-            if (!candidate.current_density_ok) ++result.current_density_violations;
+    const auto selected_candidates = selected_candidates_for_detailed_routing(evaluation);
+    const bool has_dp_traceback = evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->success;
+    const int dp_state_id = has_dp_traceback ? evaluation.bottom_up_dp->best_state.id : -1;
+    const std::string tree_node = has_dp_traceback ? evaluation.bottom_up_dp->best_state.tree_node : std::string{};
+    for (const auto& candidate : selected_candidates) {
+        auto& trace = trace_for_net(result.report, candidate.net);
+        append_traced_detailed_path(result, trace, topology_index, circuit, evaluation, candidate, dp_state_id, tree_node);
+        const std::string lcp_id = lcp_id_for_candidate(topology_index, candidate);
+        const std::string space_node_id = space_node_for_candidate(topology_index, candidate);
+        if (!space_node_id.empty()) {
+            routed_space_nodes.insert(space_node_id);
+            update_space_requirement(result, space_node_id, detailed_width_for_candidate(circuit, evaluation, candidate));
         }
+        if (!lcp_id.empty() && topology_index.lcp_without_location.contains(lcp_id)) {
+            add_traceback_failure(result, trace, "LCP " + lcp_id + " has no location candidate");
+        }
+        if (!candidate_matches_lcp_topology(topology_index, candidate)) {
+            add_traceback_failure(
+                result,
+                trace,
+                "selected candidate does not match LCP topology: " + candidate.net + " " +
+                    candidate.from_terminal + " -> " + candidate.to_terminal);
+        }
+        if (!candidate.flow_ok) ++result.flow_violations;
+        if (!candidate.current_density_ok) ++result.current_density_violations;
     }
     const auto drc_routes = collect_active_region_crossings(request, result.routes);
     result.design_rule_violations = static_cast<int>(drc_routes.size());

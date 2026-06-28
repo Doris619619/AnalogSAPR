@@ -123,6 +123,16 @@ std::vector<std::string> ordered_placements(const Circuit& circuit, const Routin
     return order;
 }
 
+// 从增强 B*-tree 复制 routing evaluator 所需的轻量拓扑快照。
+RoutingTreeSnapshot make_routing_tree_snapshot(const EnhancedBStarTree& tree) {
+    RoutingTreeSnapshot snapshot;
+    snapshot.root = tree.root;
+    for (const auto& [id, node] : tree.nodes) {
+        snapshot.nodes.push_back(RoutingTreeNodeRef{id, node.module, node.left, node.right});
+    }
+    return snapshot;
+}
+
 // 返回已放置模块的 active blocker 近似全局矩形。
 Rect placed_active_rect(const Module& module, const Placement& placement) {
     return routing::transform_active_to_global(module, placement);
@@ -223,6 +233,11 @@ Solution make_solution(const CandidateState& state) {
     solution.detailed_route_count = static_cast<std::size_t>(state.feedback.metrics.detailed_routes);
     solution.traceback_failures = state.feedback.metrics.traceback_failures;
     solution.space_nodes_with_routes = state.feedback.metrics.space_nodes_with_routes;
+    solution.dp_nodes = state.feedback.metrics.dp_nodes;
+    solution.dp_states = state.feedback.metrics.dp_states;
+    solution.dp_pruned_states = state.feedback.metrics.dp_pruned_states;
+    solution.dp_traceback_segments = state.feedback.metrics.dp_traceback_segments;
+    solution.dp_used = state.feedback.metrics.dp_used;
     return solution;
 }
 
@@ -298,6 +313,7 @@ RoutingEvaluationRequest pack_enhanced_tree(
     place_node(*tree.root, 0.0, 0.0);
     request.placement_order = ordered_placements(circuit, request);
     request.space_nodes = collect_space_nodes(tree);
+    request.tree = make_routing_tree_snapshot(tree);
     populate_routing_context(circuit, request);
     return request;
 }
@@ -339,6 +355,13 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.metrics.detailed_routes = static_cast<int>(detailed.routes.size());
     feedback.metrics.traceback_failures = detailed.traceback_failures;
     feedback.metrics.space_nodes_with_routes = detailed.space_nodes_with_routes;
+    feedback.metrics.dp_used = routing_evaluation.used_bottom_up_dp;
+    if (routing_evaluation.bottom_up_dp.has_value()) {
+        feedback.metrics.dp_nodes = routing_evaluation.bottom_up_dp->dp_nodes;
+        feedback.metrics.dp_states = routing_evaluation.bottom_up_dp->dp_states;
+        feedback.metrics.dp_pruned_states = routing_evaluation.bottom_up_dp->dp_pruned_states;
+        feedback.metrics.dp_traceback_segments = static_cast<int>(routing_evaluation.bottom_up_dp->traceback_candidates.size());
+    }
     feedback.metrics.penalty +=
         routing_evaluation.global_routing.total_penalty + detailed.detailed_routing_penalty;
     feedback.routing_cost = routing_evaluation.routing_cost;

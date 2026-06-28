@@ -157,6 +157,11 @@ struct Metrics {
     int detailed_routes{};
     int traceback_failures{};
     int space_nodes_with_routes{};
+    int dp_nodes{};
+    int dp_states{};
+    int dp_pruned_states{};
+    int dp_traceback_segments{};
+    bool dp_used{};
     double congestion_penalty{};
 };
 
@@ -171,6 +176,11 @@ struct Solution {
     std::optional<std::size_t> detailed_route_count;
     std::optional<int> traceback_failures;
     std::optional<int> space_nodes_with_routes;
+    std::optional<int> dp_nodes;
+    std::optional<int> dp_states;
+    std::optional<int> dp_pruned_states;
+    std::optional<int> dp_traceback_segments;
+    std::optional<bool> dp_used;
 };
 
 // 配置求解器的确定性参数和论文代价函数权重。
@@ -274,6 +284,20 @@ struct NetTopology {
     std::vector<WireSegmentRef> segments;
 };
 
+// 表示 routing evaluator 所需的轻量 B*-tree 节点快照。
+struct RoutingTreeNodeRef {
+    std::string id;
+    std::string module;
+    std::optional<std::string> left;
+    std::optional<std::string> right;
+};
+
+// 表示当前 placement candidate 对应的 B*-tree 拓扑快照。
+struct RoutingTreeSnapshot {
+    std::optional<std::string> root;
+    std::vector<RoutingTreeNodeRef> nodes;
+};
+
 // 表示路由评价时已经展开到全局坐标的引脚。
 struct PlacedPin {
     std::string key;
@@ -293,6 +317,7 @@ struct RoutingEvaluationRequest {
     std::vector<LinkingControlPoint> linking_points;
     std::vector<NetTopology> net_topologies;
     std::vector<Rect> active_region_blockers;
+    RoutingTreeSnapshot tree;
 };
 
 // 表示路由 adapter 返回给 placement/SA 的反馈。
@@ -318,9 +343,11 @@ struct DetailedRouteNode {
 // 表示 detailed routing 输出线段与 LCP/space-node 拓扑的映射关系。
 struct DetailedRouteSegment {
     std::size_t route_index{};
+    int dp_state_id{-1};
     std::string net;
     std::string from_terminal;
     std::string to_terminal;
+    std::string tree_node;
     std::string segment_id;
     std::string lcp_id;
     std::string lcp_candidate_id;

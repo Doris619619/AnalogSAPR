@@ -12,6 +12,7 @@ add_library(sapr_core STATIC
     src/io.cpp
     src/optimizer.cpp
     src/routing/astar.cpp
+    src/routing/dp_router.cpp
     src/routing/geometry.cpp
     src/routing/global_router.cpp
     src/routing/grid.cpp
