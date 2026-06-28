@@ -1,4 +1,5 @@
 // 实现 sapr validate/run 命令行入口和稳定的指标输出。
+// 文件职责：实现命令行入口，负责输入校验、求解运行和 routing debug 输出。
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -125,6 +126,9 @@ int run_solver(const std::vector<std::string>& args) {
                   << "  routing_cost: " << routing_cost << '\n'
                   << "  failed_nets: " << metrics.routing_failures << '\n'
                   << "  candidate_count: " << solution.routing_candidate_count.value_or(0) << '\n'
+                  << "  detailed_routes: " << solution.detailed_route_count.value_or(static_cast<std::size_t>(metrics.detailed_routes)) << '\n'
+                  << "  traceback_failures: " << solution.traceback_failures.value_or(metrics.traceback_failures) << '\n'
+                  << "  space_nodes_with_routes: " << solution.space_nodes_with_routes.value_or(metrics.space_nodes_with_routes) << '\n'
                   << "  global_wirelength: " << metrics.wirelength << '\n'
                   << "  global_bends: " << metrics.bend_count << '\n'
                   << "  global_vias: " << metrics.via_count << '\n'
@@ -134,6 +138,7 @@ int run_solver(const std::vector<std::string>& args) {
                   << "  coupling_penalty: " << metrics.coupling_penalty << '\n'
                   << "  design_rule_violations: " << metrics.design_rule_violations << '\n'
                   << "  design_rule_penalty: " << metrics.design_rule_penalty << '\n'
+                  << "  detailed_routing_penalty: " << metrics.detailed_routing_penalty << '\n'
                   << "  routing_failure_penalty: " << metrics.routing_failure_penalty << '\n';
     }
     return 0;

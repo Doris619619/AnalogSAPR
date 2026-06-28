@@ -1,5 +1,6 @@
 // 文件职责：验证 routing evaluator 可以在样例输入上完成 A*/DP 布线评估。
 #include <filesystem>
+#include <optional>
 #include <unordered_map>
 
 #include "sapr/io.hpp"
@@ -57,6 +58,83 @@ sapr::RoutingEvaluation make_line_evaluation(
     sapr::RoutingEvaluation evaluation{
         std::move(context),
         {candidate},
+        std::move(global),
+        9.0,
+        0,
+    };
+    return evaluation;
+}
+
+// 构造带 LCP 拓扑的最小 detailed routing request。
+sapr::RoutingEvaluationRequest make_lcp_request(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements,
+    bool with_location) {
+    sapr::RoutingEvaluationRequest request;
+    request.placements = placements;
+    request.placement_order = {"M"};
+    request.active_region_blockers.push_back(
+        sapr::routing::transform_active_to_global(circuit.modules.at("M"), placements.at("M")));
+
+    sapr::LinkingControlPoint lcp;
+    lcp.id = "LCP1";
+    lcp.space_node_id = "S1";
+    if (with_location) lcp.location_candidates.push_back({4.0, 1.0, "LCP1:first"});
+    lcp.segments.push_back({"N", "M.A", "LCP1", 2.0, 4.0, std::nullopt, sapr::CurrentDirection::Out, "N:left"});
+    lcp.segments.push_back({"N", "LCP1", "M.B", 2.0, 4.0, std::nullopt, sapr::CurrentDirection::In, "N:right"});
+
+    sapr::SpaceNode space;
+    space.id = "S1";
+    space.owner = "M";
+    space.kind = sapr::SpaceNodeKind::Right;
+    space.linking_points.push_back(lcp);
+    request.space_nodes.push_back(space);
+    request.linking_points.push_back(lcp);
+    request.net_topologies.push_back({"N", {"M.A", "M.B"}, {lcp}, lcp.segments});
+    return request;
+}
+
+// 构造一组经过 LCP 的 selected candidates，用于验证 top-down traceback。
+sapr::RoutingEvaluation make_lcp_evaluation(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::routing::RoutingContext context(circuit, placements);
+    sapr::routing::RouteCandidate first;
+    first.net = "N";
+    first.from_terminal = "M.A";
+    first.to_terminal = "LCP1";
+    first.segment_id = "N:left";
+    first.lcp_candidate_id = "LCP1:first";
+    first.wire_width = 2.0;
+    first.path.success = true;
+    first.path.points = {
+        context.grid().snap_to_grid(sapr::routing::Point{0.0, 1.0}, 0),
+        context.grid().snap_to_grid(sapr::routing::Point{4.0, 1.0}, 0),
+    };
+    first.path.metrics.wirelength = 4.0;
+
+    sapr::routing::RouteCandidate second = first;
+    second.from_terminal = "LCP1";
+    second.to_terminal = "M.B";
+    second.segment_id = "N:right";
+    second.path.points = {
+        context.grid().snap_to_grid(sapr::routing::Point{4.0, 1.0}, 0),
+        context.grid().snap_to_grid(sapr::routing::Point{9.0, 1.0}, 0),
+    };
+    second.path.metrics.wirelength = 5.0;
+
+    sapr::routing::NetRouteChoice choice;
+    choice.net = "N";
+    choice.selected_candidates = {first, second};
+    choice.metrics.wirelength = 9.0;
+
+    sapr::routing::GlobalRoutingResult global;
+    global.net_routes.push_back(choice);
+    global.total_metrics.wirelength = 9.0;
+
+    sapr::RoutingEvaluation evaluation{
+        std::move(context),
+        {first, second},
         std::move(global),
         9.0,
         0,
@@ -144,4 +222,19 @@ void run_routing_evaluator_tests() {
     auto active_crossing_eval = make_line_evaluation(drc_circuit, drc_placements, 5.0);
     const auto active_crossing_detail = sapr::run_detailed_routing(drc_circuit, drc_request, active_crossing_eval);
     require(active_crossing_detail.design_rule_violations > 0, "active crossing route should count as DRC");
+
+    auto lcp_request = make_lcp_request(drc_circuit, drc_placements, true);
+    auto lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
+    const auto lcp_detail = sapr::run_detailed_routing(drc_circuit, lcp_request, lcp_eval);
+    require(!lcp_detail.report.traces.empty(), "detailed routing should expose LCP traceback traces");
+    require(!lcp_detail.report.traces.front().segments.empty(), "trace should map selected candidates to route segments");
+    require(lcp_detail.space_nodes_with_routes == 1, "LCP detailed route should mark its space node as used");
+    require(lcp_detail.required_space_by_node.contains("S1"), "LCP detailed route should report required routing space");
+    require(lcp_detail.required_space_by_node.at("S1") >= 3.0, "required space should include route width and spacing");
+
+    auto missing_lcp_request = make_lcp_request(drc_circuit, drc_placements, false);
+    auto missing_lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
+    const auto missing_lcp_detail = sapr::run_detailed_routing(drc_circuit, missing_lcp_request, missing_lcp_eval);
+    require(missing_lcp_detail.traceback_failures > 0, "missing LCP location should become a traceback failure");
+    require(missing_lcp_detail.routing_failure_penalty > 0.0, "traceback failures should add routing failure penalty");
 }

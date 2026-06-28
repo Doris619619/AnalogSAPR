@@ -6,6 +6,7 @@
 #include <iterator>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -16,6 +17,18 @@
 
 namespace sapr {
 namespace {
+
+constexpr double kDetailedFailurePenalty = 100000.0;
+constexpr double kDetailedSpacing = 1.0;
+constexpr double kDetailedCouplingPenaltyPerPair = 100.0;
+
+// 汇总 LCP、space node 和拓扑 segment 的快速查找表。
+struct DetailedTopologyIndex {
+    std::unordered_map<std::string, LinkingControlPoint> lcp_by_id;
+    std::unordered_map<std::string, std::string> lcp_space_by_id;
+    std::unordered_set<std::string> lcp_without_location;
+    std::unordered_set<std::string> topology_segment_keys;
+};
 
 // 执行候选路径生成与 DP 全局布线选择的公共封装。
 RoutingEvaluation make_evaluation(
@@ -187,6 +200,115 @@ bool same_coord(double lhs, double rhs) {
     return std::abs(lhs - rhs) <= 1e-9;
 }
 
+// 返回 topology segment 的稳定匹配键。
+std::string segment_key(const std::string& net, const std::string& from, const std::string& to) {
+    return net + "|" + from + "|" + to;
+}
+
+// 返回候选路径对应的 topology segment 匹配键。
+std::string segment_key(const routing::RouteCandidate& candidate) {
+    return segment_key(candidate.net, candidate.from_terminal, candidate.to_terminal);
+}
+
+// 构建 detailed routing 回溯所需的 LCP 和 segment 索引。
+DetailedTopologyIndex build_detailed_topology_index(const RoutingEvaluationRequest& request) {
+    DetailedTopologyIndex index;
+    for (const auto& point : request.linking_points) {
+        index.lcp_by_id[point.id] = point;
+        index.lcp_space_by_id[point.id] = point.space_node_id;
+        for (const auto& segment : point.segments) {
+            index.topology_segment_keys.insert(segment_key(segment.net, segment.from, segment.to));
+        }
+    }
+    for (const auto& topology : request.net_topologies) {
+        for (const auto& point : topology.linking_points) {
+            index.lcp_by_id.try_emplace(point.id, point);
+            if (!point.space_node_id.empty()) index.lcp_space_by_id.try_emplace(point.id, point.space_node_id);
+        }
+        for (const auto& segment : topology.segments) {
+            index.topology_segment_keys.insert(segment_key(segment.net, segment.from, segment.to));
+        }
+    }
+    for (const auto& space : request.space_nodes) {
+        for (const auto& point : space.linking_points) {
+            index.lcp_by_id.try_emplace(point.id, point);
+            index.lcp_space_by_id[point.id] = space.id;
+        }
+    }
+    for (const auto& [id, point] : index.lcp_by_id) {
+        if (point.location_candidates.empty()) index.lcp_without_location.insert(id);
+    }
+    return index;
+}
+
+// 判断 terminal 是否是 LCP id。
+bool is_lcp_terminal(const DetailedTopologyIndex& index, const std::string& terminal) {
+    return index.lcp_by_id.contains(terminal) || index.lcp_space_by_id.contains(terminal);
+}
+
+// 返回候选路径连接到的 LCP id。
+std::string lcp_id_for_candidate(const DetailedTopologyIndex& index, const routing::RouteCandidate& candidate) {
+    if (is_lcp_terminal(index, candidate.from_terminal)) return candidate.from_terminal;
+    if (is_lcp_terminal(index, candidate.to_terminal)) return candidate.to_terminal;
+    return {};
+}
+
+// 返回候选路径所属的 space node id。
+std::string space_node_for_candidate(const DetailedTopologyIndex& index, const routing::RouteCandidate& candidate) {
+    const std::string lcp_id = lcp_id_for_candidate(index, candidate);
+    if (lcp_id.empty()) return {};
+    const auto found = index.lcp_space_by_id.find(lcp_id);
+    return found == index.lcp_space_by_id.end() ? std::string{} : found->second;
+}
+
+// 返回或创建指定 net 的 detailed route trace。
+DetailedRouteTrace& trace_for_net(DetailedRoutingReport& report, const std::string& net) {
+    for (auto& trace : report.traces) {
+        if (trace.net == net) return trace;
+    }
+    report.traces.push_back(DetailedRouteTrace{net, {}, {}, {}});
+    return report.traces.back();
+}
+
+// 记录 detailed traceback 中出现的 terminal 或 LCP 节点。
+void append_trace_node(
+    DetailedRouteTrace& trace,
+    const DetailedTopologyIndex& index,
+    const routing::RoutingContext& context,
+    const std::string& terminal) {
+    for (const auto& node : trace.nodes) {
+        if (node.id == terminal) return;
+    }
+    DetailedRouteNode node;
+    node.id = terminal;
+    if (is_lcp_terminal(index, terminal)) {
+        node.kind = "lcp";
+        const auto space = index.lcp_space_by_id.find(terminal);
+        if (space != index.lcp_space_by_id.end()) node.space_node_id = space->second;
+        const auto lcp = index.lcp_by_id.find(terminal);
+        if (lcp != index.lcp_by_id.end() && !lcp->second.location_candidates.empty()) {
+            node.x = lcp->second.location_candidates.front().x;
+            node.y = lcp->second.location_candidates.front().y;
+        }
+    } else {
+        node.kind = "pin";
+        const auto pin = context.global_pins().find(terminal);
+        if (pin != context.global_pins().end()) {
+            node.x = pin->second.location.x;
+            node.y = pin->second.location.y;
+            node.layer = routing::index_to_layer(pin->second.layer);
+        }
+    }
+    trace.nodes.push_back(std::move(node));
+}
+
+// 判断候选是否能和 request 中的 LCP topology 对上。
+bool candidate_matches_lcp_topology(const DetailedTopologyIndex& index, const routing::RouteCandidate& candidate) {
+    if (index.topology_segment_keys.empty()) return true;
+    if (index.topology_segment_keys.contains(segment_key(candidate))) return true;
+    return index.topology_segment_keys.contains(segment_key(candidate.net, candidate.to_terminal, candidate.from_terminal));
+}
+
 // 判断 route segment 是否为水平中心线。
 bool route_is_horizontal(const RouteSegment& route) {
     return same_coord(route.y1, route.y2);
@@ -305,6 +427,57 @@ void append_detailed_path_segments(
     }
 }
 
+// 将候选路径写入 detailed route，同时记录 route segment 到 LCP/space-node 的回溯映射。
+void append_traced_detailed_path(
+    DetailedRoutingResult& result,
+    DetailedRouteTrace& trace,
+    const DetailedTopologyIndex& index,
+    const Circuit& circuit,
+    const RoutingEvaluation& evaluation,
+    const routing::RouteCandidate& candidate) {
+    append_trace_node(trace, index, evaluation.context, candidate.from_terminal);
+    append_trace_node(trace, index, evaluation.context, candidate.to_terminal);
+    const std::size_t first_route = result.routes.size();
+    append_detailed_path_segments(result.routes, circuit, evaluation, candidate);
+    const std::string lcp_id = lcp_id_for_candidate(index, candidate);
+    const std::string space_node_id = space_node_for_candidate(index, candidate);
+    for (std::size_t route_index = first_route; route_index < result.routes.size(); ++route_index) {
+        trace.segments.push_back(DetailedRouteSegment{
+            route_index,
+            candidate.net,
+            candidate.from_terminal,
+            candidate.to_terminal,
+            candidate.segment_id,
+            lcp_id,
+            candidate.lcp_candidate_id,
+            space_node_id,
+        });
+    }
+}
+
+// 根据 detailed route 的实际线宽更新所属 space node 的预留空间需求。
+void update_space_requirement(
+    DetailedRoutingResult& result,
+    const std::string& space_node_id,
+    double route_width) {
+    if (space_node_id.empty()) return;
+    const double required = route_width + kDetailedSpacing;
+    const auto found = result.required_space_by_node.find(space_node_id);
+    if (found == result.required_space_by_node.end()) {
+        result.required_space_by_node[space_node_id] = required;
+    } else {
+        found->second = std::max(found->second, required);
+    }
+}
+
+// 记录 detailed traceback 失败，并把失败写入 report 和 penalty。
+void add_traceback_failure(DetailedRoutingResult& result, DetailedRouteTrace& trace, const std::string& message) {
+    ++result.traceback_failures;
+    result.routing_failure_penalty += kDetailedFailurePenalty;
+    trace.warnings.push_back(message);
+    result.report.warnings.push_back(message);
+}
+
 // 将 route segment 转为金属占用矩形，用于 DRC 和 coupling 检查。
 Rect route_to_rect(const RouteSegment& route) {
     return routing::segment_to_rect(
@@ -318,17 +491,19 @@ bool route_endpoint_inside(const RouteSegment& route, const Rect& active) {
            routing::contains_point(active, routing::Point{route.x2, route.y2});
 }
 
-// 统计 detailed route 穿越 active region 的基础 DRC 违反数量。
-int count_active_region_crossings(
+// 收集 detailed route 穿越 active region 的基础 DRC 违反线段索引。
+std::vector<std::size_t> collect_active_region_crossings(
     const RoutingEvaluationRequest& request,
     const std::vector<RouteSegment>& routes) {
-    int violations = 0;
-    for (const auto& route : routes) {
+    std::vector<std::size_t> violations;
+    for (std::size_t index = 0; index < routes.size(); ++index) {
+        const auto& route = routes[index];
         const Rect metal = route_to_rect(route);
         for (const auto& active : request.active_region_blockers) {
             if (!routing::intersects(metal, active)) continue;
             if (route_endpoint_inside(route, active)) continue;
-            ++violations;
+            violations.push_back(index);
+            break;
         }
     }
     return violations;
@@ -352,17 +527,15 @@ bool near_parallel_coupling(const RouteSegment& lhs, const RouteSegment& rhs, do
     return distance < spacing && overlap;
 }
 
-// 统计 detailed route 的同层平行耦合惩罚。
-double estimate_detailed_coupling_penalty(const std::vector<RouteSegment>& routes) {
-    constexpr double kSpacing = 1.0;
-    constexpr double kPenaltyPerPair = 100.0;
-    double penalty = 0.0;
+// 收集 detailed route 的同层平行耦合线段对。
+std::vector<std::pair<std::size_t, std::size_t>> collect_detailed_coupling_pairs(const std::vector<RouteSegment>& routes) {
+    std::vector<std::pair<std::size_t, std::size_t>> pairs;
     for (std::size_t i = 0; i < routes.size(); ++i) {
         for (std::size_t j = i + 1; j < routes.size(); ++j) {
-            if (near_parallel_coupling(routes[i], routes[j], kSpacing)) penalty += kPenaltyPerPair;
+            if (near_parallel_coupling(routes[i], routes[j], kDetailedSpacing)) pairs.push_back({i, j});
         }
     }
-    return penalty;
+    return pairs;
 }
 
 }  // namespace
@@ -413,6 +586,12 @@ RoutingEvaluation evaluate_routing(
     }
     const auto lcp_nets = nets_with_lcp_topology(request);
     if (!lcp_nets.empty()) {
+        candidates.erase(
+            std::remove_if(
+                candidates.begin(),
+                candidates.end(),
+                [&](const auto& candidate) { return lcp_nets.contains(candidate.net); }),
+            candidates.end());
         auto lcp_candidates = generate_lcp_route_candidates(context, request, circuit);
         candidates.insert(
             candidates.end(),
@@ -441,17 +620,54 @@ DetailedRoutingResult run_detailed_routing(
     const RoutingEvaluationRequest& request,
     const RoutingEvaluation& evaluation) {
     DetailedRoutingResult result;
+    const auto topology_index = build_detailed_topology_index(request);
+    std::unordered_set<std::string> routed_space_nodes;
     for (const auto* net_route : ordered_detailed_routes(circuit, evaluation)) {
         if (!net_route->success) continue;
+        auto& trace = trace_for_net(result.report, net_route->net);
         for (const auto& candidate : net_route->selected_candidates) {
-            append_detailed_path_segments(result.routes, circuit, evaluation, candidate);
+            append_traced_detailed_path(result, trace, topology_index, circuit, evaluation, candidate);
+            const std::string lcp_id = lcp_id_for_candidate(topology_index, candidate);
+            const std::string space_node_id = space_node_for_candidate(topology_index, candidate);
+            if (!space_node_id.empty()) {
+                routed_space_nodes.insert(space_node_id);
+                update_space_requirement(result, space_node_id, detailed_width_for_candidate(circuit, evaluation, candidate));
+            }
+            if (!lcp_id.empty() && topology_index.lcp_without_location.contains(lcp_id)) {
+                add_traceback_failure(result, trace, "LCP " + lcp_id + " has no location candidate");
+            }
+            if (!candidate_matches_lcp_topology(topology_index, candidate)) {
+                add_traceback_failure(
+                    result,
+                    trace,
+                    "selected candidate does not match LCP topology: " + candidate.net + " " +
+                        candidate.from_terminal + " -> " + candidate.to_terminal);
+            }
             if (!candidate.flow_ok) ++result.flow_violations;
             if (!candidate.current_density_ok) ++result.current_density_violations;
         }
     }
-    result.design_rule_violations = count_active_region_crossings(request, result.routes);
+    const auto drc_routes = collect_active_region_crossings(request, result.routes);
+    result.design_rule_violations = static_cast<int>(drc_routes.size());
+    for (const auto route_index : drc_routes) {
+        const auto& route = result.routes[route_index];
+        result.report.design_rule_segments.push_back(
+            route.net + ":" + route.layer + ":" + std::to_string(route_index));
+    }
     result.design_rule_penalty = 100000.0 * static_cast<double>(result.design_rule_violations);
-    result.coupling_penalty = estimate_detailed_coupling_penalty(result.routes);
+    const auto coupling_pairs = collect_detailed_coupling_pairs(result.routes);
+    result.coupling_penalty = kDetailedCouplingPenaltyPerPair * static_cast<double>(coupling_pairs.size());
+    for (const auto& [left, right] : coupling_pairs) {
+        const auto& left_route = result.routes[left];
+        const auto& right_route = result.routes[right];
+        result.report.coupling_pairs.push_back(left_route.net + "<->" + right_route.net);
+    }
+    for (const auto& space_node_id : routed_space_nodes) {
+        result.coupling_space_by_node[space_node_id] = result.coupling_penalty > 0.0 ? kDetailedSpacing : 0.0;
+    }
+    result.space_nodes_with_routes = static_cast<int>(routed_space_nodes.size());
+    result.detailed_routing_penalty =
+        result.design_rule_penalty + result.coupling_penalty + result.routing_failure_penalty;
     result.used_global_fallback = false;
     return result;
 }
