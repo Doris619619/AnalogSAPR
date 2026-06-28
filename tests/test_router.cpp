@@ -18,6 +18,16 @@ bool overlaps(const sapr::Rect& left, const sapr::Rect& right) {
     return left.x1 < right.x2 && left.x2 > right.x1 && left.y1 < right.y2 && left.y2 > right.y1;
 }
 
+// 判断 LCP 是否满足论文要求的同 net 且至少两段约束。
+bool valid_lcp_topology(const sapr::LinkingControlPoint& point) {
+    if (point.segments.size() < 2) return false;
+    const auto& net = point.segments.front().net;
+    for (const auto& segment : point.segments) {
+        if (segment.net != net) return false;
+    }
+    return true;
+}
+
 // 从 placement 生成模块包围盒。
 sapr::Rect placement_box(const sapr::Circuit& circuit, const sapr::Placement& placement) {
     const auto size = sapr::placed_size(circuit.modules.at(placement.module), placement);
@@ -102,6 +112,11 @@ void run_router_tests() {
         sapr::perturb_placement_tree(perturbed, rng);
         require(sapr::is_valid_tree(perturbed), "perturbed tree should stay valid");
         require(sapr::self_symmetry_on_rightmost_branch(perturbed), "perturbation should preserve ASF self branch");
+        for (const auto& space_node : sapr::collect_space_nodes(perturbed)) {
+            for (const auto& point : space_node.linking_points) {
+                require(valid_lcp_topology(point), "LCP perturbation should preserve same-net topology");
+            }
+        }
     }
 
     const auto solution = sapr::solve_placement_aware(circuit, config);
