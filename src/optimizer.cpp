@@ -13,6 +13,7 @@
 #include "sapr/constraints.hpp"
 #include "sapr/geometry.hpp"
 #include "sapr/router.hpp"
+#include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
 #include "sapr/tree.hpp"
 
@@ -124,8 +125,7 @@ std::vector<std::string> ordered_placements(const Circuit& circuit, const Routin
 
 // 返回已放置模块的 active blocker 近似全局矩形。
 Rect placed_active_rect(const Module& module, const Placement& placement) {
-    const auto size = placed_size(module, placement);
-    return {placement.x, placement.y, placement.x + size.first, placement.y + size.second};
+    return routing::transform_active_to_global(module, placement);
 }
 
 // 填充 routing request 中面向 DP/A* 的全局 pin、blocker 和 LCP 候选位置。
@@ -220,6 +220,9 @@ Solution make_solution(const CandidateState& state) {
     solution.metrics = state.feedback.metrics;
     solution.routing_cost = state.feedback.routing_cost;
     solution.routing_candidate_count = state.feedback.routing_candidate_count;
+    solution.detailed_route_count = static_cast<std::size_t>(state.feedback.metrics.detailed_routes);
+    solution.traceback_failures = state.feedback.metrics.traceback_failures;
+    solution.space_nodes_with_routes = state.feedback.metrics.space_nodes_with_routes;
     return solution;
 }
 
@@ -330,14 +333,28 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.metrics.flow_penalty = routing_evaluation.global_routing.flow_penalty;
     feedback.metrics.current_density_penalty = routing_evaluation.global_routing.current_density_penalty;
     feedback.metrics.coupling_penalty = routing_evaluation.global_routing.coupling_penalty + detailed.coupling_penalty;
-    feedback.metrics.routing_failure_penalty = routing_evaluation.global_routing.routing_failure_penalty;
-    feedback.metrics.penalty += routing_evaluation.global_routing.total_penalty + detailed.design_rule_penalty + detailed.coupling_penalty;
+    feedback.metrics.routing_failure_penalty =
+        routing_evaluation.global_routing.routing_failure_penalty + detailed.routing_failure_penalty;
+    feedback.metrics.detailed_routing_penalty = detailed.detailed_routing_penalty;
+    feedback.metrics.detailed_routes = static_cast<int>(detailed.routes.size());
+    feedback.metrics.traceback_failures = detailed.traceback_failures;
+    feedback.metrics.space_nodes_with_routes = detailed.space_nodes_with_routes;
+    feedback.metrics.penalty +=
+        routing_evaluation.global_routing.total_penalty + detailed.detailed_routing_penalty;
     feedback.routing_cost = routing_evaluation.routing_cost;
     feedback.routing_candidate_count = routing_evaluation.candidates.size();
 
     for (const auto& space : request.space_nodes) {
-        feedback.required_space_by_node[space.id] = space.required_space();
-        feedback.coupling_space_by_node[space.id] = routing_evaluation.global_routing.coupling_penalty > 0.0 ? 1.0 : 0.0;
+        const auto detailed_space = detailed.required_space_by_node.find(space.id);
+        feedback.required_space_by_node[space.id] =
+            detailed_space == detailed.required_space_by_node.end()
+                ? space.required_space()
+                : std::max(space.required_space(), detailed_space->second);
+        const auto detailed_coupling = detailed.coupling_space_by_node.find(space.id);
+        feedback.coupling_space_by_node[space.id] =
+            detailed_coupling == detailed.coupling_space_by_node.end()
+                ? (routing_evaluation.global_routing.coupling_penalty > 0.0 ? 1.0 : 0.0)
+                : detailed_coupling->second;
     }
     return feedback;
 }

@@ -149,10 +149,14 @@ struct Metrics {
     double coupling_penalty{};
     double routing_failure_penalty{};
     double design_rule_penalty{};
+    double detailed_routing_penalty{};
     int flow_violations{};
     int current_density_violations{};
     int design_rule_violations{};
     int routing_failures{};
+    int detailed_routes{};
+    int traceback_failures{};
+    int space_nodes_with_routes{};
     double congestion_penalty{};
 };
 
@@ -164,6 +168,9 @@ struct Solution {
     std::optional<Metrics> metrics;
     std::optional<double> routing_cost;
     std::optional<std::size_t> routing_candidate_count;
+    std::optional<std::size_t> detailed_route_count;
+    std::optional<int> traceback_failures;
+    std::optional<int> space_nodes_with_routes;
 };
 
 // 配置求解器的确定性参数和论文代价函数权重。
@@ -298,14 +305,59 @@ struct RoutingFeedback {
     std::size_t routing_candidate_count{};
 };
 
+// 表示 detailed routing 回溯中的一个拓扑节点。
+struct DetailedRouteNode {
+    std::string id;
+    std::string kind;
+    std::string space_node_id;
+    double x{};
+    double y{};
+    std::string layer;
+};
+
+// 表示 detailed routing 输出线段与 LCP/space-node 拓扑的映射关系。
+struct DetailedRouteSegment {
+    std::size_t route_index{};
+    std::string net;
+    std::string from_terminal;
+    std::string to_terminal;
+    std::string segment_id;
+    std::string lcp_id;
+    std::string lcp_candidate_id;
+    std::string space_node_id;
+};
+
+// 表示一条 net 的 top-down detailed routing 回溯摘要。
+struct DetailedRouteTrace {
+    std::string net;
+    std::vector<DetailedRouteNode> nodes;
+    std::vector<DetailedRouteSegment> segments;
+    std::vector<std::string> warnings;
+};
+
+// 汇总 detailed routing 的可解释报告。
+struct DetailedRoutingReport {
+    std::vector<DetailedRouteTrace> traces;
+    std::vector<std::string> warnings;
+    std::vector<std::string> coupling_pairs;
+    std::vector<std::string> design_rule_segments;
+};
+
 // 表示 top-down performance-aware detailed routing 的输出。
 struct DetailedRoutingResult {
     std::vector<RouteSegment> routes;
+    DetailedRoutingReport report;
+    std::unordered_map<std::string, double> required_space_by_node;
+    std::unordered_map<std::string, double> coupling_space_by_node;
     double coupling_penalty{};
     double design_rule_penalty{};
+    double routing_failure_penalty{};
+    double detailed_routing_penalty{};
     int flow_violations{};
     int current_density_violations{};
     int design_rule_violations{};
+    int traceback_failures{};
+    int space_nodes_with_routes{};
     bool used_global_fallback{};
 };
 
