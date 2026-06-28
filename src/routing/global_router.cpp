@@ -19,6 +19,13 @@ struct CandidateGroup {
     std::vector<RouteCandidate> candidates;
 };
 
+// 表示一条 net 在 LCP 位置一致性约束下的一组候选选择。
+struct ConsistentSelection {
+    std::vector<RouteCandidate> candidates;
+    std::vector<double> conflict_penalties;
+    double cost{std::numeric_limits<double>::infinity()};
+};
+
 // 将 net 优先级转换为排序权重。
 int priority_rank(Priority priority) {
     switch (priority) {
@@ -154,6 +161,93 @@ const RouteCandidate* choose_best_candidate(
     return best;
 }
 
+// 判断一个 net 的候选组是否包含 LCP 多位置选择。
+bool has_lcp_candidates(const std::vector<CandidateGroup>& groups) {
+    for (const auto& group : groups) {
+        for (const auto& candidate : group.candidates) {
+            if (!candidate.lcp_id.empty()) return true;
+        }
+    }
+    return false;
+}
+
+// 递归枚举同一 net 的候选组合，并强制同一 LCP 使用同一个物理候选位置。
+void search_consistent_lcp_selection(
+    const std::vector<CandidateGroup>& groups,
+    std::size_t group_index,
+    const std::unordered_map<std::int64_t, std::string>& occupied_by_net,
+    const GlobalRouterConfig& config,
+    std::unordered_map<std::string, std::string>& assigned_location_by_lcp,
+    std::vector<RouteCandidate>& current_candidates,
+    std::vector<double>& current_conflict_penalties,
+    double current_cost,
+    ConsistentSelection& best) {
+    if (current_cost >= best.cost) return;
+    if (group_index == groups.size()) {
+        best.candidates = current_candidates;
+        best.conflict_penalties = current_conflict_penalties;
+        best.cost = current_cost;
+        return;
+    }
+
+    const auto& group = groups[group_index];
+    for (const auto& candidate : group.candidates) {
+        if (!candidate.path.success) continue;
+
+        bool assigned_here = false;
+        if (!candidate.lcp_id.empty()) {
+            const auto assigned = assigned_location_by_lcp.find(candidate.lcp_id);
+            if (assigned != assigned_location_by_lcp.end() && assigned->second != candidate.lcp_candidate_id) {
+                continue;
+            }
+            if (assigned == assigned_location_by_lcp.end()) {
+                assigned_location_by_lcp[candidate.lcp_id] = candidate.lcp_candidate_id;
+                assigned_here = true;
+            }
+        }
+
+        const double penalty = conflict_penalty(candidate, occupied_by_net, config);
+        current_candidates.push_back(candidate);
+        current_conflict_penalties.push_back(penalty);
+        search_consistent_lcp_selection(
+            groups,
+            group_index + 1,
+            occupied_by_net,
+            config,
+            assigned_location_by_lcp,
+            current_candidates,
+            current_conflict_penalties,
+            current_cost + candidate_dp_cost(candidate, config) + penalty,
+            best);
+        current_conflict_penalties.pop_back();
+        current_candidates.pop_back();
+
+        if (assigned_here) assigned_location_by_lcp.erase(candidate.lcp_id);
+    }
+}
+
+// 选择满足 LCP 位置一致性的最低代价候选组合。
+ConsistentSelection choose_consistent_lcp_selection(
+    const std::vector<CandidateGroup>& groups,
+    const std::unordered_map<std::int64_t, std::string>& occupied_by_net,
+    const GlobalRouterConfig& config) {
+    ConsistentSelection best;
+    std::unordered_map<std::string, std::string> assigned_location_by_lcp;
+    std::vector<RouteCandidate> current_candidates;
+    std::vector<double> current_conflict_penalties;
+    search_consistent_lcp_selection(
+        groups,
+        0,
+        occupied_by_net,
+        config,
+        assigned_location_by_lcp,
+        current_candidates,
+        current_conflict_penalties,
+        0.0,
+        best);
+    return best;
+}
+
 // 拼接失败信息，方便 CLI 或测试输出。
 std::string append_message(const std::string& current, const std::string& next) {
     if (current.empty()) {
@@ -188,26 +282,50 @@ GlobalRoutingResult run_global_routing(
             choice.message = "no terminal-pair candidates";
         }
 
-        for (const auto& group : groups) {
-            double penalty = 0.0;
-            const RouteCandidate* selected = choose_best_candidate(group, occupied_by_net, config, penalty);
-            if (selected == nullptr) {
+        if (!groups.empty() && has_lcp_candidates(groups)) {
+            const auto selection = choose_consistent_lcp_selection(groups, occupied_by_net, config);
+            if (selection.candidates.size() != groups.size()) {
                 choice.success = false;
                 choice.routing_failure_penalty += config.failed_pair_penalty;
                 choice.penalty += config.failed_pair_penalty;
                 choice.message = append_message(
                     choice.message,
-                    group.from_terminal + " -> " + group.to_terminal + " has no successful candidate");
-                continue;
+                    "no consistent LCP location assignment");
+            } else {
+                for (std::size_t index = 0; index < selection.candidates.size(); ++index) {
+                    const auto& selected = selection.candidates[index];
+                    const double penalty = selection.conflict_penalties[index];
+                    choice.selected_candidates.push_back(selected);
+                    choice.flow_penalty += selected.flow_penalty;
+                    choice.current_density_penalty += selected.current_density_penalty;
+                    choice.coupling_penalty += penalty + selected.coupling_cost;
+                    choice.penalty += penalty;
+                    choice.penalty += selected.flow_penalty + selected.current_density_penalty + selected.coupling_cost;
+                    add_metrics(choice.metrics, selected.path.metrics, config);
+                }
             }
+        } else {
+            for (const auto& group : groups) {
+                double penalty = 0.0;
+                const RouteCandidate* selected = choose_best_candidate(group, occupied_by_net, config, penalty);
+                if (selected == nullptr) {
+                    choice.success = false;
+                    choice.routing_failure_penalty += config.failed_pair_penalty;
+                    choice.penalty += config.failed_pair_penalty;
+                    choice.message = append_message(
+                        choice.message,
+                        group.from_terminal + " -> " + group.to_terminal + " has no successful candidate");
+                    continue;
+                }
 
-            choice.selected_candidates.push_back(*selected);
-            choice.flow_penalty += selected->flow_penalty;
-            choice.current_density_penalty += selected->current_density_penalty;
-            choice.coupling_penalty += penalty + selected->coupling_cost;
-            choice.penalty += penalty;
-            choice.penalty += selected->flow_penalty + selected->current_density_penalty + selected->coupling_cost;
-            add_metrics(choice.metrics, selected->path.metrics, config);
+                choice.selected_candidates.push_back(*selected);
+                choice.flow_penalty += selected->flow_penalty;
+                choice.current_density_penalty += selected->current_density_penalty;
+                choice.coupling_penalty += penalty + selected->coupling_cost;
+                choice.penalty += penalty;
+                choice.penalty += selected->flow_penalty + selected->current_density_penalty + selected->coupling_cost;
+                add_metrics(choice.metrics, selected->path.metrics, config);
+            }
         }
 
         choice.metrics.cost += choice.penalty;

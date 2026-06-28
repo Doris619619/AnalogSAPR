@@ -5,6 +5,7 @@
 
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
+#include "sapr/routing/global_router.hpp"
 #include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
 #include "test_support.hpp"
@@ -142,6 +143,31 @@ sapr::RoutingEvaluation make_lcp_evaluation(
     return evaluation;
 }
 
+// 构造一条成功的人工候选路径，用于测试 LCP 多候选位置一致性选择。
+sapr::routing::RouteCandidate make_manual_lcp_candidate(
+    const sapr::routing::RoutingContext& context,
+    const std::string& from,
+    const std::string& to,
+    const std::string& location_id,
+    double wirelength,
+    double y) {
+    sapr::routing::RouteCandidate candidate;
+    candidate.net = "N";
+    candidate.from_terminal = from;
+    candidate.to_terminal = to;
+    candidate.segment_id = from + "->" + to;
+    candidate.lcp_id = "LCP1";
+    candidate.lcp_candidate_id = location_id;
+    candidate.wire_width = 1.0;
+    candidate.path.success = true;
+    candidate.path.points = {
+        context.grid().snap_to_grid(sapr::routing::Point{0.0, y}, 0),
+        context.grid().snap_to_grid(sapr::routing::Point{wirelength, y}, 0),
+    };
+    candidate.path.metrics.wirelength = wirelength;
+    return candidate;
+}
+
 }  // namespace
 
 // 运行 routing evaluator 的集成测试。
@@ -237,4 +263,19 @@ void run_routing_evaluator_tests() {
     const auto missing_lcp_detail = sapr::run_detailed_routing(drc_circuit, missing_lcp_request, missing_lcp_eval);
     require(missing_lcp_detail.traceback_failures > 0, "missing LCP location should become a traceback failure");
     require(missing_lcp_detail.routing_failure_penalty > 0.0, "traceback failures should add routing failure penalty");
+
+    sapr::routing::RoutingContext lcp_context(drc_circuit, drc_placements);
+    std::vector<sapr::routing::RouteCandidate> multi_location_candidates{
+        make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:a", 1.0, 1.0),
+        make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:b", 100.0, 2.0),
+        make_manual_lcp_candidate(lcp_context, "LCP1", "M.B", "LCP1:a", 100.0, 3.0),
+        make_manual_lcp_candidate(lcp_context, "LCP1", "M.B", "LCP1:b", 1.0, 4.0),
+    };
+    const auto lcp_global = sapr::routing::run_global_routing(drc_circuit, lcp_context, multi_location_candidates);
+    require(lcp_global.failed_nets == 0, "consistent LCP location selection should find a route");
+    require(lcp_global.net_routes.front().selected_candidates.size() == 2, "LCP net should select one candidate per segment");
+    const auto selected_location = lcp_global.net_routes.front().selected_candidates.front().lcp_candidate_id;
+    for (const auto& candidate : lcp_global.net_routes.front().selected_candidates) {
+        require(candidate.lcp_candidate_id == selected_location, "all selected segments of one LCP should share one location");
+    }
 }

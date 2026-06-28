@@ -140,6 +140,7 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
                 candidate.from_terminal = segment.from;
                 candidate.to_terminal = segment.to;
                 candidate.segment_id = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
+                candidate.lcp_id = point.id;
                 candidate.lcp_candidate_id = location.id;
                 candidate.wire_width = std::max(segment.min_width, 1.0);
                 if (!start.has_value() || !goal.has_value()) {
@@ -248,6 +249,7 @@ bool is_lcp_terminal(const DetailedTopologyIndex& index, const std::string& term
 
 // 返回候选路径连接到的 LCP id。
 std::string lcp_id_for_candidate(const DetailedTopologyIndex& index, const routing::RouteCandidate& candidate) {
+    if (!candidate.lcp_id.empty()) return candidate.lcp_id;
     if (is_lcp_terminal(index, candidate.from_terminal)) return candidate.from_terminal;
     if (is_lcp_terminal(index, candidate.to_terminal)) return candidate.to_terminal;
     return {};
