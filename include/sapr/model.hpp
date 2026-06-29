@@ -165,7 +165,9 @@ struct Metrics {
     int packing_trace_steps{};
     int space_feedback_nodes{};
     int routing_feedback_iterations{};
+    int packing_time_dp_segments{};
     bool routing_feedback_converged{};
+    bool packing_time_dp_used{};
     bool dp_used{};
     double congestion_penalty{};
 };
@@ -188,7 +190,9 @@ struct Solution {
     std::optional<int> packing_trace_steps;
     std::optional<int> space_feedback_nodes;
     std::optional<int> routing_feedback_iterations;
+    std::optional<int> packing_time_dp_segments;
     std::optional<bool> routing_feedback_converged;
+    std::optional<bool> packing_time_dp_used;
     std::optional<bool> dp_used;
 };
 
@@ -336,6 +340,8 @@ struct PackingContourStep {
     std::optional<std::string> left;
     std::optional<std::string> right;
     std::vector<std::string> subtree_modules;
+    std::vector<std::string> local_wire_segments;
+    std::vector<std::string> cross_child_wire_segments;
 };
 
 // 表示当前候选布局的 contour packing 过程快照。

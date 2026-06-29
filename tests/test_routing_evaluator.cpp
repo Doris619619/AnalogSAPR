@@ -1,6 +1,7 @@
 // 文件职责：验证 routing evaluator 可以在样例输入上完成 A*/DP 布线评估。
 #include <algorithm>
 #include <filesystem>
+#include <numeric>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -200,6 +201,8 @@ void run_routing_evaluator_tests() {
     require(metrics.dp_traceback_segments > 0, "bottom-up DP should produce traceback candidates");
     require(metrics.dp_states >= metrics.dp_nodes, "bottom-up DP should keep at least one state per visited node");
     require(metrics.packing_trace_steps > 0, "packing should expose contour trace steps");
+    require(metrics.packing_time_dp_used, "bottom-up DP should consume packing-time local wire segments");
+    require(metrics.packing_time_dp_segments > 0, "packing-time DP should expose local wire segment count");
     require(metrics.space_feedback_nodes >= 0, "optimizer should expose routing space feedback count");
     require(metrics.routing_feedback_iterations >= 1, "candidate evaluation should run at least one feedback iteration");
     require(
@@ -228,6 +231,60 @@ void run_routing_evaluator_tests() {
         require(step.top_space >= 0.0, "packing trace should record non-negative top routing space");
         require(step.coupling_extra_space >= 0.0, "packing trace should record non-negative coupling space");
     }
+    const auto local_segment_count = std::accumulate(
+        request_for_dp.packing_trace.steps.begin(),
+        request_for_dp.packing_trace.steps.end(),
+        std::size_t{0},
+        [](std::size_t total, const auto& step) { return total + step.local_wire_segments.size(); });
+    require(local_segment_count > 0, "packing trace should expose packing-time local routing segments");
+    std::unordered_map<std::string, const sapr::WireSegmentRef*> segment_by_key;
+    for (const auto& topology : request_for_dp.net_topologies) {
+        for (const auto& segment : topology.segments) {
+            const std::string key = segment.id.empty() ? segment.net + "|" + segment.from + "|" + segment.to : segment.id;
+            segment_by_key[key] = &segment;
+        }
+    }
+    std::unordered_map<std::string, std::string> lcp_owner_by_id;
+    for (const auto& space : request_for_dp.space_nodes) {
+        for (const auto& point : space.linking_points) lcp_owner_by_id[point.id] = space.owner;
+    }
+    const auto terminal_owner = [&](const std::string& terminal) {
+        const auto dot = terminal.find('.');
+        if (dot != std::string::npos) return terminal.substr(0, dot);
+        const auto found = lcp_owner_by_id.find(terminal);
+        return found == lcp_owner_by_id.end() ? std::string{} : found->second;
+    };
+    const auto step_by_node = [&](const std::optional<std::string>& id) -> const sapr::PackingContourStep* {
+        if (!id.has_value()) return nullptr;
+        const auto found = std::find_if(
+            request_for_dp.packing_trace.steps.begin(),
+            request_for_dp.packing_trace.steps.end(),
+            [&](const auto& step) { return step.tree_node == *id; });
+        return found == request_for_dp.packing_trace.steps.end() ? nullptr : &*found;
+    };
+    const auto inside_modules = [](const std::string& from, const std::string& to, const auto& modules) {
+        return modules.contains(from) && modules.contains(to);
+    };
+    for (const auto& step : request_for_dp.packing_trace.steps) {
+        const std::unordered_set<std::string> current_modules(step.subtree_modules.begin(), step.subtree_modules.end());
+        const auto* left_step = step_by_node(step.left);
+        const auto* right_step = step_by_node(step.right);
+        const std::unordered_set<std::string> left_modules =
+            left_step == nullptr ? std::unordered_set<std::string>{}
+                                 : std::unordered_set<std::string>(left_step->subtree_modules.begin(), left_step->subtree_modules.end());
+        const std::unordered_set<std::string> right_modules =
+            right_step == nullptr ? std::unordered_set<std::string>{}
+                                  : std::unordered_set<std::string>(right_step->subtree_modules.begin(), right_step->subtree_modules.end());
+        for (const auto& key : step.local_wire_segments) {
+            require(segment_by_key.contains(key), "packing-time local segment should refer to a known topology segment");
+            const auto* segment = segment_by_key.at(key);
+            const auto from_owner = terminal_owner(segment->from);
+            const auto to_owner = terminal_owner(segment->to);
+            require(inside_modules(from_owner, to_owner, current_modules), "local segment endpoints should be inside current subtree");
+            require(!inside_modules(from_owner, to_owner, left_modules), "local segment should not be fully inside left child");
+            require(!inside_modules(from_owner, to_owner, right_modules), "local segment should not be fully inside right child");
+        }
+    }
     const auto root_step = std::find_if(
         request_for_dp.packing_trace.steps.begin(),
         request_for_dp.packing_trace.steps.end(),
@@ -241,6 +298,8 @@ void run_routing_evaluator_tests() {
     require(dp_evaluation.used_bottom_up_dp, "routing evaluator should use bottom-up DP when tree snapshot exists");
     require(dp_evaluation.bottom_up_dp.has_value(), "routing evaluator should expose bottom-up DP result");
     require(dp_evaluation.bottom_up_dp->success, "bottom-up DP should succeed on sample input");
+    require(dp_evaluation.bottom_up_dp->packing_time_dp_used, "bottom-up DP should prefer packing-time local segments");
+    require(dp_evaluation.bottom_up_dp->packing_time_dp_segments > 0, "bottom-up DP should count packing-time local segments");
     require(
         !dp_evaluation.bottom_up_dp->best_state.covered_wire_segments.empty(),
         "bottom-up DP state should record covered wire segments");
@@ -258,6 +317,18 @@ void run_routing_evaluator_tests() {
     for (const auto& node_result : dp_evaluation.bottom_up_dp->node_results) {
         require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
     }
+    auto no_local_segment_request = request_for_dp;
+    for (auto& step : no_local_segment_request.packing_trace.steps) {
+        step.local_wire_segments.clear();
+        step.cross_child_wire_segments.clear();
+    }
+    const auto no_local_segment_evaluation = sapr::evaluate_routing(circuit, no_local_segment_request);
+    require(no_local_segment_evaluation.used_bottom_up_dp, "bottom-up DP should run without packing-time local segments");
+    require(no_local_segment_evaluation.bottom_up_dp.has_value(), "fallback DP should expose a result without local segments");
+    require(no_local_segment_evaluation.bottom_up_dp->success, "fallback DP should succeed without local segments");
+    require(
+        !no_local_segment_evaluation.bottom_up_dp->packing_time_dp_used,
+        "cleared local segments should force fallback DP transition inference");
     auto feedback_tree = sapr::make_enhanced_tree(circuit);
     const auto first_feedback_request = sapr::pack_enhanced_tree(circuit, feedback_tree, config);
     const auto first_feedback = sapr::evaluate_with_routing_adapter(circuit, first_feedback_request);

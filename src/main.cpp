@@ -135,6 +135,10 @@ int run_solver(const std::vector<std::string>& args) {
                   << "  dp_pruned_states: " << solution.dp_pruned_states.value_or(metrics.dp_pruned_states) << '\n'
                   << "  dp_traceback_segments: " << solution.dp_traceback_segments.value_or(metrics.dp_traceback_segments) << '\n'
                   << "  packing_trace_steps: " << solution.packing_trace_steps.value_or(metrics.packing_trace_steps) << '\n'
+                  << "  packing_time_dp_used: "
+                  << (solution.packing_time_dp_used.value_or(metrics.packing_time_dp_used) ? "true" : "false") << '\n'
+                  << "  packing_time_dp_segments: "
+                  << solution.packing_time_dp_segments.value_or(metrics.packing_time_dp_segments) << '\n'
                   << "  space_feedback_nodes: " << solution.space_feedback_nodes.value_or(metrics.space_feedback_nodes) << '\n'
                   << "  routing_feedback_iterations: "
                   << solution.routing_feedback_iterations.value_or(metrics.routing_feedback_iterations) << '\n'

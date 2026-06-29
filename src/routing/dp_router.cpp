@@ -92,6 +92,10 @@ void append_unique(std::vector<std::string>& values, const std::string& value) {
     if (std::find(values.begin(), values.end(), value) == values.end()) values.push_back(value);
 }
 
+bool contains_value(const std::vector<std::string>& values, const std::string& value) {
+    return std::find(values.begin(), values.end(), value) != values.end();
+}
+
 // 合并字符串集合字段，用于 child state 合并。
 void merge_unique_values(std::vector<std::string>& target, const std::vector<std::string>& source) {
     for (const auto& value : source) append_unique(target, value);
@@ -431,13 +435,19 @@ std::vector<RoutingDpState> build_states_for_node(
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
     const std::unordered_map<std::string, std::string>& lcp_space_by_id,
     const PackingTraceIndex& trace_index,
+    const std::vector<std::string>* packing_time_segments,
+    bool use_packing_time_segments,
     int max_states,
     int& pruned_states) {
     auto states = merge_child_states_for_node(node, result_by_node, trace_index);
     if (states.empty()) return states;
 
     for (const auto& group : groups) {
-        if (!is_local_segment_for_node(group, subtree_modules, children, lcp_owner_by_id)) continue;
+        if (use_packing_time_segments) {
+            if (packing_time_segments == nullptr || !contains_value(*packing_time_segments, group.key)) continue;
+        } else if (!is_local_segment_for_node(group, subtree_modules, children, lcp_owner_by_id)) {
+            continue;
+        }
         bool already_covered = true;
         for (const auto& state : states) {
             if (std::find(state.covered_wire_segments.begin(), state.covered_wire_segments.end(), group.key) ==
@@ -489,6 +499,10 @@ RoutingDpResult run_bottom_up_routing_dp(
     const auto lcp_owner_by_id = make_lcp_owner_map(request);
     const auto lcp_space_by_id = make_lcp_space_map(request);
     const auto trace_index = make_packing_trace_index(request.packing_trace);
+    for (const auto& step : request.packing_trace.steps) {
+        result.packing_time_dp_segments += static_cast<int>(step.local_wire_segments.size());
+    }
+    result.packing_time_dp_used = result.packing_time_dp_segments > 0;
     std::unordered_map<std::string, std::unordered_set<std::string>> subtree_cache;
     std::unordered_map<std::string, NodeRoutingDpResult> result_by_node;
 
@@ -506,6 +520,9 @@ RoutingDpResult run_bottom_up_routing_dp(
 
         NodeRoutingDpResult node_result;
         node_result.tree_node = node_id;
+        const auto trace_step = trace_index.step_by_node.find(node_id);
+        const auto* packing_time_segments =
+            trace_step == trace_index.step_by_node.end() ? nullptr : &trace_step->second->local_wire_segments;
         node_result.states = build_states_for_node(
             node_it->second,
             result_by_node,
@@ -515,6 +532,8 @@ RoutingDpResult run_bottom_up_routing_dp(
             lcp_owner_by_id,
             lcp_space_by_id,
             trace_index,
+            packing_time_segments,
+            result.packing_time_dp_used,
             max_states_per_node,
             result.dp_pruned_states);
         result.dp_nodes += 1;

@@ -50,6 +50,8 @@ struct RoutingDpResult {
     int dp_nodes{};
     int dp_states{};
     int dp_pruned_states{};
+    int packing_time_dp_segments{};
+    bool packing_time_dp_used{};
 };
 
 // 按 B*-tree post-order 运行 routing DP，并从 A* candidates 中选择一致的 traceback 路径。

@@ -151,6 +151,83 @@ std::vector<std::string> subtree_modules_for_trace(const EnhancedBStarTree& tree
     return modules;
 }
 
+void append_unique(std::vector<std::string>& values, const std::string& value) {
+    if (value.empty()) return;
+    if (std::find(values.begin(), values.end(), value) == values.end()) values.push_back(value);
+}
+
+std::string segment_key_for_trace(const WireSegmentRef& segment) {
+    if (!segment.id.empty()) return segment.id;
+    return segment.net + "|" + segment.from + "|" + segment.to;
+}
+
+std::unordered_map<std::string, std::string> lcp_owner_map_for_trace(const RoutingEvaluationRequest& request) {
+    std::unordered_map<std::string, std::string> owners;
+    for (const auto& space : request.space_nodes) {
+        for (const auto& point : space.linking_points) owners[point.id] = space.owner;
+    }
+    return owners;
+}
+
+std::string terminal_owner_for_trace(
+    const std::string& terminal,
+    const std::unordered_map<std::string, std::string>& lcp_owner_by_id) {
+    const auto dot = terminal.find('.');
+    if (dot != std::string::npos) return terminal.substr(0, dot);
+    const auto found = lcp_owner_by_id.find(terminal);
+    return found == lcp_owner_by_id.end() ? std::string{} : found->second;
+}
+
+std::unordered_set<std::string> module_set_for_trace(const std::vector<std::string>& modules) {
+    return {modules.begin(), modules.end()};
+}
+
+bool segment_inside_trace_modules(
+    const WireSegmentRef& segment,
+    const std::unordered_set<std::string>& modules,
+    const std::unordered_map<std::string, std::string>& lcp_owner_by_id) {
+    const auto from = terminal_owner_for_trace(segment.from, lcp_owner_by_id);
+    const auto to = terminal_owner_for_trace(segment.to, lcp_owner_by_id);
+    return !from.empty() && !to.empty() && modules.contains(from) && modules.contains(to);
+}
+
+bool segment_crosses_child_modules(
+    const WireSegmentRef& segment,
+    const std::unordered_set<std::string>& left,
+    const std::unordered_set<std::string>& right,
+    const std::unordered_map<std::string, std::string>& lcp_owner_by_id) {
+    if (left.empty() || right.empty()) return false;
+    const auto from = terminal_owner_for_trace(segment.from, lcp_owner_by_id);
+    const auto to = terminal_owner_for_trace(segment.to, lcp_owner_by_id);
+    return (left.contains(from) && right.contains(to)) || (left.contains(to) && right.contains(from));
+}
+
+// 根据 packing step 的 subtree 边界显式记录该 step 需要完成的 routing DP transition。
+void annotate_packing_time_segments(const EnhancedBStarTree& tree, RoutingEvaluationRequest& request) {
+    const auto lcp_owner_by_id = lcp_owner_map_for_trace(request);
+    for (auto& step : request.packing_trace.steps) {
+        const auto current_modules = module_set_for_trace(step.subtree_modules);
+        const auto left_modules = step.left.has_value()
+                                      ? module_set_for_trace(subtree_modules_for_trace(tree, *step.left))
+                                      : std::unordered_set<std::string>{};
+        const auto right_modules = step.right.has_value()
+                                       ? module_set_for_trace(subtree_modules_for_trace(tree, *step.right))
+                                       : std::unordered_set<std::string>{};
+        for (const auto& topology : request.net_topologies) {
+            for (const auto& segment : topology.segments) {
+                if (!segment_inside_trace_modules(segment, current_modules, lcp_owner_by_id)) continue;
+                if (segment_inside_trace_modules(segment, left_modules, lcp_owner_by_id)) continue;
+                if (segment_inside_trace_modules(segment, right_modules, lcp_owner_by_id)) continue;
+                const auto key = segment_key_for_trace(segment);
+                append_unique(step.local_wire_segments, key);
+                if (segment_crosses_child_modules(segment, left_modules, right_modules, lcp_owner_by_id)) {
+                    append_unique(step.cross_child_wire_segments, key);
+                }
+            }
+        }
+    }
+}
+
 Rect placed_active_rect(const Module& module, const Placement& placement) {
     return routing::transform_active_to_global(module, placement);
 }
@@ -298,7 +375,9 @@ Solution make_solution(const CandidateState& state) {
     solution.packing_trace_steps = state.feedback.metrics.packing_trace_steps;
     solution.space_feedback_nodes = state.feedback.metrics.space_feedback_nodes;
     solution.routing_feedback_iterations = state.feedback.metrics.routing_feedback_iterations;
+    solution.packing_time_dp_segments = state.feedback.metrics.packing_time_dp_segments;
     solution.routing_feedback_converged = state.feedback.metrics.routing_feedback_converged;
+    solution.packing_time_dp_used = state.feedback.metrics.packing_time_dp_used;
     solution.dp_used = state.feedback.metrics.dp_used;
     return solution;
 }
@@ -381,6 +460,8 @@ RoutingEvaluationRequest pack_enhanced_tree(
             node.left,
             node.right,
             subtree_modules_for_trace(tree, id),
+            {},
+            {},
         });
         packed.push_back({x, y, x + occupied.first, y + occupied.second});
         if (node.left.has_value()) {
@@ -396,6 +477,7 @@ RoutingEvaluationRequest pack_enhanced_tree(
     request.space_nodes = collect_space_nodes(tree);
     request.tree = make_routing_tree_snapshot(tree);
     populate_routing_context(circuit, request);
+    annotate_packing_time_segments(tree, request);
     return request;
 }
 
@@ -445,6 +527,8 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
         feedback.metrics.dp_states = routing_evaluation.bottom_up_dp->dp_states;
         feedback.metrics.dp_pruned_states = routing_evaluation.bottom_up_dp->dp_pruned_states;
         feedback.metrics.dp_traceback_segments = static_cast<int>(routing_evaluation.bottom_up_dp->traceback_candidates.size());
+        feedback.metrics.packing_time_dp_segments = routing_evaluation.bottom_up_dp->packing_time_dp_segments;
+        feedback.metrics.packing_time_dp_used = routing_evaluation.bottom_up_dp->packing_time_dp_used;
     }
     feedback.metrics.penalty +=
         routing_evaluation.global_routing.total_penalty + detailed.detailed_routing_penalty;
