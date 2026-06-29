@@ -200,6 +200,7 @@ void run_routing_evaluator_tests() {
     require(metrics.dp_traceback_segments > 0, "bottom-up DP should produce traceback candidates");
     require(metrics.dp_states >= metrics.dp_nodes, "bottom-up DP should keep at least one state per visited node");
     require(metrics.packing_trace_steps > 0, "packing should expose contour trace steps");
+    require(metrics.space_feedback_nodes >= 0, "optimizer should expose routing space feedback count");
     const auto request_for_dp = sapr::pack_enhanced_tree(circuit, sapr::make_enhanced_tree(circuit), config);
     require(!request_for_dp.packing_trace.steps.empty(), "pack_enhanced_tree should record contour trace");
     require(
@@ -208,6 +209,9 @@ void run_routing_evaluator_tests() {
     for (const auto& step : request_for_dp.packing_trace.steps) {
         require(step.occupied_bbox.x1 <= step.occupied_bbox.x2, "packing trace bbox x range should be valid");
         require(step.occupied_bbox.y1 <= step.occupied_bbox.y2, "packing trace bbox y range should be valid");
+        require(step.right_space >= 0.0, "packing trace should record non-negative right routing space");
+        require(step.top_space >= 0.0, "packing trace should record non-negative top routing space");
+        require(step.coupling_extra_space >= 0.0, "packing trace should record non-negative coupling space");
     }
     const auto root_step = std::find_if(
         request_for_dp.packing_trace.steps.begin(),
@@ -231,8 +235,36 @@ void run_routing_evaluator_tests() {
     require(
         dp_evaluation.bottom_up_dp->best_state.packing_step_index >= 0,
         "bottom-up DP state should record packing step index when contour trace exists");
+    const bool has_space_trace = std::any_of(
+        dp_evaluation.bottom_up_dp->best_state.selected_transitions.begin(),
+        dp_evaluation.bottom_up_dp->best_state.selected_transitions.end(),
+        [](const auto& transition) { return transition.find("@space=") != std::string::npos; });
+    require(has_space_trace, "LCP DP transitions should record source space node id");
     for (const auto& node_result : dp_evaluation.bottom_up_dp->node_results) {
         require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
+    }
+    auto feedback_tree = sapr::make_enhanced_tree(circuit);
+    const auto first_feedback_request = sapr::pack_enhanced_tree(circuit, feedback_tree, config);
+    const auto first_feedback = sapr::evaluate_with_routing_adapter(circuit, first_feedback_request);
+    sapr::apply_routing_feedback(feedback_tree, first_feedback);
+    const auto second_feedback_request = sapr::pack_enhanced_tree(circuit, feedback_tree, config);
+    require(
+        second_feedback_request.packing_trace.steps.size() == first_feedback_request.packing_trace.steps.size(),
+        "routing feedback should preserve representative packing trace size");
+    const auto trace_space_sum = [](const sapr::RoutingEvaluationRequest& request) {
+        double total = 0.0;
+        for (const auto& step : request.packing_trace.steps) {
+            total += step.right_space + step.top_space + step.coupling_extra_space;
+        }
+        return total;
+    };
+    require(
+        trace_space_sum(second_feedback_request) + 1e-9 >= trace_space_sum(first_feedback_request),
+        "routing feedback should not reduce contour routing space demand");
+    if (first_feedback.metrics.space_feedback_nodes > 0) {
+        require(
+            !first_feedback.required_space_by_node.empty() || !first_feedback.coupling_space_by_node.empty(),
+            "space feedback count should correspond to emitted feedback maps");
     }
     auto no_trace_request = request_for_dp;
     no_trace_request.packing_trace.steps.clear();

@@ -154,15 +154,19 @@ void append_candidate_packing_trace(
     RoutingDpState& state,
     const RouteCandidate& candidate,
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
+    const std::unordered_map<std::string, std::string>& lcp_space_by_id,
     const PackingTraceIndex& trace_index) {
     if (candidate.lcp_id.empty()) return;
     const auto owner = lcp_owner_by_id.find(candidate.lcp_id);
     if (owner == lcp_owner_by_id.end()) return;
     const auto step = trace_index.index_by_node.find(owner->second);
     if (step == trace_index.index_by_node.end()) return;
+    std::string transition = candidate_segment_key(candidate) + "@packing_step=" + std::to_string(step->second);
+    const auto space = lcp_space_by_id.find(candidate.lcp_id);
+    if (space != lcp_space_by_id.end()) transition += "@space=" + space->second;
     append_unique(
         state.selected_transitions,
-        candidate_segment_key(candidate) + "@packing_step=" + std::to_string(step->second));
+        transition);
 }
 
 // 将所有候选按逻辑线段分组。
@@ -212,6 +216,15 @@ std::unordered_map<std::string, std::string> make_lcp_owner_map(const RoutingEva
     std::unordered_map<std::string, std::string> result;
     for (const auto& space : request.space_nodes) {
         for (const auto& point : space.linking_points) result[point.id] = space.owner;
+    }
+    return result;
+}
+
+// 鏍规嵁 request.space_nodes 寤虹珛 LCP 鎵€灞?space node 鏌ユ壘琛紝渚?DP trace 璇存槑 feedback 鏉ユ簮銆?
+std::unordered_map<std::string, std::string> make_lcp_space_map(const RoutingEvaluationRequest& request) {
+    std::unordered_map<std::string, std::string> result;
+    for (const auto& space : request.space_nodes) {
+        for (const auto& point : space.linking_points) result[point.id] = space.id;
     }
     return result;
 }
@@ -379,6 +392,7 @@ void apply_segment_transition(
     std::vector<RoutingDpState>& states,
     const CandidateGroup& group,
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
+    const std::unordered_map<std::string, std::string>& lcp_space_by_id,
     const PackingTraceIndex& trace_index,
     int max_states,
     int& pruned_states) {
@@ -389,7 +403,7 @@ void apply_segment_transition(
             if (!candidate_matches_group(candidate, group)) continue;
             RoutingDpState next = state;
             if (!append_candidate_if_consistent(next, candidate)) continue;
-            append_candidate_packing_trace(next, candidate, lcp_owner_by_id, trace_index);
+            append_candidate_packing_trace(next, candidate, lcp_owner_by_id, lcp_space_by_id, trace_index);
             selected_any = true;
             next_states.push_back(std::move(next));
         }
@@ -415,6 +429,7 @@ std::vector<RoutingDpState> build_states_for_node(
     const ChildSubtreeModules& children,
     const std::vector<CandidateGroup>& groups,
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
+    const std::unordered_map<std::string, std::string>& lcp_space_by_id,
     const PackingTraceIndex& trace_index,
     int max_states,
     int& pruned_states) {
@@ -432,7 +447,7 @@ std::vector<RoutingDpState> build_states_for_node(
             }
         }
         if (already_covered) continue;
-        apply_segment_transition(states, group, lcp_owner_by_id, trace_index, max_states, pruned_states);
+        apply_segment_transition(states, group, lcp_owner_by_id, lcp_space_by_id, trace_index, max_states, pruned_states);
     }
 
     prune_states(states, max_states, pruned_states);
@@ -472,6 +487,7 @@ RoutingDpResult run_bottom_up_routing_dp(
 
     const auto groups = make_candidate_groups(request, candidates);
     const auto lcp_owner_by_id = make_lcp_owner_map(request);
+    const auto lcp_space_by_id = make_lcp_space_map(request);
     const auto trace_index = make_packing_trace_index(request.packing_trace);
     std::unordered_map<std::string, std::unordered_set<std::string>> subtree_cache;
     std::unordered_map<std::string, NodeRoutingDpResult> result_by_node;
@@ -497,6 +513,7 @@ RoutingDpResult run_bottom_up_routing_dp(
             children,
             groups,
             lcp_owner_by_id,
+            lcp_space_by_id,
             trace_index,
             max_states_per_node,
             result.dp_pruned_states);

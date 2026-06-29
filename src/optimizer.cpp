@@ -255,6 +255,7 @@ Solution make_solution(const CandidateState& state) {
     solution.dp_pruned_states = state.feedback.metrics.dp_pruned_states;
     solution.dp_traceback_segments = state.feedback.metrics.dp_traceback_segments;
     solution.packing_trace_steps = state.feedback.metrics.packing_trace_steps;
+    solution.space_feedback_nodes = state.feedback.metrics.space_feedback_nodes;
     solution.dp_used = state.feedback.metrics.dp_used;
     return solution;
 }
@@ -319,6 +320,8 @@ RoutingEvaluationRequest pack_enhanced_tree(
         if (pair_group != nullptr && pair_group->mirror.has_value()) {
             request.placements[*pair_group->mirror] = mirror_placement(circuit, tree, node, placement, config);
         }
+        const double group_coupling_space =
+            pair_group == nullptr ? 0.0 : pair_group->space_group.coupling_extra_space + pair_group->space_cluster.coupling_extra_space;
 
         request.packing_trace.steps.push_back(PackingContourStep{
             id,
@@ -329,6 +332,9 @@ RoutingEvaluationRequest pack_enhanced_tree(
             desired_x,
             desired_y,
             contour_y,
+            node.right_space.required_space(),
+            node.top_space.required_space(),
+            node.right_space.coupling_extra_space + node.top_space.coupling_extra_space + group_coupling_space,
             node.left,
             node.right,
             subtree_modules_for_trace(tree, id),
@@ -402,18 +408,26 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.routing_cost = routing_evaluation.routing_cost;
     feedback.routing_candidate_count = routing_evaluation.candidates.size();
 
+    int space_feedback_nodes = 0;
     for (const auto& space : request.space_nodes) {
         const auto detailed_space = detailed.required_space_by_node.find(space.id);
-        feedback.required_space_by_node[space.id] =
+        const double required_space =
             detailed_space == detailed.required_space_by_node.end()
                 ? space.required_space()
                 : std::max(space.required_space(), detailed_space->second);
+        feedback.required_space_by_node[space.id] = required_space;
         const auto detailed_coupling = detailed.coupling_space_by_node.find(space.id);
-        feedback.coupling_space_by_node[space.id] =
+        const double coupling_space =
             detailed_coupling == detailed.coupling_space_by_node.end()
                 ? (routing_evaluation.global_routing.coupling_penalty > 0.0 ? 1.0 : 0.0)
                 : detailed_coupling->second;
+        feedback.coupling_space_by_node[space.id] = coupling_space;
+        const bool has_required_feedback =
+            detailed_space != detailed.required_space_by_node.end() && detailed_space->second > space.required_space() + 1e-9;
+        const bool has_coupling_feedback = coupling_space > 1e-9;
+        if (has_required_feedback || has_coupling_feedback) ++space_feedback_nodes;
     }
+    feedback.metrics.space_feedback_nodes = space_feedback_nodes;
     return feedback;
 }
 

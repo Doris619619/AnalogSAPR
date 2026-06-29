@@ -163,6 +163,7 @@ struct Metrics {
     int dp_pruned_states{};
     int dp_traceback_segments{};
     int packing_trace_steps{};
+    int space_feedback_nodes{};
     bool dp_used{};
     double congestion_penalty{};
 };
@@ -183,6 +184,7 @@ struct Solution {
     std::optional<int> dp_pruned_states;
     std::optional<int> dp_traceback_segments;
     std::optional<int> packing_trace_steps;
+    std::optional<int> space_feedback_nodes;
     std::optional<bool> dp_used;
 };
 
@@ -322,6 +324,9 @@ struct PackingContourStep {
     double desired_x{};
     double desired_y{};
     double contour_y{};
+    double right_space{};
+    double top_space{};
+    double coupling_extra_space{};
     std::optional<std::string> left;
     std::optional<std::string> right;
     std::vector<std::string> subtree_modules;
