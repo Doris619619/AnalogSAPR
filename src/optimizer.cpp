@@ -134,6 +134,23 @@ RoutingTreeSnapshot make_routing_tree_snapshot(const EnhancedBStarTree& tree) {
 }
 
 // 返回已放置模块的 active blocker 近似全局矩形。
+// 收集指定 B*-tree node 子树中的代表模块，用于把 DP state 对齐到 packing contour step。
+std::vector<std::string> subtree_modules_for_trace(const EnhancedBStarTree& tree, const std::string& id) {
+    std::vector<std::string> modules;
+    const auto found = tree.nodes.find(id);
+    if (found == tree.nodes.end()) return modules;
+    modules.push_back(found->second.module.empty() ? id : found->second.module);
+    if (found->second.left.has_value()) {
+        auto left = subtree_modules_for_trace(tree, *found->second.left);
+        modules.insert(modules.end(), left.begin(), left.end());
+    }
+    if (found->second.right.has_value()) {
+        auto right = subtree_modules_for_trace(tree, *found->second.right);
+        modules.insert(modules.end(), right.begin(), right.end());
+    }
+    return modules;
+}
+
 Rect placed_active_rect(const Module& module, const Placement& placement) {
     return routing::transform_active_to_global(module, placement);
 }
@@ -237,6 +254,7 @@ Solution make_solution(const CandidateState& state) {
     solution.dp_states = state.feedback.metrics.dp_states;
     solution.dp_pruned_states = state.feedback.metrics.dp_pruned_states;
     solution.dp_traceback_segments = state.feedback.metrics.dp_traceback_segments;
+    solution.packing_trace_steps = state.feedback.metrics.packing_trace_steps;
     solution.dp_used = state.feedback.metrics.dp_used;
     return solution;
 }
@@ -292,7 +310,8 @@ RoutingEvaluationRequest pack_enhanced_tree(
         const auto& node = tree.nodes.at(id);
         const auto occupied = occupied_size(circuit, tree, node, config);
         const double x = desired_x;
-        const double y = std::max(desired_y, contour_height(packed, x, occupied.first));
+        const double contour_y = contour_height(packed, x, occupied.first);
+        const double y = std::max(desired_y, contour_y);
 
         Placement placement{id, x, y, node.angle, orient_for_angle(node.angle)};
         request.placements[id] = placement;
@@ -301,6 +320,19 @@ RoutingEvaluationRequest pack_enhanced_tree(
             request.placements[*pair_group->mirror] = mirror_placement(circuit, tree, node, placement, config);
         }
 
+        request.packing_trace.steps.push_back(PackingContourStep{
+            id,
+            node.module,
+            x,
+            y,
+            Rect{x, y, x + occupied.first, y + occupied.second},
+            desired_x,
+            desired_y,
+            contour_y,
+            node.left,
+            node.right,
+            subtree_modules_for_trace(tree, id),
+        });
         packed.push_back({x, y, x + occupied.first, y + occupied.second});
         if (node.left.has_value()) {
             place_node(*node.left, x + occupied.first + config.spacing, y);
@@ -357,6 +389,7 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.metrics.detailed_routes = static_cast<int>(detailed.routes.size());
     feedback.metrics.traceback_failures = detailed.traceback_failures;
     feedback.metrics.space_nodes_with_routes = detailed.space_nodes_with_routes;
+    feedback.metrics.packing_trace_steps = static_cast<int>(request.packing_trace.steps.size());
     feedback.metrics.dp_used = routing_evaluation.used_bottom_up_dp;
     if (routing_evaluation.bottom_up_dp.has_value()) {
         feedback.metrics.dp_nodes = routing_evaluation.bottom_up_dp->dp_nodes;

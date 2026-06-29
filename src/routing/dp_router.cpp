@@ -30,6 +30,12 @@ struct ChildSubtreeModules {
     std::unordered_set<std::string> right;
 };
 
+// 表示 packing contour trace 在 DP 中的快速索引。
+struct PackingTraceIndex {
+    std::unordered_map<std::string, const PackingContourStep*> step_by_node;
+    std::unordered_map<std::string, int> index_by_node;
+};
+
 // 返回 terminal 所属模块，LCP 或无法识别时返回空字符串。
 std::string module_for_terminal(const std::string& terminal) {
     const auto dot = terminal.find('.');
@@ -143,6 +149,22 @@ bool append_candidate_if_consistent(RoutingDpState& state, const RouteCandidate&
     return true;
 }
 
+// 将候选路径对应的 LCP owner packing step 追加到 traceback 说明。
+void append_candidate_packing_trace(
+    RoutingDpState& state,
+    const RouteCandidate& candidate,
+    const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
+    const PackingTraceIndex& trace_index) {
+    if (candidate.lcp_id.empty()) return;
+    const auto owner = lcp_owner_by_id.find(candidate.lcp_id);
+    if (owner == lcp_owner_by_id.end()) return;
+    const auto step = trace_index.index_by_node.find(owner->second);
+    if (step == trace_index.index_by_node.end()) return;
+    append_unique(
+        state.selected_transitions,
+        candidate_segment_key(candidate) + "@packing_step=" + std::to_string(step->second));
+}
+
 // 将所有候选按逻辑线段分组。
 std::vector<CandidateGroup> make_candidate_groups(
     const RoutingEvaluationRequest& request,
@@ -218,6 +240,17 @@ std::unordered_map<std::string, RoutingTreeNodeRef> tree_nodes_by_id(const Routi
 }
 
 // 收集 B*-tree post-order 顺序。
+// 从 packing trace 建立 node 到 contour step 的查找表。
+PackingTraceIndex make_packing_trace_index(const PackingContourTrace& trace) {
+    PackingTraceIndex index;
+    for (std::size_t step = 0; step < trace.steps.size(); ++step) {
+        const auto& item = trace.steps[step];
+        index.step_by_node[item.tree_node] = &item;
+        index.index_by_node[item.tree_node] = static_cast<int>(step);
+    }
+    return index;
+}
+
 void collect_post_order(
     const std::string& id,
     const std::unordered_map<std::string, RoutingTreeNodeRef>& nodes,
@@ -256,6 +289,19 @@ std::unordered_set<std::string> collect_subtree_modules(
 }
 
 // 判断逻辑线段的两个端点是否都落在指定模块集合里。
+// 优先使用 packing contour trace 中记录的子树模块，否则回退到 B*-tree 递归收集。
+std::unordered_set<std::string> modules_for_dp_step(
+    const std::string& id,
+    const PackingTraceIndex& trace_index,
+    const std::unordered_map<std::string, RoutingTreeNodeRef>& nodes,
+    std::unordered_map<std::string, std::unordered_set<std::string>>& cache) {
+    const auto trace = trace_index.step_by_node.find(id);
+    if (trace != trace_index.step_by_node.end()) {
+        return {trace->second->subtree_modules.begin(), trace->second->subtree_modules.end()};
+    }
+    return collect_subtree_modules(id, nodes, cache);
+}
+
 bool segment_inside_modules(
     const CandidateGroup& group,
     const std::unordered_set<std::string>& modules,
@@ -280,7 +326,8 @@ bool is_local_segment_for_node(
 // 为当前 node 生成基础状态：先合并左右 child state，再把当前 module terminal 标记为已覆盖。
 std::vector<RoutingDpState> merge_child_states_for_node(
     const RoutingTreeNodeRef& node,
-    const std::unordered_map<std::string, NodeRoutingDpResult>& result_by_node) {
+    const std::unordered_map<std::string, NodeRoutingDpResult>& result_by_node,
+    const PackingTraceIndex& trace_index) {
     std::vector<const RoutingDpState*> left_states{nullptr};
     std::vector<const RoutingDpState*> right_states{nullptr};
     if (node.left.has_value()) {
@@ -304,6 +351,10 @@ std::vector<RoutingDpState> merge_child_states_for_node(
             RoutingDpState state;
             state.id = 0;
             state.tree_node = node.id;
+            const auto trace_step = trace_index.step_by_node.find(node.id);
+            if (trace_step != trace_index.step_by_node.end()) state.contour_y = trace_step->second->contour_y;
+            const auto trace_index_it = trace_index.index_by_node.find(node.id);
+            if (trace_index_it != trace_index.index_by_node.end()) state.packing_step_index = trace_index_it->second;
             if (left != nullptr && !merge_child_state(state, *left, true)) continue;
             if (right != nullptr && !merge_child_state(state, *right, false)) continue;
             append_unique(state.covered_terminals, node.module);
@@ -313,6 +364,10 @@ std::vector<RoutingDpState> merge_child_states_for_node(
     if (merged.empty() && !node.left.has_value() && !node.right.has_value()) {
         RoutingDpState state;
         state.tree_node = node.id;
+        const auto trace_step = trace_index.step_by_node.find(node.id);
+        if (trace_step != trace_index.step_by_node.end()) state.contour_y = trace_step->second->contour_y;
+        const auto trace_index_it = trace_index.index_by_node.find(node.id);
+        if (trace_index_it != trace_index.index_by_node.end()) state.packing_step_index = trace_index_it->second;
         append_unique(state.covered_terminals, node.module);
         merged.push_back(std::move(state));
     }
@@ -323,6 +378,8 @@ std::vector<RoutingDpState> merge_child_states_for_node(
 void apply_segment_transition(
     std::vector<RoutingDpState>& states,
     const CandidateGroup& group,
+    const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
+    const PackingTraceIndex& trace_index,
     int max_states,
     int& pruned_states) {
     std::vector<RoutingDpState> next_states;
@@ -332,6 +389,7 @@ void apply_segment_transition(
             if (!candidate_matches_group(candidate, group)) continue;
             RoutingDpState next = state;
             if (!append_candidate_if_consistent(next, candidate)) continue;
+            append_candidate_packing_trace(next, candidate, lcp_owner_by_id, trace_index);
             selected_any = true;
             next_states.push_back(std::move(next));
         }
@@ -357,9 +415,10 @@ std::vector<RoutingDpState> build_states_for_node(
     const ChildSubtreeModules& children,
     const std::vector<CandidateGroup>& groups,
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
+    const PackingTraceIndex& trace_index,
     int max_states,
     int& pruned_states) {
-    auto states = merge_child_states_for_node(node, result_by_node);
+    auto states = merge_child_states_for_node(node, result_by_node, trace_index);
     if (states.empty()) return states;
 
     for (const auto& group : groups) {
@@ -373,7 +432,7 @@ std::vector<RoutingDpState> build_states_for_node(
             }
         }
         if (already_covered) continue;
-        apply_segment_transition(states, group, max_states, pruned_states);
+        apply_segment_transition(states, group, lcp_owner_by_id, trace_index, max_states, pruned_states);
     }
 
     prune_states(states, max_states, pruned_states);
@@ -413,16 +472,21 @@ RoutingDpResult run_bottom_up_routing_dp(
 
     const auto groups = make_candidate_groups(request, candidates);
     const auto lcp_owner_by_id = make_lcp_owner_map(request);
+    const auto trace_index = make_packing_trace_index(request.packing_trace);
     std::unordered_map<std::string, std::unordered_set<std::string>> subtree_cache;
     std::unordered_map<std::string, NodeRoutingDpResult> result_by_node;
 
     for (const auto& node_id : post_order) {
         const auto node_it = nodes.find(node_id);
         if (node_it == nodes.end()) continue;
-        const auto subtree_modules = collect_subtree_modules(node_id, nodes, subtree_cache);
+        const auto subtree_modules = modules_for_dp_step(node_id, trace_index, nodes, subtree_cache);
         ChildSubtreeModules children;
-        if (node_it->second.left.has_value()) children.left = collect_subtree_modules(*node_it->second.left, nodes, subtree_cache);
-        if (node_it->second.right.has_value()) children.right = collect_subtree_modules(*node_it->second.right, nodes, subtree_cache);
+        if (node_it->second.left.has_value()) {
+            children.left = modules_for_dp_step(*node_it->second.left, trace_index, nodes, subtree_cache);
+        }
+        if (node_it->second.right.has_value()) {
+            children.right = modules_for_dp_step(*node_it->second.right, trace_index, nodes, subtree_cache);
+        }
 
         NodeRoutingDpResult node_result;
         node_result.tree_node = node_id;
@@ -433,6 +497,7 @@ RoutingDpResult run_bottom_up_routing_dp(
             children,
             groups,
             lcp_owner_by_id,
+            trace_index,
             max_states_per_node,
             result.dp_pruned_states);
         result.dp_nodes += 1;

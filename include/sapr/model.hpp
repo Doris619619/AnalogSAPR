@@ -162,6 +162,7 @@ struct Metrics {
     int dp_states{};
     int dp_pruned_states{};
     int dp_traceback_segments{};
+    int packing_trace_steps{};
     bool dp_used{};
     double congestion_penalty{};
 };
@@ -181,6 +182,7 @@ struct Solution {
     std::optional<int> dp_states;
     std::optional<int> dp_pruned_states;
     std::optional<int> dp_traceback_segments;
+    std::optional<int> packing_trace_steps;
     std::optional<bool> dp_used;
 };
 
@@ -310,6 +312,26 @@ struct PlacedPin {
 };
 
 // 表示一次候选布局的路由侧评价输入。
+// 表示一次 contour packing 中某个 B*-tree node 的中间状态。
+struct PackingContourStep {
+    std::string tree_node;
+    std::string module;
+    double x{};
+    double y{};
+    Rect occupied_bbox;
+    double desired_x{};
+    double desired_y{};
+    double contour_y{};
+    std::optional<std::string> left;
+    std::optional<std::string> right;
+    std::vector<std::string> subtree_modules;
+};
+
+// 表示当前候选布局的 contour packing 过程快照。
+struct PackingContourTrace {
+    std::vector<PackingContourStep> steps;
+};
+
 struct RoutingEvaluationRequest {
     std::unordered_map<std::string, Placement> placements;
     std::vector<std::string> placement_order;
@@ -319,6 +341,7 @@ struct RoutingEvaluationRequest {
     std::vector<NetTopology> net_topologies;
     std::vector<Rect> active_region_blockers;
     RoutingTreeSnapshot tree;
+    PackingContourTrace packing_trace;
 };
 
 // 表示路由 adapter 返回给 placement/SA 的反馈。

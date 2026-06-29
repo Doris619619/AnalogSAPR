@@ -15,6 +15,8 @@ namespace sapr::routing {
 struct RoutingDpState {
     int id{};
     std::string tree_node;
+    int packing_step_index{-1};
+    double contour_y{};
     std::unordered_map<std::string, std::string> lcp_location_by_id;
     // 记录当前 state 已覆盖的 pin/LCP terminal，供 traceback 和测试检查。
     std::vector<std::string> covered_terminals;

@@ -1,7 +1,9 @@
 // 文件职责：验证 routing evaluator 可以在样例输入上完成 A*/DP 布线评估。
+#include <algorithm>
 #include <filesystem>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
@@ -197,7 +199,25 @@ void run_routing_evaluator_tests() {
     require(metrics.dp_states > 0, "bottom-up DP should keep candidate states");
     require(metrics.dp_traceback_segments > 0, "bottom-up DP should produce traceback candidates");
     require(metrics.dp_states >= metrics.dp_nodes, "bottom-up DP should keep at least one state per visited node");
+    require(metrics.packing_trace_steps > 0, "packing should expose contour trace steps");
     const auto request_for_dp = sapr::pack_enhanced_tree(circuit, sapr::make_enhanced_tree(circuit), config);
+    require(!request_for_dp.packing_trace.steps.empty(), "pack_enhanced_tree should record contour trace");
+    require(
+        request_for_dp.packing_trace.steps.size() == request_for_dp.tree.nodes.size(),
+        "packing trace should contain one step per representative tree node");
+    for (const auto& step : request_for_dp.packing_trace.steps) {
+        require(step.occupied_bbox.x1 <= step.occupied_bbox.x2, "packing trace bbox x range should be valid");
+        require(step.occupied_bbox.y1 <= step.occupied_bbox.y2, "packing trace bbox y range should be valid");
+    }
+    const auto root_step = std::find_if(
+        request_for_dp.packing_trace.steps.begin(),
+        request_for_dp.packing_trace.steps.end(),
+        [&](const auto& step) { return request_for_dp.tree.root.has_value() && step.tree_node == *request_for_dp.tree.root; });
+    require(root_step != request_for_dp.packing_trace.steps.end(), "packing trace should include root step");
+    std::unordered_set<std::string> root_modules(root_step->subtree_modules.begin(), root_step->subtree_modules.end());
+    for (const auto& node : request_for_dp.tree.nodes) {
+        require(root_modules.contains(node.module), "root packing trace step should cover all placed representative modules");
+    }
     const auto dp_evaluation = sapr::evaluate_routing(circuit, request_for_dp);
     require(dp_evaluation.used_bottom_up_dp, "routing evaluator should use bottom-up DP when tree snapshot exists");
     require(dp_evaluation.bottom_up_dp.has_value(), "routing evaluator should expose bottom-up DP result");
@@ -208,9 +228,18 @@ void run_routing_evaluator_tests() {
     require(
         !dp_evaluation.bottom_up_dp->best_state.selected_transitions.empty(),
         "bottom-up DP state should record selected transitions");
+    require(
+        dp_evaluation.bottom_up_dp->best_state.packing_step_index >= 0,
+        "bottom-up DP state should record packing step index when contour trace exists");
     for (const auto& node_result : dp_evaluation.bottom_up_dp->node_results) {
         require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
     }
+    auto no_trace_request = request_for_dp;
+    no_trace_request.packing_trace.steps.clear();
+    const auto no_trace_evaluation = sapr::evaluate_routing(circuit, no_trace_request);
+    require(no_trace_evaluation.used_bottom_up_dp, "bottom-up DP should fallback when packing trace is absent");
+    require(no_trace_evaluation.bottom_up_dp.has_value(), "fallback DP should still expose a result");
+    require(no_trace_evaluation.bottom_up_dp->success, "fallback DP should still succeed on sample input");
     const auto evaluation = sapr::evaluate_routing(circuit, solution.placements);
     const auto selected_segments = sapr::selected_candidates_to_segments(evaluation);
     sapr::RoutingEvaluationRequest request;
