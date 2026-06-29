@@ -150,6 +150,7 @@ struct Metrics {
     double routing_failure_penalty{};
     double design_rule_penalty{};
     double detailed_routing_penalty{};
+    double detailed_cost{};
     int flow_violations{};
     int current_density_violations{};
     int design_rule_violations{};
@@ -368,6 +369,10 @@ struct DetailedRoutingReport {
     std::vector<std::string> warnings;
     std::vector<std::string> coupling_pairs;
     std::vector<std::string> design_rule_segments;
+    // 记录详细布线阶段违反 FLOW 方向的 net 或 segment。
+    std::vector<std::string> flow_segments;
+    // 记录详细布线阶段违反 WIRE_WIDTH/current-density 代理约束的 segment。
+    std::vector<std::string> current_density_segments;
 };
 
 // 表示 top-down performance-aware detailed routing 的输出。
@@ -376,6 +381,9 @@ struct DetailedRoutingResult {
     DetailedRoutingReport report;
     std::unordered_map<std::string, double> required_space_by_node;
     std::unordered_map<std::string, double> coupling_space_by_node;
+    double detailed_cost{};
+    double flow_penalty{};
+    double current_density_penalty{};
     double coupling_penalty{};
     double design_rule_penalty{};
     double routing_failure_penalty{};

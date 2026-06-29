@@ -143,6 +143,7 @@ int run_solver(const std::vector<std::string>& args) {
                   << "  coupling_penalty: " << metrics.coupling_penalty << '\n'
                   << "  design_rule_violations: " << metrics.design_rule_violations << '\n'
                   << "  design_rule_penalty: " << metrics.design_rule_penalty << '\n'
+                  << "  detailed_cost: " << metrics.detailed_cost << '\n'
                   << "  detailed_routing_penalty: " << metrics.detailed_routing_penalty << '\n'
                   << "  routing_failure_penalty: " << metrics.routing_failure_penalty << '\n';
     }

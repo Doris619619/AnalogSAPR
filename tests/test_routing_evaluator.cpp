@@ -282,6 +282,32 @@ void run_routing_evaluator_tests() {
     require(lcp_detail.space_nodes_with_routes == 1, "LCP detailed route should mark its space node as used");
     require(lcp_detail.required_space_by_node.contains("S1"), "LCP detailed route should report required routing space");
     require(lcp_detail.required_space_by_node.at("S1") >= 3.0, "required space should include route width and spacing");
+    require(lcp_detail.detailed_cost > 0.0, "detailed routing should report local detailed cost");
+
+    auto flow_circuit = drc_circuit;
+    flow_circuit.constraints.flows.push_back({"N", "M.A", "M.B"});
+    const auto flow_ok_detail = sapr::run_detailed_routing(flow_circuit, lcp_request, lcp_eval);
+    require(flow_ok_detail.flow_violations == 0, "out-pin to in-pin LCP traceback should satisfy FLOW");
+
+    auto reverse_flow_eval = make_lcp_evaluation(flow_circuit, drc_placements);
+    auto& reverse_choice = reverse_flow_eval.global_routing.net_routes.front();
+    reverse_choice.selected_candidates[0].from_terminal = "LCP1";
+    reverse_choice.selected_candidates[0].to_terminal = "M.A";
+    reverse_choice.selected_candidates[1].from_terminal = "M.B";
+    reverse_choice.selected_candidates[1].to_terminal = "LCP1";
+    const auto reverse_flow_detail = sapr::run_detailed_routing(flow_circuit, lcp_request, reverse_flow_eval);
+    require(reverse_flow_detail.flow_violations > 0, "reversed LCP traceback should violate FLOW");
+    require(reverse_flow_detail.flow_penalty > 0.0, "FLOW violation should add detailed flow penalty");
+    require(!reverse_flow_detail.report.flow_segments.empty(), "FLOW violation should be reported with segment source");
+
+    auto width_violation_eval = make_lcp_evaluation(drc_circuit, drc_placements);
+    width_violation_eval.global_routing.net_routes.front().selected_candidates.front().wire_width = 1.0;
+    const auto width_violation_detail = sapr::run_detailed_routing(drc_circuit, lcp_request, width_violation_eval);
+    require(width_violation_detail.current_density_violations > 0, "segment width below min should violate current-density proxy");
+    require(width_violation_detail.current_density_penalty > 0.0, "width violation should add current-density penalty");
+    require(
+        !width_violation_detail.report.current_density_segments.empty(),
+        "current-density violation should be reported with segment source");
 
     auto missing_lcp_request = make_lcp_request(drc_circuit, drc_placements, false);
     auto missing_lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
@@ -319,4 +345,19 @@ void run_routing_evaluator_tests() {
     require(
         !missing_segment_dp.best_state.failure_messages.empty(),
         "missing required wire segment should be recorded in DP failure messages");
+
+    auto coupling_eval = make_line_evaluation(drc_circuit, drc_placements, 1.0);
+    auto coupling_candidate = coupling_eval.global_routing.net_routes.front().selected_candidates.front();
+    coupling_candidate.net = "P";
+    coupling_candidate.path.points = {
+        coupling_eval.context.grid().snap_to_grid(sapr::routing::Point{0.0, 1.5}, 0),
+        coupling_eval.context.grid().snap_to_grid(sapr::routing::Point{9.0, 1.5}, 0),
+    };
+    sapr::routing::NetRouteChoice coupling_choice;
+    coupling_choice.net = "P";
+    coupling_choice.selected_candidates.push_back(coupling_candidate);
+    coupling_eval.global_routing.net_routes.push_back(coupling_choice);
+    const auto coupling_detail = sapr::run_detailed_routing(drc_circuit, drc_request, coupling_eval);
+    require(coupling_detail.coupling_penalty > 100.0, "coupling penalty should scale with parallel overlap length");
+    require(!coupling_detail.report.coupling_pairs.empty(), "coupling report should include net pair and overlap length");
 }
