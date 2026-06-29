@@ -164,6 +164,8 @@ struct Metrics {
     int dp_traceback_segments{};
     int packing_trace_steps{};
     int space_feedback_nodes{};
+    int routing_feedback_iterations{};
+    bool routing_feedback_converged{};
     bool dp_used{};
     double congestion_penalty{};
 };
@@ -185,6 +187,8 @@ struct Solution {
     std::optional<int> dp_traceback_segments;
     std::optional<int> packing_trace_steps;
     std::optional<int> space_feedback_nodes;
+    std::optional<int> routing_feedback_iterations;
+    std::optional<bool> routing_feedback_converged;
     std::optional<bool> dp_used;
 };
 
@@ -200,6 +204,8 @@ struct SolverConfig {
     double wirelength_weight{1.0};
     double bend_weight{0.2};
     double via_weight{0.2};
+    int routing_feedback_iterations{2};
+    double routing_feedback_tolerance{1e-6};
 };
 
 // 表示 linking-control point 连接的一条逻辑线段。

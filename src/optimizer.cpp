@@ -224,18 +224,59 @@ double compute_phi_cost(Metrics& metrics, const Metrics& base, const SolverConfi
 }
 
 // 评价一棵增强 B*-tree 对应的候选状态。
+bool feedback_expands_space(
+    const RoutingEvaluationRequest& request,
+    const RoutingFeedback& feedback,
+    double tolerance) {
+    for (const auto& space : request.space_nodes) {
+        const auto required = feedback.required_space_by_node.find(space.id);
+        if (required != feedback.required_space_by_node.end() &&
+            required->second > space.required_space() + tolerance) {
+            return true;
+        }
+        const auto coupling = feedback.coupling_space_by_node.find(space.id);
+        if (coupling != feedback.coupling_space_by_node.end() &&
+            coupling->second > space.coupling_extra_space + tolerance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 在同一个 candidate 内执行有限轮 routing feedback -> re-pack 闭环。
+CandidateState evaluate_candidate_with_feedback_loop(
+    const Circuit& circuit,
+    EnhancedBStarTree tree,
+    const SolverConfig& config,
+    const Metrics* base_metrics) {
+    CandidateState state;
+    state.tree = std::move(tree);
+    const int max_iterations = std::max(1, config.routing_feedback_iterations);
+    bool converged = false;
+    for (int iteration = 0; iteration < max_iterations; ++iteration) {
+        state.request = pack_enhanced_tree(circuit, state.tree, config);
+        state.feedback = evaluate_with_routing_adapter(circuit, state.request);
+        const bool expands_space =
+            feedback_expands_space(state.request, state.feedback, config.routing_feedback_tolerance);
+        apply_routing_feedback(state.tree, state.feedback);
+        state.feedback.metrics.routing_feedback_iterations = iteration + 1;
+        state.feedback.metrics.routing_feedback_converged = !expands_space;
+        if (!expands_space) {
+            converged = true;
+            break;
+        }
+    }
+    state.feedback.metrics.routing_feedback_converged = converged;
+    if (base_metrics != nullptr) state.cost = compute_phi_cost(state.feedback.metrics, *base_metrics, config);
+    return state;
+}
+
 CandidateState evaluate_candidate(
     const Circuit& circuit,
     EnhancedBStarTree tree,
     const SolverConfig& config,
     const Metrics& base_metrics) {
-    CandidateState state;
-    state.tree = std::move(tree);
-    state.request = pack_enhanced_tree(circuit, state.tree, config);
-    state.feedback = evaluate_with_routing_adapter(circuit, state.request);
-    apply_routing_feedback(state.tree, state.feedback);
-    state.cost = compute_phi_cost(state.feedback.metrics, base_metrics, config);
-    return state;
+    return evaluate_candidate_with_feedback_loop(circuit, std::move(tree), config, &base_metrics);
 }
 
 // 将候选状态转换为最终 Solution。
@@ -256,6 +297,8 @@ Solution make_solution(const CandidateState& state) {
     solution.dp_traceback_segments = state.feedback.metrics.dp_traceback_segments;
     solution.packing_trace_steps = state.feedback.metrics.packing_trace_steps;
     solution.space_feedback_nodes = state.feedback.metrics.space_feedback_nodes;
+    solution.routing_feedback_iterations = state.feedback.metrics.routing_feedback_iterations;
+    solution.routing_feedback_converged = state.feedback.metrics.routing_feedback_converged;
     solution.dp_used = state.feedback.metrics.dp_used;
     return solution;
 }
@@ -441,15 +484,9 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     }
 
     auto initial_tree = make_enhanced_tree(circuit);
-    auto initial_request = pack_enhanced_tree(circuit, initial_tree, config);
-    auto initial_feedback = evaluate_with_routing_adapter(circuit, initial_request);
-    apply_routing_feedback(initial_tree, initial_feedback);
-    const Metrics base_metrics = initial_feedback.metrics;
-    const double initial_cost = compute_phi_cost(initial_feedback.metrics, base_metrics, config);
-    CandidateState current{initial_tree,
-                           std::move(initial_request),
-                           std::move(initial_feedback),
-                           initial_cost};
+    auto current = evaluate_candidate_with_feedback_loop(circuit, std::move(initial_tree), config, nullptr);
+    const Metrics base_metrics = current.feedback.metrics;
+    current.cost = compute_phi_cost(current.feedback.metrics, base_metrics, config);
     CandidateState best = current;
 
     std::mt19937 rng(config.seed);

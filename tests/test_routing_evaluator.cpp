@@ -201,6 +201,21 @@ void run_routing_evaluator_tests() {
     require(metrics.dp_states >= metrics.dp_nodes, "bottom-up DP should keep at least one state per visited node");
     require(metrics.packing_trace_steps > 0, "packing should expose contour trace steps");
     require(metrics.space_feedback_nodes >= 0, "optimizer should expose routing space feedback count");
+    require(metrics.routing_feedback_iterations >= 1, "candidate evaluation should run at least one feedback iteration");
+    require(
+        metrics.routing_feedback_iterations <= config.routing_feedback_iterations,
+        "candidate evaluation should honor max routing feedback iterations");
+    if (metrics.routing_feedback_iterations < config.routing_feedback_iterations) {
+        require(metrics.routing_feedback_converged, "early feedback-loop stop should mean convergence");
+    }
+    auto single_loop_config = config;
+    single_loop_config.sa_iterations = 0;
+    single_loop_config.routing_feedback_iterations = 1;
+    const auto single_loop_solution = sapr::solve_placement_aware(circuit, single_loop_config);
+    require(single_loop_solution.metrics.has_value(), "single-loop solution should expose metrics");
+    require(
+        single_loop_solution.metrics->routing_feedback_iterations == 1,
+        "routing_feedback_iterations=1 should keep current single-pass behavior");
     const auto request_for_dp = sapr::pack_enhanced_tree(circuit, sapr::make_enhanced_tree(circuit), config);
     require(!request_for_dp.packing_trace.steps.empty(), "pack_enhanced_tree should record contour trace");
     require(

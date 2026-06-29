@@ -136,6 +136,10 @@ int run_solver(const std::vector<std::string>& args) {
                   << "  dp_traceback_segments: " << solution.dp_traceback_segments.value_or(metrics.dp_traceback_segments) << '\n'
                   << "  packing_trace_steps: " << solution.packing_trace_steps.value_or(metrics.packing_trace_steps) << '\n'
                   << "  space_feedback_nodes: " << solution.space_feedback_nodes.value_or(metrics.space_feedback_nodes) << '\n'
+                  << "  routing_feedback_iterations: "
+                  << solution.routing_feedback_iterations.value_or(metrics.routing_feedback_iterations) << '\n'
+                  << "  routing_feedback_converged: "
+                  << (solution.routing_feedback_converged.value_or(metrics.routing_feedback_converged) ? "true" : "false") << '\n'
                   << "  global_wirelength: " << metrics.wirelength << '\n'
                   << "  global_bends: " << metrics.bend_count << '\n'
                   << "  global_vias: " << metrics.via_count << '\n'
