@@ -5,6 +5,7 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
@@ -74,6 +75,64 @@ sapr::RoutingEvaluation make_line_evaluation(
 }
 
 // 构造带 LCP 拓扑的最小 detailed routing request。
+sapr::Circuit make_priority_test_circuit() {
+    sapr::Circuit circuit;
+    circuit.modules.emplace("M", sapr::Module{"M", 12.0, 12.0, sapr::Rect{5.0, 5.0, 6.0, 6.0}, 0.0, 0.0, ""});
+    circuit.module_order.push_back("M");
+    const std::vector<std::pair<std::string, double>> pins{
+        {"A", 0.0}, {"B", 9.0}, {"C", 0.0}, {"D", 9.0}, {"E", 0.0}, {"F", 9.0},
+    };
+    for (const auto& [pin, x] : pins) circuit.pins.emplace("M." + pin, sapr::Pin{"M", pin, x, 1.0, "M1"});
+    circuit.pin_order = {"M.A", "M.B", "M.C", "M.D", "M.E", "M.F"};
+    circuit.nets.emplace("SYM", sapr::Net{"SYM", sapr::Priority::Symmetry, {"M.A", "M.B"}});
+    circuit.nets.emplace("CRT", sapr::Net{"CRT", sapr::Priority::Critical, {"M.C", "M.D"}});
+    circuit.nets.emplace("NOR", sapr::Net{"NOR", sapr::Priority::Normal, {"M.E", "M.F"}});
+    circuit.net_order = {"SYM", "CRT", "NOR"};
+    return circuit;
+}
+
+sapr::RoutingEvaluation make_priority_evaluation(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::routing::RoutingContext context(circuit, placements);
+    const auto make_candidate = [&](const std::string& net, const std::string& from, const std::string& to, double y) {
+        sapr::routing::RouteCandidate candidate;
+        candidate.net = net;
+        candidate.from_terminal = from;
+        candidate.to_terminal = to;
+        candidate.wire_width = 1.0;
+        candidate.path.success = true;
+        candidate.path.points = {
+            context.grid().snap_to_grid(sapr::routing::Point{0.0, y}, 0),
+            context.grid().snap_to_grid(sapr::routing::Point{9.0, y}, 0),
+        };
+        candidate.path.metrics.wirelength = 9.0;
+        return candidate;
+    };
+    const auto normal = make_candidate("NOR", "M.E", "M.F", 1.0);
+    const auto critical = make_candidate("CRT", "M.C", "M.D", 2.0);
+    const auto symmetry = make_candidate("SYM", "M.A", "M.B", 3.0);
+
+    sapr::routing::GlobalRoutingResult global;
+    for (const auto& candidate : {normal, critical, symmetry}) {
+        sapr::routing::NetRouteChoice choice;
+        choice.net = candidate.net;
+        choice.selected_candidates.push_back(candidate);
+        global.net_routes.push_back(std::move(choice));
+    }
+    global.total_metrics.wirelength = 27.0;
+
+    return sapr::RoutingEvaluation{
+        std::move(context),
+        {normal, critical, symmetry},
+        std::move(global),
+        std::nullopt,
+        27.0,
+        0,
+        false,
+    };
+}
+
 sapr::RoutingEvaluationRequest make_lcp_request(
     const sapr::Circuit& circuit,
     const std::unordered_map<std::string, sapr::Placement>& placements,
@@ -103,6 +162,33 @@ sapr::RoutingEvaluationRequest make_lcp_request(
 }
 
 // 构造一组经过 LCP 的 selected candidates，用于验证 top-down traceback。
+sapr::RoutingEvaluationRequest make_reverse_lcp_request(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements,
+    bool with_location) {
+    auto request = make_lcp_request(circuit, placements, with_location);
+    request.linking_points.clear();
+    request.space_nodes.clear();
+    request.net_topologies.clear();
+
+    sapr::LinkingControlPoint lcp;
+    lcp.id = "LCP1";
+    lcp.space_node_id = "S1";
+    if (with_location) lcp.location_candidates.push_back({4.0, 1.0, "LCP1:first"});
+    lcp.segments.push_back({"N", "M.B", "LCP1", 2.0, 4.0, std::nullopt, sapr::CurrentDirection::In, "N:reverse_left"});
+    lcp.segments.push_back({"N", "LCP1", "M.A", 2.0, 4.0, std::nullopt, sapr::CurrentDirection::Out, "N:reverse_right"});
+
+    sapr::SpaceNode space;
+    space.id = "S1";
+    space.owner = "M";
+    space.kind = sapr::SpaceNodeKind::Right;
+    space.linking_points.push_back(lcp);
+    request.space_nodes.push_back(space);
+    request.linking_points.push_back(lcp);
+    request.net_topologies.push_back({"N", {"M.A", "M.B"}, {lcp}, lcp.segments});
+    return request;
+}
+
 sapr::RoutingEvaluation make_lcp_evaluation(
     const sapr::Circuit& circuit,
     const std::unordered_map<std::string, sapr::Placement>& placements) {
@@ -195,6 +281,13 @@ void run_routing_evaluator_tests() {
         metrics.penalty;
     require(metrics.phi_cost > 0.0, "optimizer should expose positive phi cost");
     require(approx(metrics.phi_cost, expected_phi), "phi cost should match the paper total-cost formula");
+    const double expected_dedup_penalty =
+        metrics.flow_penalty +
+        metrics.current_density_penalty +
+        metrics.coupling_penalty +
+        metrics.design_rule_penalty +
+        metrics.routing_failure_penalty;
+    require(approx(metrics.penalty, expected_dedup_penalty), "SA penalty should use deduplicated routing penalty terms");
     require(metrics.dp_used, "placement-aware routing should use bottom-up DP traceback");
     require(metrics.dp_nodes > 0, "bottom-up DP should visit B*-tree nodes");
     require(metrics.dp_states > 0, "bottom-up DP should keep candidate states");
@@ -421,6 +514,20 @@ void run_routing_evaluator_tests() {
     const auto active_crossing_detail = sapr::run_detailed_routing(drc_circuit, drc_request, active_crossing_eval);
     require(active_crossing_detail.design_rule_violations > 0, "active crossing route should count as DRC");
 
+    const auto priority_circuit = make_priority_test_circuit();
+    const std::unordered_map<std::string, sapr::Placement> priority_placements{
+        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+    };
+    sapr::RoutingEvaluationRequest priority_request;
+    priority_request.placements = priority_placements;
+    priority_request.placement_order = {"M"};
+    const auto priority_eval = make_priority_evaluation(priority_circuit, priority_placements);
+    const auto priority_detail = sapr::run_detailed_routing(priority_circuit, priority_request, priority_eval);
+    require(priority_detail.routes.size() >= 3, "priority detailed routing should emit one route per selected candidate");
+    require(priority_detail.routes[0].net == "SYM", "symmetry net should be detailed-routed before other priorities");
+    require(priority_detail.routes[1].net == "CRT", "critical net should be detailed-routed after symmetry net");
+    require(priority_detail.routes[2].net == "NOR", "normal net should be detailed-routed after priority nets");
+
     auto lcp_request = make_lcp_request(drc_circuit, drc_placements, true);
     auto lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
     const auto lcp_detail = sapr::run_detailed_routing(drc_circuit, lcp_request, lcp_eval);
@@ -435,6 +542,16 @@ void run_routing_evaluator_tests() {
     flow_circuit.constraints.flows.push_back({"N", "M.A", "M.B"});
     const auto flow_ok_detail = sapr::run_detailed_routing(flow_circuit, lcp_request, lcp_eval);
     require(flow_ok_detail.flow_violations == 0, "out-pin to in-pin LCP traceback should satisfy FLOW");
+    auto reverse_lcp_request = make_reverse_lcp_request(flow_circuit, drc_placements, true);
+    const auto reverse_lcp_eval = sapr::evaluate_routing(flow_circuit, reverse_lcp_request);
+    const bool has_reverse_flow_candidate = std::any_of(
+        reverse_lcp_eval.candidates.begin(),
+        reverse_lcp_eval.candidates.end(),
+        [](const auto& candidate) { return !candidate.flow_ok && candidate.flow_penalty > 0.0; });
+    require(has_reverse_flow_candidate, "reversed LCP segments should get FLOW penalty during candidate generation");
+    require(
+        reverse_lcp_eval.global_routing.flow_penalty > 0.0,
+        "reversed LCP segments should contribute FLOW penalty during global routing");
 
     auto reverse_flow_eval = make_lcp_evaluation(flow_circuit, drc_placements);
     auto& reverse_choice = reverse_flow_eval.global_routing.net_routes.front();
@@ -457,6 +574,18 @@ void run_routing_evaluator_tests() {
         "current-density violation should be reported with segment source");
 
     auto missing_lcp_request = make_lcp_request(drc_circuit, drc_placements, false);
+    const auto missing_lcp_global_eval = sapr::evaluate_routing(drc_circuit, missing_lcp_request);
+    require(missing_lcp_global_eval.failed_nets > 0, "missing LCP location should fail during global routing");
+    require(
+        missing_lcp_global_eval.global_routing.routing_failure_penalty > 0.0,
+        "missing LCP location should add global routing failure penalty");
+    const bool has_fake_fallback_location = std::any_of(
+        missing_lcp_global_eval.candidates.begin(),
+        missing_lcp_global_eval.candidates.end(),
+        [](const auto& candidate) {
+            return candidate.lcp_candidate_id.find(":fallback") != std::string::npos || candidate.path.success;
+        });
+    require(!has_fake_fallback_location, "missing LCP location should not create a fake successful fallback candidate");
     auto missing_lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
     const auto missing_lcp_detail = sapr::run_detailed_routing(drc_circuit, missing_lcp_request, missing_lcp_eval);
     require(missing_lcp_detail.traceback_failures > 0, "missing LCP location should become a traceback failure");

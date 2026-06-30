@@ -509,13 +509,13 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.metrics.design_rule_penalty = detailed.design_rule_penalty;
     feedback.metrics.routing_failures = routing_evaluation.failed_nets;
     feedback.metrics.congestion_penalty = 0.0;
-    feedback.metrics.flow_penalty = routing_evaluation.global_routing.flow_penalty + detailed.flow_penalty;
+    feedback.metrics.flow_penalty = std::max(routing_evaluation.global_routing.flow_penalty, detailed.flow_penalty);
     feedback.metrics.current_density_penalty =
-        routing_evaluation.global_routing.current_density_penalty + detailed.current_density_penalty;
-    feedback.metrics.coupling_penalty = routing_evaluation.global_routing.coupling_penalty + detailed.coupling_penalty;
+        std::max(routing_evaluation.global_routing.current_density_penalty, detailed.current_density_penalty);
+    feedback.metrics.coupling_penalty = std::max(routing_evaluation.global_routing.coupling_penalty, detailed.coupling_penalty);
     feedback.metrics.routing_failure_penalty =
         routing_evaluation.global_routing.routing_failure_penalty + detailed.routing_failure_penalty;
-    feedback.metrics.detailed_routing_penalty = detailed.detailed_routing_penalty;
+    feedback.metrics.detailed_routing_penalty = detailed.design_rule_penalty + detailed.routing_failure_penalty;
     feedback.metrics.detailed_cost = detailed.detailed_cost;
     feedback.metrics.detailed_routes = static_cast<int>(detailed.routes.size());
     feedback.metrics.traceback_failures = detailed.traceback_failures;
@@ -530,8 +530,10 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
         feedback.metrics.packing_time_dp_segments = routing_evaluation.bottom_up_dp->packing_time_dp_segments;
         feedback.metrics.packing_time_dp_used = routing_evaluation.bottom_up_dp->packing_time_dp_used;
     }
-    feedback.metrics.penalty +=
-        routing_evaluation.global_routing.total_penalty + detailed.detailed_routing_penalty;
+    feedback.metrics.penalty =
+        feedback.metrics.flow_penalty + feedback.metrics.current_density_penalty +
+        feedback.metrics.coupling_penalty + feedback.metrics.design_rule_penalty +
+        feedback.metrics.routing_failure_penalty;
     feedback.routing_cost = routing_evaluation.routing_cost;
     feedback.routing_candidate_count = routing_evaluation.candidates.size();
 
