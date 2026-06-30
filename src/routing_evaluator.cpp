@@ -114,17 +114,30 @@ std::optional<FlowConstraint> flow_for_net(const Circuit& circuit, const std::st
 }
 
 // 判断候选拓扑方向是否满足 FLOW 逻辑方向。
-bool flow_ok_for_candidate(const Circuit& circuit, const routing::RouteCandidate& candidate) {
+bool flow_ok_for_candidate(
+    const Circuit& circuit,
+    const routing::RouteCandidate& candidate,
+    const std::optional<WireSegmentRef>& source_segment = std::nullopt) {
     const auto flow = flow_for_net(circuit, candidate.net);
     if (!flow.has_value()) return true;
-    if (candidate.from_terminal == flow->in_pin && candidate.to_terminal == flow->out_pin) return false;
+    if (candidate.from_terminal == flow->in_pin) return false;
+    if (candidate.to_terminal == flow->out_pin) return false;
+    if (source_segment.has_value()) {
+        if (source_segment->current_direction == CurrentDirection::Out && candidate.to_terminal == source_segment->from) return false;
+        if (source_segment->current_direction == CurrentDirection::In && candidate.from_terminal == source_segment->to) return false;
+    }
     if (candidate.from_terminal == flow->out_pin || candidate.to_terminal == flow->in_pin) return true;
     return true;
 }
 
 // 补充候选路径的论文 penalty 分项。
-void annotate_candidate(const Circuit& circuit, routing::RouteCandidate& candidate, double current_density_penalty, double flow_penalty) {
-    candidate.flow_ok = flow_ok_for_candidate(circuit, candidate);
+void annotate_candidate(
+    const Circuit& circuit,
+    routing::RouteCandidate& candidate,
+    double current_density_penalty,
+    double flow_penalty,
+    const std::optional<WireSegmentRef>& source_segment = std::nullopt) {
+    candidate.flow_ok = flow_ok_for_candidate(circuit, candidate, source_segment);
     candidate.current_density_ok = candidate.path.success;
     candidate.flow_penalty = candidate.flow_ok ? 0.0 : flow_penalty;
     candidate.current_density_penalty = candidate.current_density_ok ? 0.0 : current_density_penalty;
@@ -154,14 +167,14 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
                 candidate.wire_width = std::max(segment.min_width, 1.0);
                 if (!start.has_value() || !goal.has_value()) {
                     candidate.path = routing::GridPath{false, "LCP endpoint cannot be resolved", {}, {}};
-                    annotate_candidate(circuit, candidate, 50000.0, 50000.0);
+                    annotate_candidate(circuit, candidate, 50000.0, 50000.0, segment);
                     candidates.push_back(std::move(candidate));
                     continue;
                 }
                 routing::AStarConfig config;
                 config.wire_width = candidate.wire_width;
                 candidate.path = routing::find_astar_path(context.grid(), context.obstacles(), *start, *goal, config);
-                annotate_candidate(circuit, candidate, 50000.0, 50000.0);
+                annotate_candidate(circuit, candidate, 50000.0, 50000.0, segment);
                 candidates.push_back(std::move(candidate));
             }
         }

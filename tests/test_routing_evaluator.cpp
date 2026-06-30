@@ -103,6 +103,33 @@ sapr::RoutingEvaluationRequest make_lcp_request(
 }
 
 // 构造一组经过 LCP 的 selected candidates，用于验证 top-down traceback。
+sapr::RoutingEvaluationRequest make_reverse_lcp_request(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements,
+    bool with_location) {
+    auto request = make_lcp_request(circuit, placements, with_location);
+    request.linking_points.clear();
+    request.space_nodes.clear();
+    request.net_topologies.clear();
+
+    sapr::LinkingControlPoint lcp;
+    lcp.id = "LCP1";
+    lcp.space_node_id = "S1";
+    if (with_location) lcp.location_candidates.push_back({4.0, 1.0, "LCP1:first"});
+    lcp.segments.push_back({"N", "M.B", "LCP1", 2.0, 4.0, std::nullopt, sapr::CurrentDirection::In, "N:reverse_left"});
+    lcp.segments.push_back({"N", "LCP1", "M.A", 2.0, 4.0, std::nullopt, sapr::CurrentDirection::Out, "N:reverse_right"});
+
+    sapr::SpaceNode space;
+    space.id = "S1";
+    space.owner = "M";
+    space.kind = sapr::SpaceNodeKind::Right;
+    space.linking_points.push_back(lcp);
+    request.space_nodes.push_back(space);
+    request.linking_points.push_back(lcp);
+    request.net_topologies.push_back({"N", {"M.A", "M.B"}, {lcp}, lcp.segments});
+    return request;
+}
+
 sapr::RoutingEvaluation make_lcp_evaluation(
     const sapr::Circuit& circuit,
     const std::unordered_map<std::string, sapr::Placement>& placements) {
@@ -435,6 +462,16 @@ void run_routing_evaluator_tests() {
     flow_circuit.constraints.flows.push_back({"N", "M.A", "M.B"});
     const auto flow_ok_detail = sapr::run_detailed_routing(flow_circuit, lcp_request, lcp_eval);
     require(flow_ok_detail.flow_violations == 0, "out-pin to in-pin LCP traceback should satisfy FLOW");
+    auto reverse_lcp_request = make_reverse_lcp_request(flow_circuit, drc_placements, true);
+    const auto reverse_lcp_eval = sapr::evaluate_routing(flow_circuit, reverse_lcp_request);
+    const bool has_reverse_flow_candidate = std::any_of(
+        reverse_lcp_eval.candidates.begin(),
+        reverse_lcp_eval.candidates.end(),
+        [](const auto& candidate) { return !candidate.flow_ok && candidate.flow_penalty > 0.0; });
+    require(has_reverse_flow_candidate, "reversed LCP segments should get FLOW penalty during candidate generation");
+    require(
+        reverse_lcp_eval.global_routing.flow_penalty > 0.0,
+        "reversed LCP segments should contribute FLOW penalty during global routing");
 
     auto reverse_flow_eval = make_lcp_evaluation(flow_circuit, drc_placements);
     auto& reverse_choice = reverse_flow_eval.global_routing.net_routes.front();
