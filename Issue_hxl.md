@@ -789,3 +789,259 @@ Top-down detailed routing local refinement
 - 已经有 LCP / space node / topology trace。
 - 继续补 track assignment 和局部优化最自然。
 - 能进一步接近论文中 performance-aware detailed routing 的描述。
+ 
+---
+
+## 16. DP 与 packing contour 绑定的最新进展
+
+当前已经完成了 DP state 与 packing contour 的三层绑定。目标是让 routing DP 不再只是“最终 placement 之后的独立评估”，而是能追溯并消费 packing 过程中产生的 contour step 信息。
+
+### 16.1 PackingContourTrace：记录 packing 中间状态
+
+`pack_enhanced_tree()` 会为每个 B*-tree representative node 记录一个 `PackingContourStep`：
+
+```text
+PackingContourStep {
+    tree_node
+    module
+    x, y
+    occupied_bbox
+    desired_x, desired_y
+    contour_y
+    right_space
+    top_space
+    coupling_extra_space
+    left, right
+    subtree_modules
+    local_wire_segments
+    cross_child_wire_segments
+}
+```
+
+其中：
+
+| 字段 | 含义 |
+|------|------|
+| `occupied_bbox` | 当前 node 在 contour packing 后占用的 bbox |
+| `contour_y` | 当前 node 被已有 contour 顶起后的 y 高度 |
+| `right_space/top_space` | 当前 node 右侧/上侧预留 routing space |
+| `subtree_modules` | 当前 B*-tree node 覆盖的子树模块集合 |
+| `local_wire_segments` | 当前 packing step 应补全的 routing DP transition |
+| `cross_child_wire_segments` | 跨 left/right child subtree 的 local segment |
+
+这一步的意义是：DP state 可以知道自己对应哪个 packing step，而不是只知道最终 placement。
+
+### 16.2 Routing space feedback：routing 结果影响下一轮 contour
+
+Detailed routing 会输出：
+
+```text
+required_space_by_node
+coupling_space_by_node
+```
+
+`apply_routing_feedback()` 会把这些结果写回 enhanced B*-tree 的 `SpaceNode`：
+
+```text
+allocated_space = max(old allocated_space, detailed required space)
+coupling_extra_space = max(old coupling_extra_space, detailed coupling space)
+```
+
+然后下一次 `pack_enhanced_tree()` 会通过：
+
+```text
+SpaceNode::required_space()
+```
+
+影响 `occupied_size()` 和 contour height。
+
+当前 candidate 评估内部也已经有有限轮 feedback 闭环：
+
+```text
+pack contour
+    -> A*/DP + detailed routing
+    -> apply routing space feedback
+    -> re-pack contour with updated SpaceNode
+    -> re-route / re-score
+```
+
+对应调试指标：
+
+```text
+routing_feedback_iterations
+routing_feedback_converged
+space_feedback_nodes
+```
+
+### 16.3 Packing-time DP transition obligations
+
+最新实现进一步把 DP transition 来源从“pack 后推断”推进为“packing trace 显式记录”。
+
+在 `pack_enhanced_tree()` 完成 routing context 后，会根据：
+
+```text
+NetTopology::segments
+current step subtree_modules
+left child subtree_modules
+right child subtree_modules
+LCP 所属 space node owner
+```
+
+为每个 contour step 标注它负责补全的 `local_wire_segments`。
+
+判断规则：
+
+```text
+如果 segment 两端都属于当前 step subtree
+并且不完全属于 left child subtree
+并且不完全属于 right child subtree
+则该 segment 是当前 packing step 的 local DP transition
+```
+
+随后 `run_bottom_up_routing_dp()` 会优先使用：
+
+```text
+PackingContourStep.local_wire_segments
+```
+
+作为当前 node 的 transition 来源。若 trace 中没有 local segment，则回退到原来的 subtree 推断逻辑，保证旧 request 和测试场景仍能运行。
+
+对应调试指标：
+
+```text
+packing_time_dp_used
+packing_time_dp_segments
+```
+
+当前 smoke test 中可以看到：
+
+```text
+packing_time_dp_used: true
+packing_time_dp_segments: 25
+```
+
+### 16.4 新部分与之前实现的区别
+
+| 阶段 | 之前做到什么 | 最新补充了什么 |
+|------|--------------|----------------|
+| trace 绑定 | DP state 记录 `packing_step_index` 和 `contour_y` | trace 中进一步记录 routing space 和 local wire segments |
+| space feedback | detailed routing 产生 required/coupling space | candidate 内部执行 feedback -> re-pack -> re-route 闭环 |
+| DP transition | DP 根据 subtree/child subtree 在 routing 阶段推断 local segment | packing trace 显式告诉 DP 当前 step 应处理哪些 segment |
+| 可解释性 | 可以知道 DP state 属于哪个 node | 可以知道每条 selected transition 来自哪个 packing step / space node |
+| 论文对齐程度 | placement 后 routing evaluator 与 packing 有关联 | 更接近论文 bottom-up packing/routing DP 的执行结构 |
+
+简而言之，之前是：
+
+```text
+final placement / tree snapshot
+        -> routing DP 推断 local segment
+```
+
+现在是：
+
+```text
+packing contour step
+        -> 显式生成 local routing obligation
+        -> routing DP 消费 obligation
+        -> detailed routing feedback 回写 space node
+        -> 下一轮 packing 使用更新后的 space
+```
+
+### 16.5 当前仍不是完整论文同步 DP 的地方
+
+虽然已经完成工程上可运行的 DP-contour 绑定，但仍有一个边界需要说明：
+
+```text
+A* candidates 仍由 routing evaluator 统一生成；
+DP 在 packing trace 记录的 local segment 上选择候选路径；
+还没有把 A* 搜索直接嵌入 place_node() 递归内部。
+```
+
+也就是说，当前实现是：
+
+```text
+packing-time obligation generation + bottom-up DP consumption
+```
+
+还不是：
+
+```text
+place_node() 每放置一个 node 时立即运行 A* 并完成 DP transition
+```
+
+这个设计保留了较低冲突和较好可测试性，同时已经能让 DP transition 与 contour step 对齐。
+
+---
+
+## 17. 接下来的工作分析
+
+### 17.1 优先级最高：top-down detailed routing 的 local track assignment
+
+现在 DP 已经能输出 packing-time traceback candidates，下一步最自然的是让 detailed routing 不只是压缩 A* path，而是做局部 track 分配：
+
+```text
+DP selected candidates
+    -> 按 NetTopology / LCP / space node traceback
+    -> 在每个 space node 内分配 local tracks
+    -> 避免同层过近平行线
+    -> 降低 coupling / DRC penalty
+```
+
+建议新增能力：
+
+| 能力 | 目的 |
+|------|------|
+| local track index | 让同一 space node 内的多条线有离散 track |
+| same-layer spacing check | 降低 coupling 和 spacing DRC |
+| simple layer preference | 为后续 via / layer assignment 做准备 |
+| track demand feedback | 把真实 track 数反馈给 `required_space_by_node` |
+
+### 17.2 第二优先级：约束模型继续细化
+
+当前约束仍有简化：
+
+| 约束 | 当前实现 | 后续建议 |
+|------|----------|----------|
+| current density | WIRE_WIDTH 代理 | 加入 net current demand / layer capacity |
+| coupling | parallel overlap 几何近似 | 加入 spacing、width、overlap 的更细公式 |
+| DRC | active crossing | 扩展 metal spacing / via enclosure / min area |
+| via | 统计并进入 phi | detailed routing 中减少 via 或加入 via placement 检查 |
+
+### 17.3 第三优先级：实验和报告
+
+算法主链条已经比较完整，后续需要把结果做成稳定实验输出：
+
+```text
+area
+wirelength
+bend_count
+via_count
+phi_cost
+penalty breakdown
+failed_nets
+runtime
+packing_time_dp_segments
+routing_feedback_iterations
+```
+
+建议补：
+
+- benchmark 批量运行脚本
+- CSV/JSON summary
+- routing 可视化图
+- 与 baseline Manhattan routing 的对比表
+
+### 17.4 推荐下一阶段目标
+
+下一阶段建议做：
+
+```text
+Detailed routing local track assignment v1
+```
+
+原因：
+
+- DP 与 packing contour 绑定已经能提供明确 traceback 来源；
+- routing feedback 已能影响下一轮 contour；
+- 当前 detailed routing 仍是最接近论文但也最明显简化的部分；
+- 完成 track assignment 后，coupling、DRC、space feedback 都会更有物理意义。
