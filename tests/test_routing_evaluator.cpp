@@ -5,6 +5,7 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
@@ -74,6 +75,64 @@ sapr::RoutingEvaluation make_line_evaluation(
 }
 
 // 构造带 LCP 拓扑的最小 detailed routing request。
+sapr::Circuit make_priority_test_circuit() {
+    sapr::Circuit circuit;
+    circuit.modules.emplace("M", sapr::Module{"M", 12.0, 12.0, sapr::Rect{5.0, 5.0, 6.0, 6.0}, 0.0, 0.0, ""});
+    circuit.module_order.push_back("M");
+    const std::vector<std::pair<std::string, double>> pins{
+        {"A", 0.0}, {"B", 9.0}, {"C", 0.0}, {"D", 9.0}, {"E", 0.0}, {"F", 9.0},
+    };
+    for (const auto& [pin, x] : pins) circuit.pins.emplace("M." + pin, sapr::Pin{"M", pin, x, 1.0, "M1"});
+    circuit.pin_order = {"M.A", "M.B", "M.C", "M.D", "M.E", "M.F"};
+    circuit.nets.emplace("SYM", sapr::Net{"SYM", sapr::Priority::Symmetry, {"M.A", "M.B"}});
+    circuit.nets.emplace("CRT", sapr::Net{"CRT", sapr::Priority::Critical, {"M.C", "M.D"}});
+    circuit.nets.emplace("NOR", sapr::Net{"NOR", sapr::Priority::Normal, {"M.E", "M.F"}});
+    circuit.net_order = {"SYM", "CRT", "NOR"};
+    return circuit;
+}
+
+sapr::RoutingEvaluation make_priority_evaluation(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::routing::RoutingContext context(circuit, placements);
+    const auto make_candidate = [&](const std::string& net, const std::string& from, const std::string& to, double y) {
+        sapr::routing::RouteCandidate candidate;
+        candidate.net = net;
+        candidate.from_terminal = from;
+        candidate.to_terminal = to;
+        candidate.wire_width = 1.0;
+        candidate.path.success = true;
+        candidate.path.points = {
+            context.grid().snap_to_grid(sapr::routing::Point{0.0, y}, 0),
+            context.grid().snap_to_grid(sapr::routing::Point{9.0, y}, 0),
+        };
+        candidate.path.metrics.wirelength = 9.0;
+        return candidate;
+    };
+    const auto normal = make_candidate("NOR", "M.E", "M.F", 1.0);
+    const auto critical = make_candidate("CRT", "M.C", "M.D", 2.0);
+    const auto symmetry = make_candidate("SYM", "M.A", "M.B", 3.0);
+
+    sapr::routing::GlobalRoutingResult global;
+    for (const auto& candidate : {normal, critical, symmetry}) {
+        sapr::routing::NetRouteChoice choice;
+        choice.net = candidate.net;
+        choice.selected_candidates.push_back(candidate);
+        global.net_routes.push_back(std::move(choice));
+    }
+    global.total_metrics.wirelength = 27.0;
+
+    return sapr::RoutingEvaluation{
+        std::move(context),
+        {normal, critical, symmetry},
+        std::move(global),
+        std::nullopt,
+        27.0,
+        0,
+        false,
+    };
+}
+
 sapr::RoutingEvaluationRequest make_lcp_request(
     const sapr::Circuit& circuit,
     const std::unordered_map<std::string, sapr::Placement>& placements,
@@ -447,6 +506,20 @@ void run_routing_evaluator_tests() {
     auto active_crossing_eval = make_line_evaluation(drc_circuit, drc_placements, 5.0);
     const auto active_crossing_detail = sapr::run_detailed_routing(drc_circuit, drc_request, active_crossing_eval);
     require(active_crossing_detail.design_rule_violations > 0, "active crossing route should count as DRC");
+
+    const auto priority_circuit = make_priority_test_circuit();
+    const std::unordered_map<std::string, sapr::Placement> priority_placements{
+        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+    };
+    sapr::RoutingEvaluationRequest priority_request;
+    priority_request.placements = priority_placements;
+    priority_request.placement_order = {"M"};
+    const auto priority_eval = make_priority_evaluation(priority_circuit, priority_placements);
+    const auto priority_detail = sapr::run_detailed_routing(priority_circuit, priority_request, priority_eval);
+    require(priority_detail.routes.size() >= 3, "priority detailed routing should emit one route per selected candidate");
+    require(priority_detail.routes[0].net == "SYM", "symmetry net should be detailed-routed before other priorities");
+    require(priority_detail.routes[1].net == "CRT", "critical net should be detailed-routed after symmetry net");
+    require(priority_detail.routes[2].net == "NOR", "normal net should be detailed-routed after priority nets");
 
     auto lcp_request = make_lcp_request(drc_circuit, drc_placements, true);
     auto lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);

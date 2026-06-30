@@ -712,6 +712,22 @@ std::vector<routing::RouteCandidate> order_candidates_by_topology(
 
 // 根据当前 placement 执行布线上下文构建、候选路径生成和全局路径选择。
 // 判断一个 net 的 detailed traceback 是否能从 FLOW out pin 追踪到 in pin。
+// 先保留同一 net 内的 topology segment 顺序，再按论文要求让 symmetry/critical net 优先 detailed routing。
+std::vector<routing::RouteCandidate> order_candidates_for_detailed_routing(
+    const Circuit& circuit,
+    const RoutingEvaluationRequest& request,
+    const std::vector<routing::RouteCandidate>& candidates) {
+    auto ordered = order_candidates_by_topology(request, candidates);
+    std::stable_sort(ordered.begin(), ordered.end(), [&](const auto& left, const auto& right) {
+        const auto left_it = circuit.nets.find(left.net);
+        const auto right_it = circuit.nets.find(right.net);
+        const Priority left_priority = left_it == circuit.nets.end() ? Priority::Normal : left_it->second.priority;
+        const Priority right_priority = right_it == circuit.nets.end() ? Priority::Normal : right_it->second.priority;
+        return detailed_priority_rank(left_priority) < detailed_priority_rank(right_priority);
+    });
+    return ordered;
+}
+
 bool has_flow_path(
     const std::string& out_pin,
     const std::string& in_pin,
@@ -819,7 +835,7 @@ DetailedRoutingResult run_detailed_routing(
     const auto topology_index = build_detailed_topology_index(request);
     std::unordered_set<std::string> routed_space_nodes;
     const auto selected_candidates =
-        order_candidates_by_topology(request, selected_candidates_for_detailed_routing(evaluation));
+        order_candidates_for_detailed_routing(circuit, request, selected_candidates_for_detailed_routing(evaluation));
     const bool has_dp_traceback = evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->success;
     const int dp_state_id = has_dp_traceback ? evaluation.bottom_up_dp->best_state.id : -1;
     const std::string tree_node = has_dp_traceback ? evaluation.bottom_up_dp->best_state.tree_node : std::string{};
