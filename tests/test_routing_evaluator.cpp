@@ -281,6 +281,13 @@ void run_routing_evaluator_tests() {
         metrics.penalty;
     require(metrics.phi_cost > 0.0, "optimizer should expose positive phi cost");
     require(approx(metrics.phi_cost, expected_phi), "phi cost should match the paper total-cost formula");
+    const double expected_dedup_penalty =
+        metrics.flow_penalty +
+        metrics.current_density_penalty +
+        metrics.coupling_penalty +
+        metrics.design_rule_penalty +
+        metrics.routing_failure_penalty;
+    require(approx(metrics.penalty, expected_dedup_penalty), "SA penalty should use deduplicated routing penalty terms");
     require(metrics.dp_used, "placement-aware routing should use bottom-up DP traceback");
     require(metrics.dp_nodes > 0, "bottom-up DP should visit B*-tree nodes");
     require(metrics.dp_states > 0, "bottom-up DP should keep candidate states");
