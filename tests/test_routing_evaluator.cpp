@@ -567,6 +567,18 @@ void run_routing_evaluator_tests() {
         "current-density violation should be reported with segment source");
 
     auto missing_lcp_request = make_lcp_request(drc_circuit, drc_placements, false);
+    const auto missing_lcp_global_eval = sapr::evaluate_routing(drc_circuit, missing_lcp_request);
+    require(missing_lcp_global_eval.failed_nets > 0, "missing LCP location should fail during global routing");
+    require(
+        missing_lcp_global_eval.global_routing.routing_failure_penalty > 0.0,
+        "missing LCP location should add global routing failure penalty");
+    const bool has_fake_fallback_location = std::any_of(
+        missing_lcp_global_eval.candidates.begin(),
+        missing_lcp_global_eval.candidates.end(),
+        [](const auto& candidate) {
+            return candidate.lcp_candidate_id.find(":fallback") != std::string::npos || candidate.path.success;
+        });
+    require(!has_fake_fallback_location, "missing LCP location should not create a fake successful fallback candidate");
     auto missing_lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
     const auto missing_lcp_detail = sapr::run_detailed_routing(drc_circuit, missing_lcp_request, missing_lcp_eval);
     require(missing_lcp_detail.traceback_failures > 0, "missing LCP location should become a traceback failure");

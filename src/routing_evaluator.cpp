@@ -150,10 +150,21 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
     const Circuit& circuit) {
     std::vector<routing::RouteCandidate> candidates;
     for (const auto& point : request.linking_points) {
-        const auto locations = point.location_candidates.empty()
-                                   ? std::vector<PhysicalLocationCandidate>{{0.0, 0.0, point.id + ":fallback"}}
-                                   : point.location_candidates;
         for (const auto& segment : point.segments) {
+            if (point.location_candidates.empty()) {
+                routing::RouteCandidate candidate;
+                candidate.net = segment.net;
+                candidate.from_terminal = segment.from;
+                candidate.to_terminal = segment.to;
+                candidate.segment_id = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
+                candidate.lcp_id = point.id;
+                candidate.wire_width = std::max(segment.min_width, 1.0);
+                candidate.path = routing::GridPath{false, "LCP has no physical location candidate", {}, {}};
+                annotate_candidate(circuit, candidate, 50000.0, 50000.0, segment);
+                candidates.push_back(std::move(candidate));
+                continue;
+            }
+            const auto& locations = point.location_candidates;
             for (const auto& location : locations) {
                 const auto start = endpoint_grid_point(context, point, location, segment, segment.from);
                 const auto goal = endpoint_grid_point(context, point, location, segment, segment.to);
