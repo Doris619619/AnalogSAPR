@@ -150,6 +150,7 @@ struct Metrics {
     double routing_failure_penalty{};
     double design_rule_penalty{};
     double detailed_routing_penalty{};
+    double detailed_cost{};
     int flow_violations{};
     int current_density_violations{};
     int design_rule_violations{};
@@ -157,6 +158,17 @@ struct Metrics {
     int detailed_routes{};
     int traceback_failures{};
     int space_nodes_with_routes{};
+    int dp_nodes{};
+    int dp_states{};
+    int dp_pruned_states{};
+    int dp_traceback_segments{};
+    int packing_trace_steps{};
+    int space_feedback_nodes{};
+    int routing_feedback_iterations{};
+    int packing_time_dp_segments{};
+    bool routing_feedback_converged{};
+    bool packing_time_dp_used{};
+    bool dp_used{};
     double congestion_penalty{};
 };
 
@@ -171,6 +183,17 @@ struct Solution {
     std::optional<std::size_t> detailed_route_count;
     std::optional<int> traceback_failures;
     std::optional<int> space_nodes_with_routes;
+    std::optional<int> dp_nodes;
+    std::optional<int> dp_states;
+    std::optional<int> dp_pruned_states;
+    std::optional<int> dp_traceback_segments;
+    std::optional<int> packing_trace_steps;
+    std::optional<int> space_feedback_nodes;
+    std::optional<int> routing_feedback_iterations;
+    std::optional<int> packing_time_dp_segments;
+    std::optional<bool> routing_feedback_converged;
+    std::optional<bool> packing_time_dp_used;
+    std::optional<bool> dp_used;
 };
 
 // 配置求解器的确定性参数和论文代价函数权重。
@@ -185,6 +208,8 @@ struct SolverConfig {
     double wirelength_weight{1.0};
     double bend_weight{0.2};
     double via_weight{0.2};
+    int routing_feedback_iterations{2};
+    double routing_feedback_tolerance{1e-6};
 };
 
 // 表示 linking-control point 连接的一条逻辑线段。
@@ -274,6 +299,20 @@ struct NetTopology {
     std::vector<WireSegmentRef> segments;
 };
 
+// 表示 routing evaluator 所需的轻量 B*-tree 节点快照。
+struct RoutingTreeNodeRef {
+    std::string id;
+    std::string module;
+    std::optional<std::string> left;
+    std::optional<std::string> right;
+};
+
+// 表示当前 placement candidate 对应的 B*-tree 拓扑快照。
+struct RoutingTreeSnapshot {
+    std::optional<std::string> root;
+    std::vector<RoutingTreeNodeRef> nodes;
+};
+
 // 表示路由评价时已经展开到全局坐标的引脚。
 struct PlacedPin {
     std::string key;
@@ -285,6 +324,31 @@ struct PlacedPin {
 };
 
 // 表示一次候选布局的路由侧评价输入。
+// 表示一次 contour packing 中某个 B*-tree node 的中间状态。
+struct PackingContourStep {
+    std::string tree_node;
+    std::string module;
+    double x{};
+    double y{};
+    Rect occupied_bbox;
+    double desired_x{};
+    double desired_y{};
+    double contour_y{};
+    double right_space{};
+    double top_space{};
+    double coupling_extra_space{};
+    std::optional<std::string> left;
+    std::optional<std::string> right;
+    std::vector<std::string> subtree_modules;
+    std::vector<std::string> local_wire_segments;
+    std::vector<std::string> cross_child_wire_segments;
+};
+
+// 表示当前候选布局的 contour packing 过程快照。
+struct PackingContourTrace {
+    std::vector<PackingContourStep> steps;
+};
+
 struct RoutingEvaluationRequest {
     std::unordered_map<std::string, Placement> placements;
     std::vector<std::string> placement_order;
@@ -293,6 +357,8 @@ struct RoutingEvaluationRequest {
     std::vector<LinkingControlPoint> linking_points;
     std::vector<NetTopology> net_topologies;
     std::vector<Rect> active_region_blockers;
+    RoutingTreeSnapshot tree;
+    PackingContourTrace packing_trace;
 };
 
 // 表示路由 adapter 返回给 placement/SA 的反馈。
@@ -318,9 +384,11 @@ struct DetailedRouteNode {
 // 表示 detailed routing 输出线段与 LCP/space-node 拓扑的映射关系。
 struct DetailedRouteSegment {
     std::size_t route_index{};
+    int dp_state_id{-1};
     std::string net;
     std::string from_terminal;
     std::string to_terminal;
+    std::string tree_node;
     std::string segment_id;
     std::string lcp_id;
     std::string lcp_candidate_id;
@@ -341,6 +409,10 @@ struct DetailedRoutingReport {
     std::vector<std::string> warnings;
     std::vector<std::string> coupling_pairs;
     std::vector<std::string> design_rule_segments;
+    // 记录详细布线阶段违反 FLOW 方向的 net 或 segment。
+    std::vector<std::string> flow_segments;
+    // 记录详细布线阶段违反 WIRE_WIDTH/current-density 代理约束的 segment。
+    std::vector<std::string> current_density_segments;
 };
 
 // 表示 top-down performance-aware detailed routing 的输出。
@@ -349,6 +421,9 @@ struct DetailedRoutingResult {
     DetailedRoutingReport report;
     std::unordered_map<std::string, double> required_space_by_node;
     std::unordered_map<std::string, double> coupling_space_by_node;
+    double detailed_cost{};
+    double flow_penalty{};
+    double current_density_penalty{};
     double coupling_penalty{};
     double design_rule_penalty{};
     double routing_failure_penalty{};

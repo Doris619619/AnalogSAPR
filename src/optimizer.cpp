@@ -123,7 +123,111 @@ std::vector<std::string> ordered_placements(const Circuit& circuit, const Routin
     return order;
 }
 
+// 从增强 B*-tree 复制 routing evaluator 所需的轻量拓扑快照。
+RoutingTreeSnapshot make_routing_tree_snapshot(const EnhancedBStarTree& tree) {
+    RoutingTreeSnapshot snapshot;
+    snapshot.root = tree.root;
+    for (const auto& [id, node] : tree.nodes) {
+        snapshot.nodes.push_back(RoutingTreeNodeRef{id, node.module, node.left, node.right});
+    }
+    return snapshot;
+}
+
 // 返回已放置模块的 active blocker 近似全局矩形。
+// 收集指定 B*-tree node 子树中的代表模块，用于把 DP state 对齐到 packing contour step。
+std::vector<std::string> subtree_modules_for_trace(const EnhancedBStarTree& tree, const std::string& id) {
+    std::vector<std::string> modules;
+    const auto found = tree.nodes.find(id);
+    if (found == tree.nodes.end()) return modules;
+    modules.push_back(found->second.module.empty() ? id : found->second.module);
+    if (found->second.left.has_value()) {
+        auto left = subtree_modules_for_trace(tree, *found->second.left);
+        modules.insert(modules.end(), left.begin(), left.end());
+    }
+    if (found->second.right.has_value()) {
+        auto right = subtree_modules_for_trace(tree, *found->second.right);
+        modules.insert(modules.end(), right.begin(), right.end());
+    }
+    return modules;
+}
+
+void append_unique(std::vector<std::string>& values, const std::string& value) {
+    if (value.empty()) return;
+    if (std::find(values.begin(), values.end(), value) == values.end()) values.push_back(value);
+}
+
+std::string segment_key_for_trace(const WireSegmentRef& segment) {
+    if (!segment.id.empty()) return segment.id;
+    return segment.net + "|" + segment.from + "|" + segment.to;
+}
+
+std::unordered_map<std::string, std::string> lcp_owner_map_for_trace(const RoutingEvaluationRequest& request) {
+    std::unordered_map<std::string, std::string> owners;
+    for (const auto& space : request.space_nodes) {
+        for (const auto& point : space.linking_points) owners[point.id] = space.owner;
+    }
+    return owners;
+}
+
+std::string terminal_owner_for_trace(
+    const std::string& terminal,
+    const std::unordered_map<std::string, std::string>& lcp_owner_by_id) {
+    const auto dot = terminal.find('.');
+    if (dot != std::string::npos) return terminal.substr(0, dot);
+    const auto found = lcp_owner_by_id.find(terminal);
+    return found == lcp_owner_by_id.end() ? std::string{} : found->second;
+}
+
+std::unordered_set<std::string> module_set_for_trace(const std::vector<std::string>& modules) {
+    return {modules.begin(), modules.end()};
+}
+
+bool segment_inside_trace_modules(
+    const WireSegmentRef& segment,
+    const std::unordered_set<std::string>& modules,
+    const std::unordered_map<std::string, std::string>& lcp_owner_by_id) {
+    const auto from = terminal_owner_for_trace(segment.from, lcp_owner_by_id);
+    const auto to = terminal_owner_for_trace(segment.to, lcp_owner_by_id);
+    return !from.empty() && !to.empty() && modules.contains(from) && modules.contains(to);
+}
+
+bool segment_crosses_child_modules(
+    const WireSegmentRef& segment,
+    const std::unordered_set<std::string>& left,
+    const std::unordered_set<std::string>& right,
+    const std::unordered_map<std::string, std::string>& lcp_owner_by_id) {
+    if (left.empty() || right.empty()) return false;
+    const auto from = terminal_owner_for_trace(segment.from, lcp_owner_by_id);
+    const auto to = terminal_owner_for_trace(segment.to, lcp_owner_by_id);
+    return (left.contains(from) && right.contains(to)) || (left.contains(to) && right.contains(from));
+}
+
+// 根据 packing step 的 subtree 边界显式记录该 step 需要完成的 routing DP transition。
+void annotate_packing_time_segments(const EnhancedBStarTree& tree, RoutingEvaluationRequest& request) {
+    const auto lcp_owner_by_id = lcp_owner_map_for_trace(request);
+    for (auto& step : request.packing_trace.steps) {
+        const auto current_modules = module_set_for_trace(step.subtree_modules);
+        const auto left_modules = step.left.has_value()
+                                      ? module_set_for_trace(subtree_modules_for_trace(tree, *step.left))
+                                      : std::unordered_set<std::string>{};
+        const auto right_modules = step.right.has_value()
+                                       ? module_set_for_trace(subtree_modules_for_trace(tree, *step.right))
+                                       : std::unordered_set<std::string>{};
+        for (const auto& topology : request.net_topologies) {
+            for (const auto& segment : topology.segments) {
+                if (!segment_inside_trace_modules(segment, current_modules, lcp_owner_by_id)) continue;
+                if (segment_inside_trace_modules(segment, left_modules, lcp_owner_by_id)) continue;
+                if (segment_inside_trace_modules(segment, right_modules, lcp_owner_by_id)) continue;
+                const auto key = segment_key_for_trace(segment);
+                append_unique(step.local_wire_segments, key);
+                if (segment_crosses_child_modules(segment, left_modules, right_modules, lcp_owner_by_id)) {
+                    append_unique(step.cross_child_wire_segments, key);
+                }
+            }
+        }
+    }
+}
+
 Rect placed_active_rect(const Module& module, const Placement& placement) {
     return routing::transform_active_to_global(module, placement);
 }
@@ -197,18 +301,59 @@ double compute_phi_cost(Metrics& metrics, const Metrics& base, const SolverConfi
 }
 
 // 评价一棵增强 B*-tree 对应的候选状态。
+bool feedback_expands_space(
+    const RoutingEvaluationRequest& request,
+    const RoutingFeedback& feedback,
+    double tolerance) {
+    for (const auto& space : request.space_nodes) {
+        const auto required = feedback.required_space_by_node.find(space.id);
+        if (required != feedback.required_space_by_node.end() &&
+            required->second > space.required_space() + tolerance) {
+            return true;
+        }
+        const auto coupling = feedback.coupling_space_by_node.find(space.id);
+        if (coupling != feedback.coupling_space_by_node.end() &&
+            coupling->second > space.coupling_extra_space + tolerance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 在同一个 candidate 内执行有限轮 routing feedback -> re-pack 闭环。
+CandidateState evaluate_candidate_with_feedback_loop(
+    const Circuit& circuit,
+    EnhancedBStarTree tree,
+    const SolverConfig& config,
+    const Metrics* base_metrics) {
+    CandidateState state;
+    state.tree = std::move(tree);
+    const int max_iterations = std::max(1, config.routing_feedback_iterations);
+    bool converged = false;
+    for (int iteration = 0; iteration < max_iterations; ++iteration) {
+        state.request = pack_enhanced_tree(circuit, state.tree, config);
+        state.feedback = evaluate_with_routing_adapter(circuit, state.request);
+        const bool expands_space =
+            feedback_expands_space(state.request, state.feedback, config.routing_feedback_tolerance);
+        apply_routing_feedback(state.tree, state.feedback);
+        state.feedback.metrics.routing_feedback_iterations = iteration + 1;
+        state.feedback.metrics.routing_feedback_converged = !expands_space;
+        if (!expands_space) {
+            converged = true;
+            break;
+        }
+    }
+    state.feedback.metrics.routing_feedback_converged = converged;
+    if (base_metrics != nullptr) state.cost = compute_phi_cost(state.feedback.metrics, *base_metrics, config);
+    return state;
+}
+
 CandidateState evaluate_candidate(
     const Circuit& circuit,
     EnhancedBStarTree tree,
     const SolverConfig& config,
     const Metrics& base_metrics) {
-    CandidateState state;
-    state.tree = std::move(tree);
-    state.request = pack_enhanced_tree(circuit, state.tree, config);
-    state.feedback = evaluate_with_routing_adapter(circuit, state.request);
-    apply_routing_feedback(state.tree, state.feedback);
-    state.cost = compute_phi_cost(state.feedback.metrics, base_metrics, config);
-    return state;
+    return evaluate_candidate_with_feedback_loop(circuit, std::move(tree), config, &base_metrics);
 }
 
 // 将候选状态转换为最终 Solution。
@@ -223,6 +368,17 @@ Solution make_solution(const CandidateState& state) {
     solution.detailed_route_count = static_cast<std::size_t>(state.feedback.metrics.detailed_routes);
     solution.traceback_failures = state.feedback.metrics.traceback_failures;
     solution.space_nodes_with_routes = state.feedback.metrics.space_nodes_with_routes;
+    solution.dp_nodes = state.feedback.metrics.dp_nodes;
+    solution.dp_states = state.feedback.metrics.dp_states;
+    solution.dp_pruned_states = state.feedback.metrics.dp_pruned_states;
+    solution.dp_traceback_segments = state.feedback.metrics.dp_traceback_segments;
+    solution.packing_trace_steps = state.feedback.metrics.packing_trace_steps;
+    solution.space_feedback_nodes = state.feedback.metrics.space_feedback_nodes;
+    solution.routing_feedback_iterations = state.feedback.metrics.routing_feedback_iterations;
+    solution.packing_time_dp_segments = state.feedback.metrics.packing_time_dp_segments;
+    solution.routing_feedback_converged = state.feedback.metrics.routing_feedback_converged;
+    solution.packing_time_dp_used = state.feedback.metrics.packing_time_dp_used;
+    solution.dp_used = state.feedback.metrics.dp_used;
     return solution;
 }
 
@@ -277,7 +433,8 @@ RoutingEvaluationRequest pack_enhanced_tree(
         const auto& node = tree.nodes.at(id);
         const auto occupied = occupied_size(circuit, tree, node, config);
         const double x = desired_x;
-        const double y = std::max(desired_y, contour_height(packed, x, occupied.first));
+        const double contour_y = contour_height(packed, x, occupied.first);
+        const double y = std::max(desired_y, contour_y);
 
         Placement placement{id, x, y, node.angle, orient_for_angle(node.angle)};
         request.placements[id] = placement;
@@ -285,7 +442,27 @@ RoutingEvaluationRequest pack_enhanced_tree(
         if (pair_group != nullptr && pair_group->mirror.has_value()) {
             request.placements[*pair_group->mirror] = mirror_placement(circuit, tree, node, placement, config);
         }
+        const double group_coupling_space =
+            pair_group == nullptr ? 0.0 : pair_group->space_group.coupling_extra_space + pair_group->space_cluster.coupling_extra_space;
 
+        request.packing_trace.steps.push_back(PackingContourStep{
+            id,
+            node.module,
+            x,
+            y,
+            Rect{x, y, x + occupied.first, y + occupied.second},
+            desired_x,
+            desired_y,
+            contour_y,
+            node.right_space.required_space(),
+            node.top_space.required_space(),
+            node.right_space.coupling_extra_space + node.top_space.coupling_extra_space + group_coupling_space,
+            node.left,
+            node.right,
+            subtree_modules_for_trace(tree, id),
+            {},
+            {},
+        });
         packed.push_back({x, y, x + occupied.first, y + occupied.second});
         if (node.left.has_value()) {
             place_node(*node.left, x + occupied.first + config.spacing, y);
@@ -298,7 +475,9 @@ RoutingEvaluationRequest pack_enhanced_tree(
     place_node(*tree.root, 0.0, 0.0);
     request.placement_order = ordered_placements(circuit, request);
     request.space_nodes = collect_space_nodes(tree);
+    request.tree = make_routing_tree_snapshot(tree);
     populate_routing_context(circuit, request);
+    annotate_packing_time_segments(tree, request);
     return request;
 }
 
@@ -330,32 +509,52 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.metrics.design_rule_penalty = detailed.design_rule_penalty;
     feedback.metrics.routing_failures = routing_evaluation.failed_nets;
     feedback.metrics.congestion_penalty = 0.0;
-    feedback.metrics.flow_penalty = routing_evaluation.global_routing.flow_penalty;
-    feedback.metrics.current_density_penalty = routing_evaluation.global_routing.current_density_penalty;
+    feedback.metrics.flow_penalty = routing_evaluation.global_routing.flow_penalty + detailed.flow_penalty;
+    feedback.metrics.current_density_penalty =
+        routing_evaluation.global_routing.current_density_penalty + detailed.current_density_penalty;
     feedback.metrics.coupling_penalty = routing_evaluation.global_routing.coupling_penalty + detailed.coupling_penalty;
     feedback.metrics.routing_failure_penalty =
         routing_evaluation.global_routing.routing_failure_penalty + detailed.routing_failure_penalty;
     feedback.metrics.detailed_routing_penalty = detailed.detailed_routing_penalty;
+    feedback.metrics.detailed_cost = detailed.detailed_cost;
     feedback.metrics.detailed_routes = static_cast<int>(detailed.routes.size());
     feedback.metrics.traceback_failures = detailed.traceback_failures;
     feedback.metrics.space_nodes_with_routes = detailed.space_nodes_with_routes;
+    feedback.metrics.packing_trace_steps = static_cast<int>(request.packing_trace.steps.size());
+    feedback.metrics.dp_used = routing_evaluation.used_bottom_up_dp;
+    if (routing_evaluation.bottom_up_dp.has_value()) {
+        feedback.metrics.dp_nodes = routing_evaluation.bottom_up_dp->dp_nodes;
+        feedback.metrics.dp_states = routing_evaluation.bottom_up_dp->dp_states;
+        feedback.metrics.dp_pruned_states = routing_evaluation.bottom_up_dp->dp_pruned_states;
+        feedback.metrics.dp_traceback_segments = static_cast<int>(routing_evaluation.bottom_up_dp->traceback_candidates.size());
+        feedback.metrics.packing_time_dp_segments = routing_evaluation.bottom_up_dp->packing_time_dp_segments;
+        feedback.metrics.packing_time_dp_used = routing_evaluation.bottom_up_dp->packing_time_dp_used;
+    }
     feedback.metrics.penalty +=
         routing_evaluation.global_routing.total_penalty + detailed.detailed_routing_penalty;
     feedback.routing_cost = routing_evaluation.routing_cost;
     feedback.routing_candidate_count = routing_evaluation.candidates.size();
 
+    int space_feedback_nodes = 0;
     for (const auto& space : request.space_nodes) {
         const auto detailed_space = detailed.required_space_by_node.find(space.id);
-        feedback.required_space_by_node[space.id] =
+        const double required_space =
             detailed_space == detailed.required_space_by_node.end()
                 ? space.required_space()
                 : std::max(space.required_space(), detailed_space->second);
+        feedback.required_space_by_node[space.id] = required_space;
         const auto detailed_coupling = detailed.coupling_space_by_node.find(space.id);
-        feedback.coupling_space_by_node[space.id] =
+        const double coupling_space =
             detailed_coupling == detailed.coupling_space_by_node.end()
                 ? (routing_evaluation.global_routing.coupling_penalty > 0.0 ? 1.0 : 0.0)
                 : detailed_coupling->second;
+        feedback.coupling_space_by_node[space.id] = coupling_space;
+        const bool has_required_feedback =
+            detailed_space != detailed.required_space_by_node.end() && detailed_space->second > space.required_space() + 1e-9;
+        const bool has_coupling_feedback = coupling_space > 1e-9;
+        if (has_required_feedback || has_coupling_feedback) ++space_feedback_nodes;
     }
+    feedback.metrics.space_feedback_nodes = space_feedback_nodes;
     return feedback;
 }
 
@@ -369,15 +568,9 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     }
 
     auto initial_tree = make_enhanced_tree(circuit);
-    auto initial_request = pack_enhanced_tree(circuit, initial_tree, config);
-    auto initial_feedback = evaluate_with_routing_adapter(circuit, initial_request);
-    apply_routing_feedback(initial_tree, initial_feedback);
-    const Metrics base_metrics = initial_feedback.metrics;
-    const double initial_cost = compute_phi_cost(initial_feedback.metrics, base_metrics, config);
-    CandidateState current{initial_tree,
-                           std::move(initial_request),
-                           std::move(initial_feedback),
-                           initial_cost};
+    auto current = evaluate_candidate_with_feedback_loop(circuit, std::move(initial_tree), config, nullptr);
+    const Metrics base_metrics = current.feedback.metrics;
+    current.cost = compute_phi_cost(current.feedback.metrics, base_metrics, config);
     CandidateState best = current;
 
     std::mt19937 rng(config.seed);

@@ -1,10 +1,12 @@
 // 文件职责：声明供布局、模拟退火和 CLI 调用的布线评估公开接口。
 #pragma once
 
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
 #include "sapr/model.hpp"
+#include "sapr/routing/dp_router.hpp"
 #include "sapr/routing/global_router.hpp"
 #include "sapr/routing/path.hpp"
 #include "sapr/routing/routing_context.hpp"
@@ -16,8 +18,10 @@ struct RoutingEvaluation {
     routing::RoutingContext context;
     std::vector<routing::RouteCandidate> candidates;
     routing::GlobalRoutingResult global_routing;
+    std::optional<routing::RoutingDpResult> bottom_up_dp;
     double routing_cost{};
     int failed_nets{};
+    bool used_bottom_up_dp{};
 };
 
 // 根据当前 placement 构建布线环境、生成 A* 候选路径并执行 DP 全局布线。

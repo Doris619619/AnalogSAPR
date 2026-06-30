@@ -21,6 +21,8 @@ namespace {
 constexpr double kDetailedFailurePenalty = 100000.0;
 constexpr double kDetailedSpacing = 1.0;
 constexpr double kDetailedCouplingPenaltyPerPair = 100.0;
+constexpr double kDetailedFlowPenalty = 50000.0;
+constexpr double kDetailedCurrentDensityPenalty = 50000.0;
 
 // 汇总 LCP、space node 和拓扑 segment 的快速查找表。
 struct DetailedTopologyIndex {
@@ -28,20 +30,27 @@ struct DetailedTopologyIndex {
     std::unordered_map<std::string, std::string> lcp_space_by_id;
     std::unordered_set<std::string> lcp_without_location;
     std::unordered_set<std::string> topology_segment_keys;
+    std::vector<WireSegmentRef> topology_segments;
 };
 
 // 执行候选路径生成与 DP 全局布线选择的公共封装。
 RoutingEvaluation make_evaluation(
     routing::RoutingContext context,
     std::vector<routing::RouteCandidate> candidates,
-    const Circuit& circuit) {
-    auto global_routing = routing::run_global_routing(circuit, context, candidates);
+    const Circuit& circuit,
+    std::optional<routing::RoutingDpResult> bottom_up_dp = std::nullopt) {
+    const bool use_dp = bottom_up_dp.has_value() && bottom_up_dp->success;
+    auto global_routing = use_dp
+                              ? routing::run_global_routing(circuit, context, bottom_up_dp->traceback_candidates)
+                              : routing::run_global_routing(circuit, context, candidates);
     RoutingEvaluation evaluation{
         std::move(context),
         std::move(candidates),
         std::move(global_routing),
+        std::move(bottom_up_dp),
         0.0,
         0,
+        use_dp,
     };
     evaluation.routing_cost = evaluation.global_routing.total_metrics.cost;
     evaluation.failed_nets = evaluation.global_routing.failed_nets;
@@ -219,6 +228,7 @@ DetailedTopologyIndex build_detailed_topology_index(const RoutingEvaluationReque
         index.lcp_space_by_id[point.id] = point.space_node_id;
         for (const auto& segment : point.segments) {
             index.topology_segment_keys.insert(segment_key(segment.net, segment.from, segment.to));
+            index.topology_segments.push_back(segment);
         }
     }
     for (const auto& topology : request.net_topologies) {
@@ -228,6 +238,7 @@ DetailedTopologyIndex build_detailed_topology_index(const RoutingEvaluationReque
         }
         for (const auto& segment : topology.segments) {
             index.topology_segment_keys.insert(segment_key(segment.net, segment.from, segment.to));
+            index.topology_segments.push_back(segment);
         }
     }
     for (const auto& space : request.space_nodes) {
@@ -311,6 +322,20 @@ bool candidate_matches_lcp_topology(const DetailedTopologyIndex& index, const ro
     return index.topology_segment_keys.contains(segment_key(candidate.net, candidate.to_terminal, candidate.from_terminal));
 }
 
+// 查找候选路径对应的原始 WireSegmentRef，用于详细布线约束归因。
+std::optional<WireSegmentRef> wire_segment_for_candidate(
+    const DetailedTopologyIndex& index,
+    const routing::RouteCandidate& candidate) {
+    for (const auto& segment : index.topology_segments) {
+        if (segment.net != candidate.net) continue;
+        if (!segment.id.empty() && segment.id == candidate.segment_id) return segment;
+        const bool same_direction = segment.from == candidate.from_terminal && segment.to == candidate.to_terminal;
+        const bool reverse_direction = segment.from == candidate.to_terminal && segment.to == candidate.from_terminal;
+        if (same_direction || reverse_direction) return segment;
+    }
+    return std::nullopt;
+}
+
 // 判断 route segment 是否为水平中心线。
 bool route_is_horizontal(const RouteSegment& route) {
     return same_coord(route.y1, route.y2);
@@ -335,6 +360,24 @@ double detailed_width_for_candidate(
 }
 
 // 返回旧调试接口使用的线宽，不依赖 Circuit 以保持公开函数签名稳定。
+// 判断候选路径的原始线宽是否满足 segment 与 net 级 WIRE_WIDTH/current-density 代理约束。
+bool candidate_width_satisfies_constraints(
+    const Circuit& circuit,
+    const std::optional<WireSegmentRef>& segment,
+    const routing::RouteCandidate& candidate) {
+    const double width = candidate.wire_width;
+    if (segment.has_value()) {
+        if (segment->min_width > 0.0 && width + 1e-9 < segment->min_width) return false;
+        if (segment->max_width > 0.0 && width - 1e-9 > segment->max_width) return false;
+    }
+    const auto net_width = circuit.constraints.wire_widths.find(candidate.net);
+    if (net_width != circuit.constraints.wire_widths.end()) {
+        if (net_width->second.min_width > 0.0 && width + 1e-9 < net_width->second.min_width) return false;
+        if (net_width->second.max_width > 0.0 && width - 1e-9 > net_width->second.max_width) return false;
+    }
+    return true;
+}
+
 double selected_width_for_candidate(
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate) {
@@ -436,7 +479,9 @@ void append_traced_detailed_path(
     const DetailedTopologyIndex& index,
     const Circuit& circuit,
     const RoutingEvaluation& evaluation,
-    const routing::RouteCandidate& candidate) {
+    const routing::RouteCandidate& candidate,
+    int dp_state_id,
+    const std::string& tree_node) {
     append_trace_node(trace, index, evaluation.context, candidate.from_terminal);
     append_trace_node(trace, index, evaluation.context, candidate.to_terminal);
     const std::size_t first_route = result.routes.size();
@@ -446,9 +491,11 @@ void append_traced_detailed_path(
     for (std::size_t route_index = first_route; route_index < result.routes.size(); ++route_index) {
         trace.segments.push_back(DetailedRouteSegment{
             route_index,
+            dp_state_id,
             candidate.net,
             candidate.from_terminal,
             candidate.to_terminal,
+            tree_node,
             candidate.segment_id,
             lcp_id,
             candidate.lcp_candidate_id,
@@ -530,7 +577,7 @@ bool near_parallel_coupling(const RouteSegment& lhs, const RouteSegment& rhs, do
 }
 
 // 收集 detailed route 的同层平行耦合线段对。
-std::vector<std::pair<std::size_t, std::size_t>> collect_detailed_coupling_pairs(const std::vector<RouteSegment>& routes) {
+[[maybe_unused]] std::vector<std::pair<std::size_t, std::size_t>> collect_detailed_coupling_pairs(const std::vector<RouteSegment>& routes) {
     std::vector<std::pair<std::size_t, std::size_t>> pairs;
     for (std::size_t i = 0; i < routes.size(); ++i) {
         for (std::size_t j = i + 1; j < routes.size(); ++j) {
@@ -538,6 +585,45 @@ std::vector<std::pair<std::size_t, std::size_t>> collect_detailed_coupling_pairs
         }
     }
     return pairs;
+}
+
+struct CouplingFinding {
+    std::size_t left{};
+    std::size_t right{};
+    double overlap_length{};
+    double spacing{};
+};
+
+// 计算两条同层异网线段的平行重叠长度；距离超过 spacing 时返回 0。
+double parallel_overlap_length(const RouteSegment& lhs, const RouteSegment& rhs, double spacing) {
+    if (lhs.net == rhs.net || lhs.layer != rhs.layer) return 0.0;
+    const bool lhs_horizontal = route_is_horizontal(lhs);
+    const bool rhs_horizontal = route_is_horizontal(rhs);
+    if (lhs_horizontal != rhs_horizontal) return 0.0;
+    if (lhs_horizontal) {
+        const double distance = std::abs(lhs.y1 - rhs.y1) - (lhs.width + rhs.width) / 2.0;
+        if (distance >= spacing) return 0.0;
+        const double overlap_start = std::max(std::min(lhs.x1, lhs.x2), std::min(rhs.x1, rhs.x2));
+        const double overlap_end = std::min(std::max(lhs.x1, lhs.x2), std::max(rhs.x1, rhs.x2));
+        return std::max(0.0, overlap_end - overlap_start);
+    }
+    const double distance = std::abs(lhs.x1 - rhs.x1) - (lhs.width + rhs.width) / 2.0;
+    if (distance >= spacing) return 0.0;
+    const double overlap_start = std::max(std::min(lhs.y1, lhs.y2), std::min(rhs.y1, rhs.y2));
+    const double overlap_end = std::min(std::max(lhs.y1, lhs.y2), std::max(rhs.y1, rhs.y2));
+    return std::max(0.0, overlap_end - overlap_start);
+}
+
+// 收集 detailed route 的同层平行耦合线段对，并记录实际重叠长度。
+std::vector<CouplingFinding> collect_detailed_coupling_findings(const std::vector<RouteSegment>& routes) {
+    std::vector<CouplingFinding> findings;
+    for (std::size_t i = 0; i < routes.size(); ++i) {
+        for (std::size_t j = i + 1; j < routes.size(); ++j) {
+            const double overlap = parallel_overlap_length(routes[i], routes[j], kDetailedSpacing);
+            if (overlap > 0.0) findings.push_back({i, j, overlap, kDetailedSpacing});
+        }
+    }
+    return findings;
 }
 
 }  // namespace
@@ -565,7 +651,104 @@ std::vector<const routing::NetRouteChoice*> ordered_detailed_routes(
     return routes;
 }
 
+// 返回 detailed routing 应使用的候选路径，优先使用 bottom-up DP traceback。
+std::vector<routing::RouteCandidate> selected_candidates_for_detailed_routing(
+    const RoutingEvaluation& evaluation) {
+    if (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->success) {
+        return evaluation.bottom_up_dp->traceback_candidates;
+    }
+    std::vector<routing::RouteCandidate> candidates;
+    for (const auto& net_route : evaluation.global_routing.net_routes) {
+        if (!net_route.success) continue;
+        candidates.insert(candidates.end(), net_route.selected_candidates.begin(), net_route.selected_candidates.end());
+    }
+    return candidates;
+}
+
+// 按 NetTopology 中的 wire segment 顺序恢复 detailed routing 候选，体现 top-down traceback 顺序。
+std::vector<routing::RouteCandidate> order_candidates_by_topology(
+    const RoutingEvaluationRequest& request,
+    const std::vector<routing::RouteCandidate>& candidates) {
+    if (request.net_topologies.empty()) return candidates;
+
+    std::vector<routing::RouteCandidate> ordered;
+    std::vector<bool> used(candidates.size(), false);
+    for (const auto& topology : request.net_topologies) {
+        for (const auto& segment : topology.segments) {
+            for (std::size_t index = 0; index < candidates.size(); ++index) {
+                if (used[index]) continue;
+                const auto& candidate = candidates[index];
+                if (candidate.net != segment.net) continue;
+                const bool same_id = !segment.id.empty() && candidate.segment_id == segment.id;
+                const bool same_direction =
+                    candidate.from_terminal == segment.from && candidate.to_terminal == segment.to;
+                const bool reverse_direction =
+                    candidate.from_terminal == segment.to && candidate.to_terminal == segment.from;
+                if (!same_id && !same_direction && !reverse_direction) continue;
+                ordered.push_back(candidate);
+                used[index] = true;
+                break;
+            }
+        }
+    }
+    for (std::size_t index = 0; index < candidates.size(); ++index) {
+        if (!used[index]) ordered.push_back(candidates[index]);
+    }
+    return ordered;
+}
+
 // 根据当前 placement 执行布线上下文构建、候选路径生成和全局路径选择。
+// 判断一个 net 的 detailed traceback 是否能从 FLOW out pin 追踪到 in pin。
+bool has_flow_path(
+    const std::string& out_pin,
+    const std::string& in_pin,
+    const std::unordered_map<std::string, std::vector<std::string>>& adjacency) {
+    std::vector<std::string> frontier{out_pin};
+    std::unordered_set<std::string> visited;
+    while (!frontier.empty()) {
+        const std::string current = frontier.back();
+        frontier.pop_back();
+        if (current == in_pin) return true;
+        if (!visited.insert(current).second) continue;
+        const auto next = adjacency.find(current);
+        if (next == adjacency.end()) continue;
+        frontier.insert(frontier.end(), next->second.begin(), next->second.end());
+    }
+    return false;
+}
+
+// 基于 DP traceback 后的有向拓扑检查 FLOW 约束，并把失败来源写入 detailed report。
+void apply_detailed_flow_check(
+    const Circuit& circuit,
+    const std::vector<routing::RouteCandidate>& candidates,
+    DetailedRoutingResult& result) {
+    for (const auto& flow : circuit.constraints.flows) {
+        std::unordered_map<std::string, std::vector<std::string>> adjacency;
+        bool saw_net = false;
+        for (const auto& candidate : candidates) {
+            if (candidate.net != flow.net) continue;
+            saw_net = true;
+            adjacency[candidate.from_terminal].push_back(candidate.to_terminal);
+            if (candidate.from_terminal == flow.in_pin && candidate.to_terminal == flow.out_pin) {
+                ++result.flow_violations;
+                result.flow_penalty += kDetailedFlowPenalty;
+                const std::string message =
+                    flow.net + ": reverse FLOW segment " + candidate.from_terminal + "->" + candidate.to_terminal;
+                result.report.flow_segments.push_back(message);
+                result.report.warnings.push_back(message);
+            }
+        }
+        if (!saw_net) continue;
+        if (!has_flow_path(flow.out_pin, flow.in_pin, adjacency)) {
+            ++result.flow_violations;
+            result.flow_penalty += kDetailedFlowPenalty;
+            const std::string message = flow.net + ": no detailed FLOW path " + flow.out_pin + "->" + flow.in_pin;
+            result.report.flow_segments.push_back(message);
+            result.report.warnings.push_back(message);
+        }
+    }
+}
+
 RoutingEvaluation evaluate_routing(
     const Circuit& circuit,
     const std::unordered_map<std::string, Placement>& placements) {
@@ -600,18 +783,16 @@ RoutingEvaluation evaluate_routing(
             std::make_move_iterator(lcp_candidates.begin()),
             std::make_move_iterator(lcp_candidates.end()));
     }
-    return make_evaluation(std::move(context), std::move(candidates), circuit);
+    auto bottom_up_dp = routing::run_bottom_up_routing_dp(circuit, request, context, candidates);
+    return make_evaluation(std::move(context), std::move(candidates), circuit, std::move(bottom_up_dp));
 }
 
 // 将 DP 全局布线选中的 A* 网格路径转换为当前 routing.txt 使用的中心线线段。
 std::vector<RouteSegment> selected_candidates_to_segments(
     const RoutingEvaluation& evaluation) {
     std::vector<RouteSegment> routes;
-    for (const auto& net_route : evaluation.global_routing.net_routes) {
-        if (!net_route.success) continue;
-        for (const auto& candidate : net_route.selected_candidates) {
-            append_path_segments(routes, evaluation, candidate);
-        }
+    for (const auto& candidate : selected_candidates_for_detailed_routing(evaluation)) {
+        append_path_segments(routes, evaluation, candidate);
     }
     return routes;
 }
@@ -624,31 +805,50 @@ DetailedRoutingResult run_detailed_routing(
     DetailedRoutingResult result;
     const auto topology_index = build_detailed_topology_index(request);
     std::unordered_set<std::string> routed_space_nodes;
-    for (const auto* net_route : ordered_detailed_routes(circuit, evaluation)) {
-        if (!net_route->success) continue;
-        auto& trace = trace_for_net(result.report, net_route->net);
-        for (const auto& candidate : net_route->selected_candidates) {
-            append_traced_detailed_path(result, trace, topology_index, circuit, evaluation, candidate);
-            const std::string lcp_id = lcp_id_for_candidate(topology_index, candidate);
-            const std::string space_node_id = space_node_for_candidate(topology_index, candidate);
-            if (!space_node_id.empty()) {
-                routed_space_nodes.insert(space_node_id);
-                update_space_requirement(result, space_node_id, detailed_width_for_candidate(circuit, evaluation, candidate));
-            }
-            if (!lcp_id.empty() && topology_index.lcp_without_location.contains(lcp_id)) {
-                add_traceback_failure(result, trace, "LCP " + lcp_id + " has no location candidate");
-            }
-            if (!candidate_matches_lcp_topology(topology_index, candidate)) {
-                add_traceback_failure(
-                    result,
-                    trace,
-                    "selected candidate does not match LCP topology: " + candidate.net + " " +
-                        candidate.from_terminal + " -> " + candidate.to_terminal);
-            }
-            if (!candidate.flow_ok) ++result.flow_violations;
-            if (!candidate.current_density_ok) ++result.current_density_violations;
+    const auto selected_candidates =
+        order_candidates_by_topology(request, selected_candidates_for_detailed_routing(evaluation));
+    const bool has_dp_traceback = evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->success;
+    const int dp_state_id = has_dp_traceback ? evaluation.bottom_up_dp->best_state.id : -1;
+    const std::string tree_node = has_dp_traceback ? evaluation.bottom_up_dp->best_state.tree_node : std::string{};
+    routing::PathMetrics detailed_metrics;
+    for (const auto& candidate : selected_candidates) {
+        auto& trace = trace_for_net(result.report, candidate.net);
+        append_traced_detailed_path(result, trace, topology_index, circuit, evaluation, candidate, dp_state_id, tree_node);
+        detailed_metrics.wirelength += candidate.path.metrics.wirelength;
+        detailed_metrics.bend_count += candidate.path.metrics.bend_count;
+        detailed_metrics.via_count += candidate.path.metrics.via_count;
+        const std::string lcp_id = lcp_id_for_candidate(topology_index, candidate);
+        const std::string space_node_id = space_node_for_candidate(topology_index, candidate);
+        const auto source_segment = wire_segment_for_candidate(topology_index, candidate);
+        if (!space_node_id.empty()) {
+            routed_space_nodes.insert(space_node_id);
+            update_space_requirement(result, space_node_id, detailed_width_for_candidate(circuit, evaluation, candidate));
+        }
+        if (!lcp_id.empty() && topology_index.lcp_without_location.contains(lcp_id)) {
+            add_traceback_failure(result, trace, "LCP " + lcp_id + " has no location candidate");
+        }
+        if (!candidate_matches_lcp_topology(topology_index, candidate)) {
+            add_traceback_failure(
+                result,
+                trace,
+                "selected candidate does not match LCP topology: " + candidate.net + " " +
+                    candidate.from_terminal + " -> " + candidate.to_terminal);
+        }
+        if (!candidate.flow_ok) {
+            trace.warnings.push_back(candidate.net + ": candidate-level FLOW warning");
+        }
+        if (!candidate.current_density_ok || !candidate_width_satisfies_constraints(circuit, source_segment, candidate)) {
+            ++result.current_density_violations;
+            result.current_density_penalty += kDetailedCurrentDensityPenalty;
+            const std::string segment_id =
+                source_segment.has_value() && !source_segment->id.empty() ? source_segment->id : candidate.segment_id;
+            const std::string message = candidate.net + ": width violation at " + segment_id;
+            trace.warnings.push_back(message);
+            result.report.current_density_segments.push_back(message);
+            result.report.warnings.push_back(message);
         }
     }
+    apply_detailed_flow_check(circuit, selected_candidates, result);
     const auto drc_routes = collect_active_region_crossings(request, result.routes);
     result.design_rule_violations = static_cast<int>(drc_routes.size());
     for (const auto route_index : drc_routes) {
@@ -657,19 +857,27 @@ DetailedRoutingResult run_detailed_routing(
             route.net + ":" + route.layer + ":" + std::to_string(route_index));
     }
     result.design_rule_penalty = 100000.0 * static_cast<double>(result.design_rule_violations);
-    const auto coupling_pairs = collect_detailed_coupling_pairs(result.routes);
-    result.coupling_penalty = kDetailedCouplingPenaltyPerPair * static_cast<double>(coupling_pairs.size());
-    for (const auto& [left, right] : coupling_pairs) {
-        const auto& left_route = result.routes[left];
-        const auto& right_route = result.routes[right];
-        result.report.coupling_pairs.push_back(left_route.net + "<->" + right_route.net);
+    const auto coupling_pairs = collect_detailed_coupling_findings(result.routes);
+    for (const auto& coupling : coupling_pairs) {
+        result.coupling_penalty +=
+            kDetailedCouplingPenaltyPerPair * coupling.overlap_length / std::max(coupling.spacing, 1e-9);
+        const auto& left_route = result.routes[coupling.left];
+        const auto& right_route = result.routes[coupling.right];
+        result.report.coupling_pairs.push_back(
+            left_route.net + "<->" + right_route.net +
+            " routes=" + std::to_string(coupling.left) + "," + std::to_string(coupling.right) +
+            " overlap=" + std::to_string(coupling.overlap_length));
     }
     for (const auto& space_node_id : routed_space_nodes) {
         result.coupling_space_by_node[space_node_id] = result.coupling_penalty > 0.0 ? kDetailedSpacing : 0.0;
     }
     result.space_nodes_with_routes = static_cast<int>(routed_space_nodes.size());
     result.detailed_routing_penalty =
-        result.design_rule_penalty + result.coupling_penalty + result.routing_failure_penalty;
+        result.flow_penalty + result.current_density_penalty + result.design_rule_penalty +
+        result.coupling_penalty + result.routing_failure_penalty;
+    result.detailed_cost =
+        detailed_metrics.wirelength + 3.0 * static_cast<double>(detailed_metrics.bend_count) +
+        0.2 * static_cast<double>(detailed_metrics.via_count) + result.detailed_routing_penalty;
     result.used_global_fallback = false;
     return result;
 }
