@@ -1,6 +1,21 @@
 # AnalogSAPR-Repro
 
-论文 *Simultaneous Analog Placement and Routing with Current Flow and Current Density Considerations* 的 C++20 算法复现工程。当前版本完成标准 I/O、约束校验、链式 baseline placement、Manhattan routing 和指标统计；增强 B*-tree、DP routing 与模拟退火将在后续阶段实现。
+论文 *Simultaneous Analog Placement and Routing with Current Flow and Current Density Considerations* 的 C++20 算法复现工程。当前版本已接入 placement-aware 联合求解流程：标准 I/O、约束校验、增强 B*-tree/ASF 对称组、contour packing、模拟退火搜索、A*/bottom-up DP routing、top-down detailed routing、routing feedback 动态预留布线资源和指标统计均已实现。历史 `solve_baseline` 接口目前保留名称，但默认指向同一套 placement-aware 求解流程。
+
+## 当前算法流程
+
+主流程由 `sapr run` 触发，整体顺序为：
+
+```text
+构造 enhanced B*-tree
+→ contour packing 生成 placement candidate
+→ A* 生成候选路径，bottom-up DP 选择一致 traceback
+→ top-down detailed routing 输出最终线段
+→ routing feedback 写回 space node 的资源需求
+→ 在模拟退火中继续扰动 tree 并搜索更优解
+```
+
+其中增强 B*-tree 负责器件代表节点、对称组、right/top/group/cluster space node 和 LCP 拓扑；模拟退火会执行 module swap/delete-insert/rotate 以及 LCP delete-insert/swap/split/merge 等扰动。每个候选解内部会按 `routing_feedback_iterations` 做有限轮 routing feedback → re-pack 闭环，使详细布线阶段发现的线宽、耦合和空间需求反馈到下一轮 packing。
 
 ## 环境要求
 
@@ -58,7 +73,7 @@ build/sapr_tests.exe
 ctest --test-dir build --output-on-failure
 ```
 
-当前测试包括输入解析、约束校验、几何变换、增强 B*-tree 基础结构、baseline placement、Manhattan routing、CLI 校验及端到端输出。
+当前测试包括输入解析、约束校验、几何变换、增强 B*-tree 基础结构、contour packing、模拟退火、A*/DP routing、routing feedback、detailed routing、CLI 校验及端到端输出。
 
 ## 运行程序
 
@@ -74,7 +89,7 @@ ctest --test-dir build --output-on-failure
 OK
 ```
 
-运行 baseline 布局布线：
+运行 placement-aware 联合布局布线：
 
 ```powershell
 .\build\sapr.exe run --input input --output output
@@ -87,7 +102,15 @@ OK
   --input input `
   --output output `
   --spacing 5 `
-  --row-width 40
+  --row-width 40 `
+  --sa-iterations 250 `
+  --seed 1
+```
+
+需要查看 routing/packing 联合评估细节时，可以追加：
+
+```powershell
+.\build\sapr.exe run --input input --output output --dump-routing-eval
 ```
 
 程序会生成：
@@ -95,6 +118,7 @@ OK
 - `output/placement.txt`：器件放置位置、角度和朝向。
 - `output/routing.txt`：线网、金属层、中心线坐标和线宽。
 - 标准输出：面积、线长、bend、via 和 penalty 指标。
+- `--dump-routing-eval` 输出：phi cost、routing cost、DP 状态数、packing trace 步数、packing-time DP segment 数、space feedback 节点数和 routing feedback 收敛信息。
 
 ## 不使用 CMake 的临时编译方式
 
@@ -104,7 +128,13 @@ OK
 New-Item -ItemType Directory -Force build | Out-Null
 g++ -std=c++20 -Wall -Wextra -Wpedantic -Iinclude `
   src/constraints.cpp src/geometry.cpp src/io.cpp `
-  src/optimizer.cpp src/router.cpp src/tree.cpp src/main.cpp `
+  src/optimizer.cpp src/router.cpp src/routing_evaluator.cpp src/tree.cpp `
+  src/routing/astar.cpp src/routing/dp_router.cpp `
+  src/routing/geometry.cpp src/routing/global_router.cpp `
+  src/routing/grid.cpp src/routing/layer.cpp `
+  src/routing/obstacle.cpp src/routing/routing_context.cpp `
+  src/routing/topology.cpp src/routing/transform.cpp `
+  src/main.cpp `
   -o build/sapr.exe
 ```
 
