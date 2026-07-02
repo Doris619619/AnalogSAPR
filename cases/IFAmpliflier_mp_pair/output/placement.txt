@@ -1,0 +1,4 @@
+# module       x           y           angle  orient
+
+MP8            55.64      43.27      180    MY
+MP22           61.88      47.34      180    MY
