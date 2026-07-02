@@ -1,0 +1,5 @@
+# net          priority    terminals
+
+AVDD           critical   MP8.D MP22.D
+VBP            normal     MP8.G MP22.G
+VREF150        normal     MP8.S MP22.S
