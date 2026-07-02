@@ -1,0 +1,5 @@
+# module       x           y           angle  orient
+
+XC18           57.03      8.08       0      R0
+XC19           57.03      18.78      0      R0
+XC20           40.98      8.08       0      R0
