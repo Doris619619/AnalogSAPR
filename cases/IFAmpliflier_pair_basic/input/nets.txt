@@ -1,3 +1,0 @@
-# net          priority    terminals
-
-NET_A          normal     XC18.PLUS XC19.PLUS
