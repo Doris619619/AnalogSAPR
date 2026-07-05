@@ -129,6 +129,19 @@ double conflict_penalty(
     return penalty;
 }
 
+// 判断候选路径是否与已选异网路径共用网格点，避免把耦合风险放大成真实短路。
+bool conflicts_with_other_net(
+    const RouteCandidate& candidate,
+    const std::unordered_map<std::int64_t, std::string>& occupied_by_net) {
+    for (const auto& point : candidate.path.points) {
+        const auto occupied_it = occupied_by_net.find(point_key(point));
+        if (occupied_it != occupied_by_net.end() && occupied_it->second != candidate.net) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 将选中的候选路径写入全局占用表。
 void occupy_path(const RouteCandidate& candidate, std::unordered_map<std::int64_t, std::string>& occupied_by_net) {
     for (const auto& point : candidate.path.points) {
@@ -144,17 +157,20 @@ const RouteCandidate* choose_best_candidate(
     double& selected_penalty) {
     const RouteCandidate* best = nullptr;
     double best_cost = std::numeric_limits<double>::infinity();
+    bool best_has_conflict = true;
     selected_penalty = 0.0;
 
     for (const auto& candidate : group.candidates) {
         if (!candidate.path.success) {
             continue;
         }
+        const bool has_conflict = conflicts_with_other_net(candidate, occupied_by_net);
         const double penalty = conflict_penalty(candidate, occupied_by_net, config);
         const double cost = candidate_dp_cost(candidate, config) + penalty;
-        if (cost < best_cost) {
+        if ((best_has_conflict && !has_conflict) || (has_conflict == best_has_conflict && cost < best_cost)) {
             best = &candidate;
             best_cost = cost;
+            best_has_conflict = has_conflict;
             selected_penalty = penalty;
         }
     }

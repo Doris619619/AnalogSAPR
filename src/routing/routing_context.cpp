@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 
 #include "sapr/routing/layer.hpp"
 #include "sapr/routing/transform.hpp"
@@ -65,17 +67,30 @@ void add_pin_access(
     const double right = std::abs(rect.x2 - pin.location.x);
     const double bottom = std::abs(pin.location.y - rect.y1);
     const double top = std::abs(rect.y2 - pin.location.y);
-    const double best = std::min({left, right, bottom, top});
 
+    struct AccessCandidate {
+        double distance{};
+        Point target;
+    };
+    const std::vector<AccessCandidate> candidates{
+        {left, Point{rect.x1 - escape, pin.location.y}},
+        {right, Point{rect.x2 + escape, pin.location.y}},
+        {bottom, Point{pin.location.x, rect.y1 - escape}},
+        {top, Point{pin.location.x, rect.y2 + escape}},
+    };
     Point target = pin.location;
-    if (best == left) {
-        target.x = rect.x1 - escape;
-    } else if (best == right) {
-        target.x = rect.x2 + escape;
-    } else if (best == bottom) {
-        target.y = rect.y1 - escape;
-    } else {
-        target.y = rect.y2 + escape;
+    double best_distance = std::numeric_limits<double>::infinity();
+    for (const auto& candidate : candidates) {
+        const auto snapped = grid.snap_to_grid(candidate.target, pin.layer);
+        if (!grid.in_bounds(snapped)) continue;
+        if (candidate.distance < best_distance) {
+            best_distance = candidate.distance;
+            target = candidate.target;
+        }
+    }
+    if (!std::isfinite(best_distance)) {
+        target.x = std::clamp(pin.location.x, grid.min_x(), grid.max_x());
+        target.y = std::clamp(pin.location.y, grid.min_y(), grid.max_y());
     }
     add_access_line(obstacles, grid, start, grid.snap_to_grid(target, pin.layer));
 }

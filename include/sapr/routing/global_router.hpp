@@ -14,7 +14,7 @@ namespace sapr::routing {
 struct GlobalRouterConfig {
     double wirelength_weight{1.0};
     double bend_weight{3.0};
-    double conflict_penalty_per_point{100.0};
+    double conflict_penalty_per_point{100000.0};
     double failed_pair_penalty{100000.0};
     double flow_violation_penalty{50000.0};
     double current_density_penalty{50000.0};

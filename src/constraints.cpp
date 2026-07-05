@@ -1,6 +1,7 @@
 // 实现输入引用关系和当前已支持结果约束的校验。
 #include "sapr/constraints.hpp"
 
+#include <unordered_map>
 #include <unordered_set>
 
 namespace sapr {
@@ -8,6 +9,7 @@ namespace sapr {
 // 校验输入对象之间的引用和数值范围。
 std::vector<std::string> validate_circuit(const Circuit& circuit) {
     std::vector<std::string> errors;
+    std::unordered_map<std::string, std::string> terminal_net;
     for (const auto& key : circuit.pin_order) {
         const auto& pin = circuit.pins.at(key);
         if (!circuit.modules.contains(pin.module)) errors.push_back("pin " + key + " references missing module " + pin.module);
@@ -16,6 +18,10 @@ std::vector<std::string> validate_circuit(const Circuit& circuit) {
         const auto& net = circuit.nets.at(name);
         for (const auto& terminal : net.terminals) {
             if (!circuit.pins.contains(terminal)) errors.push_back("net " + name + " references missing pin " + terminal);
+            const auto [existing, inserted] = terminal_net.emplace(terminal, name);
+            if (!inserted && existing->second != name) {
+                errors.push_back("terminal " + terminal + " is assigned to multiple nets: " + existing->second + " and " + name);
+            }
         }
     }
     for (const auto& pair : circuit.constraints.symmetry_pairs) {
@@ -61,4 +67,3 @@ std::vector<std::string> validate_solution(const Circuit& circuit, const Solutio
 }
 
 }  // namespace sapr
-
