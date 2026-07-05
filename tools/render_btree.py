@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""文件职责：将 B*-tree 调试 trace 渲染为结构图和 packing contour 图。"""
+"""文件职责：将 B*-tree 调试 trace 渲染为树结构图和 packing contour 图。"""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def default_name(trace_path: Path) -> str:
     return stem if stem else "btree"
 
 
-# 根据 root/left/right 递归计算树图中的节点坐标。
+# 根据 root/left/right 递归计算逻辑二叉树坐标，不使用实际 placement 坐标。
 def compute_tree_positions(trace: dict[str, Any]) -> dict[str, tuple[float, float]]:
     nodes = {node["id"]: node for node in trace.get("nodes", [])}
     root = trace.get("root")
@@ -46,7 +46,7 @@ def compute_tree_positions(trace: dict[str, Any]) -> dict[str, tuple[float, floa
         else:
             x = next_x
             next_x += 1.0
-        positions[node_id] = (x, -float(depth))
+        positions[node_id] = (x, -1.45 * float(depth))
         return x
 
     if root:
@@ -58,12 +58,7 @@ def compute_tree_positions(trace: dict[str, Any]) -> dict[str, tuple[float, floa
     return positions
 
 
-# 从 packing step 中查找对应节点的 placement 坐标，用于结构图标签。
-def placement_by_node(trace: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    return {step["tree_node"]: step for step in trace.get("packing_steps", [])}
-
-
-# 绘制 B*-tree 逻辑结构，蓝边表示 left child，橙边表示 right child。
+# 绘制 B*-tree 逻辑结构：left child 表示放到父节点右侧，right child 表示放到父节点上方。
 def render_structure(trace: dict[str, Any], output_dir: Path, name: str, dpi: int) -> Path:
     import matplotlib
 
@@ -73,33 +68,48 @@ def render_structure(trace: dict[str, Any], output_dir: Path, name: str, dpi: in
 
     nodes = {node["id"]: node for node in trace.get("nodes", [])}
     positions = compute_tree_positions(trace)
-    packed = placement_by_node(trace)
-    width = max(8.0, min(20.0, 2.2 * max(len(nodes), 1)))
-    height = max(5.0, 1.6 * (1 + max((-y for _x, y in positions.values()), default=0.0)))
+    width = max(8.0, min(18.0, 2.0 * max(len(nodes), 1)))
+    max_depth = max((-y for _x, y in positions.values()), default=0.0)
+    height = max(5.0, min(12.0, 1.4 * (1 + max_depth)))
     fig, ax = plt.subplots(figsize=(width, height), dpi=dpi)
-    ax.set_aspect("equal")
+    ax.set_aspect("auto")
     ax.axis("off")
 
     for node_id, node in nodes.items():
         x, y = positions[node_id]
-        for child_key, color, label in (("left", LEFT_COLOR, "left child"), ("right", RIGHT_COLOR, "right child")):
+        for child_key, color, label in (
+            ("left", LEFT_COLOR, "left child = placed right"),
+            ("right", RIGHT_COLOR, "right child = placed above"),
+        ):
             child = node.get(child_key)
             if not child or child not in positions:
                 continue
             cx, cy = positions[child]
-            ax.plot([x, cx], [y - 0.12, cy + 0.12], color=color, linewidth=2.0, zorder=1)
-            ax.text((x + cx) / 2.0, (y + cy) / 2.0, label.split()[0], color=color, fontsize=7)
+            ax.annotate(
+                "",
+                xy=(cx, cy + 0.28),
+                xytext=(x, y - 0.28),
+                arrowprops={"arrowstyle": "->", "color": color, "linewidth": 2.0},
+                zorder=1,
+            )
+            ax.text(
+                (x + cx) / 2.0 + 0.18,
+                (y + cy) / 2.0,
+                label,
+                color=color,
+                fontsize=7,
+                ha="center",
+                va="center",
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.78, "pad": 1.2},
+            )
 
     for node_id, node in nodes.items():
         x, y = positions[node_id]
-        step = packed.get(node_id, {})
-        label = f"{node.get('module', node_id)}\nangle={node.get('angle', 0)}"
-        if step:
-            label += f"\nx={step.get('x', 0):.1f}, y={step.get('y', 0):.1f}"
+        label = f"{node.get('module', node_id)}\nid={node_id}\nangle={node.get('angle', 0)}"
         box = mpatches.FancyBboxPatch(
-            (x - 0.52, y - 0.28),
-            1.04,
-            0.56,
+            (x - 0.56, y - 0.32),
+            1.12,
+            0.64,
             boxstyle="round,pad=0.05",
             facecolor=NODE_COLOR,
             edgecolor="#333333",
@@ -109,13 +119,29 @@ def render_structure(trace: dict[str, Any], output_dir: Path, name: str, dpi: in
         ax.add_patch(box)
         ax.text(x, y, label, ha="center", va="center", fontsize=8, zorder=4)
 
+    if positions:
+        xs = [x for x, _y in positions.values()]
+        ys = [y for _x, y in positions.values()]
+        ax.set_xlim(min(xs) - 1.4, max(xs) + 1.4)
+        ax.set_ylim(min(ys) - 0.8, max(ys) + 0.8)
+
     ax.legend(
         handles=[
-            mpatches.Patch(color=LEFT_COLOR, label="left child"),
-            mpatches.Patch(color=RIGHT_COLOR, label="right child"),
+            mpatches.Patch(color=LEFT_COLOR, label="left child: placed right"),
+            mpatches.Patch(color=RIGHT_COLOR, label="right child: placed above"),
         ],
         loc="upper right",
         fontsize=8,
+    )
+    ax.text(
+        0.02,
+        0.02,
+        "B*-tree semantics: left child is packed to the parent's right side; "
+        "right child is packed above the parent.",
+        transform=ax.transAxes,
+        fontsize=8,
+        ha="left",
+        va="bottom",
     )
     ax.set_title(f"{name} B*-tree structure", fontsize=12, fontweight="bold")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -204,12 +230,32 @@ def render_packing(trace: dict[str, Any], output_dir: Path, name: str, dpi: int)
         start = centers.get(step["tree_node"])
         if start is None:
             continue
-        for child_key, color in (("left", LEFT_COLOR), ("right", RIGHT_COLOR)):
+        for child_key, color, label in (
+            ("left", LEFT_COLOR, "left -> right side"),
+            ("right", RIGHT_COLOR, "right -> top side"),
+        ):
             child = step.get(child_key)
             end = centers.get(child)
             if end is None:
                 continue
-            ax.plot([start[0], end[0]], [start[1], end[1]], color=color, linewidth=1.2, linestyle="--", zorder=4)
+            ax.annotate(
+                "",
+                xy=end,
+                xytext=start,
+                arrowprops={"arrowstyle": "->", "color": color, "linewidth": 1.2, "linestyle": "--"},
+                zorder=4,
+            )
+            ax.text(
+                (start[0] + end[0]) / 2.0,
+                (start[1] + end[1]) / 2.0,
+                label,
+                color=color,
+                fontsize=7,
+                ha="center",
+                va="center",
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.72, "pad": 1.0},
+                zorder=5,
+            )
 
     if not all_x:
         all_x = [0.0, 1.0]
@@ -225,6 +271,8 @@ def render_packing(trace: dict[str, Any], output_dir: Path, name: str, dpi: int)
             mpatches.Patch(facecolor=OCCUPIED_COLOR, edgecolor="#1565C0", alpha=0.25, label="occupied bbox"),
             mpatches.Patch(facecolor=PACK_COLOR, edgecolor="#2E7D32", alpha=0.32, label="module area approx"),
             mpatches.Patch(facecolor=SPACE_COLOR, alpha=0.22, label="routing space"),
+            mpatches.Patch(color=LEFT_COLOR, label="left child: right side"),
+            mpatches.Patch(color=RIGHT_COLOR, label="right child: above"),
         ],
         loc="upper right",
         fontsize=8,
