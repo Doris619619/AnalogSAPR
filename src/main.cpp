@@ -2,6 +2,7 @@
 // 文件职责：实现命令行入口，负责输入校验、求解运行和 routing debug 输出。
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -69,7 +70,8 @@ void print_usage() {
               << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n"
               << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
               << "           [--cooling-rate 0.96] [--dump-routing-eval]\n"
-              << "           [--no-render] [--render-dpi 200] [--render-name name]\n";
+              << "           [--no-render] [--render-dpi 200] [--render-name name]\n"
+              << "           [--dump-btree] [--render-btree-name name]\n";
 }
 
 std::string shell_quote(const std::string& value) {
@@ -96,10 +98,30 @@ std::filesystem::path renderer_script_path(const char*) {
     return source_candidate;
 }
 
+std::filesystem::path btree_renderer_script_path() {
+    const auto source_candidate = std::filesystem::path("tools") / "render_btree.py";
+    if (std::filesystem::exists(source_candidate)) return source_candidate;
+    const auto build_candidate = std::filesystem::path("..") / "tools" / "render_btree.py";
+    if (std::filesystem::exists(build_candidate)) return build_candidate;
+    return source_candidate;
+}
+
+std::string python_command() {
+    const std::vector<std::filesystem::path> candidates{
+        std::filesystem::path("..") / ".venv_gds" / "Scripts" / "python.exe",
+        std::filesystem::path("..") / ".." / ".venv_gds" / "Scripts" / "python.exe",
+        std::filesystem::path(".venv_gds") / "Scripts" / "python.exe",
+    };
+    for (const auto& candidate : candidates) {
+        if (std::filesystem::exists(candidate)) return std::filesystem::absolute(candidate).string();
+    }
+    return "python";
+}
+
 int render_solution_png(const std::filesystem::path& input, const std::filesystem::path& output,
                         const std::filesystem::path& renderer, int dpi, const std::string& render_name) {
     std::ostringstream command;
-    command << "python " << shell_quote(renderer)
+    command << python_command() << ' ' << shell_quote(renderer)
             << " --input " << shell_quote(input)
             << " --output " << shell_quote(output)
             << " --dpi " << dpi;
@@ -109,6 +131,31 @@ int render_solution_png(const std::filesystem::path& input, const std::filesyste
         std::cerr << "layout rendering failed. Ensure Python and matplotlib are available, or rerun with --no-render.\n";
     }
     return status;
+}
+
+int render_btree_png(const std::filesystem::path& trace_json, const std::filesystem::path& output,
+                     const std::filesystem::path& renderer, int dpi, const std::string& render_name) {
+    std::ostringstream command;
+    command << python_command() << ' ' << shell_quote(renderer)
+            << " --trace " << shell_quote(trace_json)
+            << " --output " << shell_quote(output)
+            << " --dpi " << dpi;
+    if (!render_name.empty()) command << " --name " << shell_quote(render_name);
+    const int status = std::system(command.str().c_str());
+    if (status != 0) {
+        std::cerr << "B* tree rendering failed. Ensure Python and matplotlib are available.\n";
+    }
+    return status;
+}
+
+std::filesystem::path write_btree_trace_json(const sapr::Solution& solution, const std::filesystem::path& output) {
+    if (!solution.btree_trace_json.has_value()) throw std::runtime_error("B* tree trace is not available");
+    std::filesystem::create_directories(output);
+    const auto trace_path = output / "btree_trace.json";
+    std::ofstream trace(trace_path);
+    if (!trace) throw std::runtime_error("failed to write " + trace_path.string());
+    trace << *solution.btree_trace_json;
+    return trace_path;
 }
 
 // 执行输入校验命令。
@@ -140,6 +187,8 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     const int render_dpi = option_int(args, "--render-dpi", 200);
     if (render_dpi <= 0) throw std::runtime_error("invalid value for --render-dpi: must be positive");
     const std::string render_name = option_value(args, "--render-name", "");
+    const bool dump_btree = has_option(args, "--dump-btree");
+    const std::string render_btree_name = option_value(args, "--render-btree-name", "");
 
     const auto circuit = sapr::load_circuit(input);
     const auto solution = sapr::solve_baseline(circuit, config);
@@ -152,6 +201,12 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     sapr::write_solution(solution, output);
     if (render_png) {
         const int render_status = render_solution_png(input, output, renderer_script_path(executable_path), render_dpi, render_name);
+        if (render_status != 0) return 1;
+    }
+    if (dump_btree) {
+        const auto trace_path = write_btree_trace_json(solution, output);
+        const int render_status =
+            render_btree_png(trace_path, output, btree_renderer_script_path(), render_dpi, render_btree_name);
         if (render_status != 0) return 1;
     }
     const auto metrics = solution.metrics.value_or(sapr::measure(circuit, solution));
