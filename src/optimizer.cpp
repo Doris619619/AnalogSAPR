@@ -6,6 +6,7 @@
 #include <functional>
 #include <limits>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -35,6 +36,172 @@ struct PackedRect {
     double x2{};
     double y2{};
 };
+
+std::string json_escape(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (const char ch : value) {
+        switch (ch) {
+            case '\\': escaped += "\\\\"; break;
+            case '"': escaped += "\\\""; break;
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\t': escaped += "\\t"; break;
+            default: escaped.push_back(ch); break;
+        }
+    }
+    return escaped;
+}
+
+void write_json_string(std::ostringstream& out, const std::string& value) {
+    out << '"' << json_escape(value) << '"';
+}
+
+void write_json_optional_string(std::ostringstream& out, const std::optional<std::string>& value) {
+    if (value.has_value()) {
+        write_json_string(out, *value);
+    } else {
+        out << "null";
+    }
+}
+
+void write_json_string_array(std::ostringstream& out, const std::vector<std::string>& values) {
+    out << '[';
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index != 0) out << ',';
+        write_json_string(out, values[index]);
+    }
+    out << ']';
+}
+
+// 收集 space node 内的 LCP 标识，供 enhanced B*-tree 调试图展示空间节点结构。
+std::vector<std::string> lcp_ids_for_json(const SpaceNode& space) {
+    std::vector<std::string> ids;
+    ids.reserve(space.linking_points.size());
+    for (const auto& point : space.linking_points) ids.push_back(point.id);
+    return ids;
+}
+
+// 按论文树侧语义导出 space node：left space node 对应几何右侧空间，right space node 对应几何上方空间。
+void write_btree_space_node_json(
+    std::ostringstream& out,
+    const char* field_name,
+    const char* tree_side,
+    const char* geometry_space,
+    const SpaceNode& space) {
+    out << ", \"" << field_name << "\": {\"id\": ";
+    write_json_string(out, space.id);
+    out << ", \"tree_side\": ";
+    write_json_string(out, tree_side);
+    out << ", \"geometry_space\": ";
+    write_json_string(out, geometry_space);
+    out << ", \"required_space\": " << space.required_space()
+        << ", \"lcp_count\": " << space.linking_points.size()
+        << ", \"lcp_ids\": ";
+    write_json_string_array(out, lcp_ids_for_json(space));
+    out << '}';
+}
+
+// 将最终 best candidate 的 B*-tree、packing trace 和 metrics 导出为轻量 JSON。
+std::string make_btree_trace_json(const CandidateState& state) {
+    std::ostringstream out;
+    const auto metrics = state.feedback.metrics;
+    out << "{\n";
+    out << "  \"root\": ";
+    write_json_optional_string(out, state.tree.root);
+    out << ",\n";
+    out << "  \"nodes\": [\n";
+    bool first_node = true;
+    for (const auto& id : state.tree.representative_order) {
+        const auto found = state.tree.nodes.find(id);
+        if (found == state.tree.nodes.end()) continue;
+        const auto& node = found->second;
+        if (!first_node) out << ",\n";
+        first_node = false;
+        out << "    {\"id\": ";
+        write_json_string(out, id);
+        out << ", \"module\": ";
+        write_json_string(out, node.module);
+        out << ", \"parent\": ";
+        write_json_optional_string(out, node.parent);
+        out << ", \"left\": ";
+        write_json_optional_string(out, node.left);
+        out << ", \"right\": ";
+        write_json_optional_string(out, node.right);
+        out << ", \"angle\": " << node.angle
+            << ", \"right_space\": " << node.right_space.required_space()
+            << ", \"top_space\": " << node.top_space.required_space()
+            << ", \"right_lcp_count\": " << node.right_space.linking_points.size()
+            << ", \"top_lcp_count\": " << node.top_space.linking_points.size();
+        write_btree_space_node_json(out, "left_space_node", "left_space_node", "right_space", node.right_space);
+        write_btree_space_node_json(out, "right_space_node", "right_space_node", "top_space", node.top_space);
+        out << '}';
+    }
+    out << "\n  ],\n";
+    out << "  \"placements\": [\n";
+    for (std::size_t index = 0; index < state.request.placement_order.size(); ++index) {
+        const auto& module = state.request.placement_order[index];
+        const auto found = state.request.placements.find(module);
+        if (found == state.request.placements.end()) continue;
+        const auto& placement = found->second;
+        if (index != 0) out << ",\n";
+        out << "    {\"module\": ";
+        write_json_string(out, module);
+        out << ", \"x\": " << placement.x
+            << ", \"y\": " << placement.y
+            << ", \"angle\": " << placement.angle
+            << ", \"orient\": ";
+        write_json_string(out, placement.orient);
+        out << '}';
+    }
+    out << "\n  ],\n";
+    out << "  \"packing_steps\": [\n";
+    for (std::size_t index = 0; index < state.request.packing_trace.steps.size(); ++index) {
+        const auto& step = state.request.packing_trace.steps[index];
+        if (index != 0) out << ",\n";
+        out << "    {\"index\": " << index
+            << ", \"tree_node\": ";
+        write_json_string(out, step.tree_node);
+        out << ", \"module\": ";
+        write_json_string(out, step.module);
+        out << ", \"x\": " << step.x
+            << ", \"y\": " << step.y
+            << ", \"occupied_bbox\": {\"x1\": " << step.occupied_bbox.x1
+            << ", \"y1\": " << step.occupied_bbox.y1
+            << ", \"x2\": " << step.occupied_bbox.x2
+            << ", \"y2\": " << step.occupied_bbox.y2
+            << "}, \"desired_x\": " << step.desired_x
+            << ", \"desired_y\": " << step.desired_y
+            << ", \"contour_y\": " << step.contour_y
+            << ", \"right_space\": " << step.right_space
+            << ", \"top_space\": " << step.top_space
+            << ", \"coupling_extra_space\": " << step.coupling_extra_space
+            << ", \"left\": ";
+        write_json_optional_string(out, step.left);
+        out << ", \"right\": ";
+        write_json_optional_string(out, step.right);
+        out << ", \"subtree_modules\": ";
+        write_json_string_array(out, step.subtree_modules);
+        out << ", \"local_wire_segments\": ";
+        write_json_string_array(out, step.local_wire_segments);
+        out << ", \"cross_child_wire_segments\": ";
+        write_json_string_array(out, step.cross_child_wire_segments);
+        out << '}';
+    }
+    out << "\n  ],\n";
+    out << "  \"metrics\": {"
+        << "\"area\": " << metrics.area
+        << ", \"wirelength\": " << metrics.wirelength
+        << ", \"penalty\": " << metrics.penalty
+        << ", \"failed_nets\": " << metrics.routing_failures
+        << ", \"dp_used\": " << (metrics.dp_used ? "true" : "false")
+        << ", \"packing_trace_steps\": " << metrics.packing_trace_steps
+        << ", \"packing_time_dp_used\": " << (metrics.packing_time_dp_used ? "true" : "false")
+        << ", \"packing_time_dp_segments\": " << metrics.packing_time_dp_segments
+        << "}\n";
+    out << "}\n";
+    return out.str();
+}
 
 // 返回指定模块是否是对称 pair 的代表模块。
 const SymmetryGroupNode* symmetry_pair_for_representative(const EnhancedBStarTree& tree, const std::string& module) {
@@ -379,6 +546,7 @@ Solution make_solution(const CandidateState& state) {
     solution.routing_feedback_converged = state.feedback.metrics.routing_feedback_converged;
     solution.packing_time_dp_used = state.feedback.metrics.packing_time_dp_used;
     solution.dp_used = state.feedback.metrics.dp_used;
+    solution.btree_trace_json = make_btree_trace_json(state);
     return solution;
 }
 

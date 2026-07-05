@@ -194,6 +194,7 @@ struct Solution {
     std::optional<bool> routing_feedback_converged;
     std::optional<bool> packing_time_dp_used;
     std::optional<bool> dp_used;
+    std::optional<std::string> btree_trace_json;
 };
 
 // 配置求解器的确定性参数和论文代价函数权重。
