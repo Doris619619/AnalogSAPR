@@ -8,11 +8,14 @@
 #include <unordered_set>
 #include <utility>
 
+#include "sapr/routing/path_geometry.hpp"
+
 namespace sapr::routing {
 namespace {
 
 constexpr double kBendWeight = 3.0;
 constexpr double kMissingSegmentPenalty = 100000.0;
+constexpr double kShortConflictPenalty = 1000000.0;
 
 // 表示同一逻辑 wire segment 对应的一组 A* 候选路径。
 struct CandidateGroup {
@@ -122,6 +125,10 @@ bool merge_child_state(RoutingDpState& target, const RoutingDpState& child, bool
         target.selected_candidates.end(),
         child.selected_candidates.begin(),
         child.selected_candidates.end());
+    target.occupied_routes.insert(
+        target.occupied_routes.end(),
+        child.occupied_routes.begin(),
+        child.occupied_routes.end());
     target.metrics.wirelength += child.metrics.wirelength;
     target.metrics.bend_count += child.metrics.bend_count;
     target.metrics.via_count += child.metrics.via_count;
@@ -136,15 +143,26 @@ bool merge_child_state(RoutingDpState& target, const RoutingDpState& child, bool
 }
 
 // 尝试把 candidate 加入 state，并维护 LCP 位置一致性。
-bool append_candidate_if_consistent(RoutingDpState& state, const RouteCandidate& candidate) {
+bool append_candidate_if_consistent(
+    RoutingDpState& state,
+    const RouteCandidate& candidate,
+    const RoutingContext& context) {
     if (!candidate.path.success) return false;
+    const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
+    auto candidate_routes = candidate_to_route_segments(context.grid(), candidate, width);
+    const bool has_short = routes_short_with_existing(candidate_routes, state.occupied_routes);
     if (!candidate.lcp_id.empty()) {
         const auto assigned = state.lcp_location_by_id.find(candidate.lcp_id);
         if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.lcp_candidate_id) return false;
         if (assigned == state.lcp_location_by_id.end()) state.lcp_location_by_id[candidate.lcp_id] = candidate.lcp_candidate_id;
     }
     state.selected_candidates.push_back(candidate);
+    state.occupied_routes.insert(state.occupied_routes.end(), candidate_routes.begin(), candidate_routes.end());
     add_candidate_metrics(state, candidate);
+    if (has_short) {
+        state.penalty += kShortConflictPenalty;
+        recompute_state_cost(state);
+    }
     append_unique(state.covered_terminals, candidate.from_terminal);
     append_unique(state.covered_terminals, candidate.to_terminal);
     append_unique(state.covered_wire_segments, candidate_segment_key(candidate));
@@ -474,6 +492,7 @@ std::vector<RoutingDpState> merge_child_states_for_node(
 void apply_segment_transition(
     std::vector<RoutingDpState>& states,
     const CandidateGroup& group,
+    const RoutingContext& context,
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
     const std::unordered_map<std::string, std::string>& lcp_space_by_id,
     const PackingTraceIndex& trace_index,
@@ -485,7 +504,7 @@ void apply_segment_transition(
         for (const auto& candidate : group.candidates) {
             if (!candidate_matches_group(candidate, group)) continue;
             RoutingDpState next = state;
-            if (!append_candidate_if_consistent(next, candidate)) continue;
+            if (!append_candidate_if_consistent(next, candidate, context)) continue;
             append_candidate_packing_trace(next, candidate, lcp_owner_by_id, lcp_space_by_id, trace_index);
             selected_any = true;
             next_states.push_back(std::move(next));
@@ -518,6 +537,7 @@ std::vector<RoutingDpState> build_states_for_node(
     const std::unordered_set<std::string>& subtree_modules,
     const ChildSubtreeModules& children,
     const std::vector<CandidateGroup>& groups,
+    const RoutingContext& context,
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
     const std::unordered_map<std::string, std::string>& lcp_space_by_id,
     const PackingTraceIndex& trace_index,
@@ -543,7 +563,15 @@ std::vector<RoutingDpState> build_states_for_node(
             }
         }
         if (already_covered) continue;
-        apply_segment_transition(states, group, lcp_owner_by_id, lcp_space_by_id, trace_index, max_states, pruned_states);
+        apply_segment_transition(
+            states,
+            group,
+            context,
+            lcp_owner_by_id,
+            lcp_space_by_id,
+            trace_index,
+            max_states,
+            pruned_states);
     }
 
     prune_states(states, max_states, pruned_states);
@@ -617,6 +645,7 @@ RoutingDpResult run_bottom_up_routing_dp(
             subtree_modules,
             children,
             groups,
+            context,
             lcp_owner_by_id,
             lcp_space_by_id,
             trace_index,

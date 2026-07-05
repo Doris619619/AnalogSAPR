@@ -1,0 +1,31 @@
+// 文件职责：声明候选网格路径到金属占用线段的转换与短路检查工具。
+#pragma once
+
+#include <vector>
+
+#include "sapr/model.hpp"
+#include "sapr/routing/grid.hpp"
+#include "sapr/routing/path.hpp"
+
+namespace sapr::routing {
+
+// 将 A* 候选路径压缩成同层共线的金属中心线段。
+std::vector<RouteSegment> candidate_to_route_segments(
+    const Grid& grid,
+    const RouteCandidate& candidate,
+    double width);
+
+// 判断两条已压缩金属线段是否形成同层异网短路。
+bool same_layer_short(const RouteSegment& lhs, const RouteSegment& rhs);
+
+// 判断一组新线段是否与既有线段形成同层异网短路。
+bool routes_short_with_existing(
+    const std::vector<RouteSegment>& routes,
+    const std::vector<RouteSegment>& existing);
+
+// 将线段整体映射到指定金属层，用于 detailed routing 的最小换层合法化。
+std::vector<RouteSegment> reassign_routes_to_layer(
+    std::vector<RouteSegment> routes,
+    int layer_index);
+
+}  // namespace sapr::routing

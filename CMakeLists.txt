@@ -18,6 +18,7 @@ add_library(sapr_core STATIC
     src/routing/grid.cpp
     src/routing/layer.cpp
     src/routing/obstacle.cpp
+    src/routing/path_geometry.cpp
     src/routing/routing_context.cpp
     src/routing/topology.cpp
     src/routing/transform.cpp

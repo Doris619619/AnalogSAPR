@@ -27,6 +27,10 @@ std::vector<AStarConfig> candidate_astar_configs() {
         AStarConfig{1.0, 8.0, 5.0, 1.0, 500000},
         AStarConfig{1.0, 3.0, 12.0, 1.0, 500000},
         AStarConfig{1.0, 1.0, 3.0, 1.0, 500000},
+        AStarConfig{1.0, 12.0, 2.0, 0.2, 500000},
+        AStarConfig{1.0, 2.0, 1.0, 0.1, 500000},
+        AStarConfig{1.0, 5.0, 20.0, 0.5, 500000},
+        AStarConfig{1.0, 1.0, 1.0, 0.05, 500000},
     };
 }
 

@@ -12,6 +12,7 @@
 #include "sapr/routing/dp_router.hpp"
 #include "sapr/routing/global_router.hpp"
 #include "sapr/routing/grid.hpp"
+#include "sapr/routing/path_geometry.hpp"
 #include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
 #include "sapr/tree.hpp"
@@ -107,6 +108,29 @@ sapr::Circuit make_conflict_test_circuit() {
     circuit.nets.emplace("N2", sapr::Net{"N2", sapr::Priority::Normal, {"M.C", "M.D"}});
     circuit.net_order = {"N1", "N2"};
     return circuit;
+}
+
+// 构造一条人工水平候选，用于精确测试短路合法化。
+sapr::routing::RouteCandidate make_horizontal_candidate(
+    const sapr::routing::RoutingContext& context,
+    const std::string& net,
+    const std::string& from,
+    const std::string& to,
+    double y,
+    int layer = 0) {
+    sapr::routing::RouteCandidate candidate;
+    candidate.net = net;
+    candidate.from_terminal = from;
+    candidate.to_terminal = to;
+    candidate.segment_id = net + ":" + from + "->" + to;
+    candidate.wire_width = 1.0;
+    candidate.path.success = true;
+    candidate.path.points = {
+        context.grid().snap_to_grid(sapr::routing::Point{0.0, y}, layer),
+        context.grid().snap_to_grid(sapr::routing::Point{9.0, y}, layer),
+    };
+    candidate.path.metrics.wirelength = 9.0;
+    return candidate;
 }
 
 sapr::RoutingEvaluation make_priority_evaluation(
@@ -569,6 +593,71 @@ void run_routing_evaluator_tests() {
         conflict_global.coupling_penalty >= 100000.0,
         "different nets sharing routing grid points should receive a high conflict penalty");
 
+    sapr::RouteSegment first_metal{"N1", "M1", 0.0, 1.0, 9.0, 1.0, 1.0};
+    sapr::RouteSegment second_metal{"N2", "M1", 0.0, 2.0, 9.0, 2.0, 1.0};
+    require(
+        sapr::routing::same_layer_short(first_metal, second_metal),
+        "same-layer metal rectangles should detect shorts even when centerlines use different tracks");
+
+    const auto preferred_first = make_horizontal_candidate(conflict_context, "N1", "M.A", "M.B", 1.0);
+    const auto short_second = make_horizontal_candidate(conflict_context, "N2", "M.C", "M.D", 2.0);
+    const auto legal_second = make_horizontal_candidate(conflict_context, "N2", "M.C", "M.D", 4.0);
+    const auto short_aware_global = sapr::routing::run_global_routing(
+        conflict_circuit,
+        conflict_context,
+        {preferred_first, short_second, legal_second});
+    require(short_aware_global.failed_nets == 0, "short-aware global routing should keep legal fallback candidates");
+    require(
+        short_aware_global.net_routes.size() == 2 &&
+            short_aware_global.net_routes[1].selected_candidates.front().path.points.front().iy ==
+                legal_second.path.points.front().iy,
+        "global routing should prefer a non-short candidate over a shorter same-layer short");
+
+    sapr::routing::GlobalRoutingResult detailed_global;
+    sapr::routing::NetRouteChoice first_choice;
+    first_choice.net = "N1";
+    first_choice.selected_candidates.push_back(preferred_first);
+    detailed_global.net_routes.push_back(first_choice);
+    sapr::routing::NetRouteChoice second_choice;
+    second_choice.net = "N2";
+    second_choice.selected_candidates.push_back(short_second);
+    detailed_global.net_routes.push_back(second_choice);
+    sapr::RoutingEvaluation short_detail_eval{
+        sapr::routing::RoutingContext(conflict_circuit, conflict_placements),
+        {preferred_first, short_second, legal_second},
+        std::move(detailed_global),
+        std::nullopt,
+        18.0,
+        0,
+        false,
+    };
+    sapr::RoutingEvaluationRequest short_detail_request;
+    short_detail_request.placements = conflict_placements;
+    short_detail_request.placement_order = {"M"};
+    const auto legalized_detail = sapr::run_detailed_routing(conflict_circuit, short_detail_request, short_detail_eval);
+    require(legalized_detail.design_rule_violations == 0, "detailed routing should legalize shorts with an alternative candidate");
+    require(!legalized_detail.routes.empty(), "detailed routing should keep legalized routes instead of clearing all output");
+
+    sapr::routing::GlobalRoutingResult layer_global;
+    layer_global.net_routes.push_back(first_choice);
+    layer_global.net_routes.push_back(second_choice);
+    sapr::RoutingEvaluation layer_detail_eval{
+        sapr::routing::RoutingContext(conflict_circuit, conflict_placements),
+        {preferred_first, short_second},
+        std::move(layer_global),
+        std::nullopt,
+        18.0,
+        0,
+        false,
+    };
+    const auto layer_detail = sapr::run_detailed_routing(conflict_circuit, short_detail_request, layer_detail_eval);
+    require(layer_detail.design_rule_violations == 0, "detailed routing should legalize shorts by reassigning layer when no alternative path exists");
+    require(
+        std::any_of(layer_detail.routes.begin(), layer_detail.routes.end(), [](const auto& route) {
+            return route.net == "N2" && route.layer != "M1";
+        }),
+        "layer reassignment should move the conflicting net away from the original metal layer");
+
     const auto drc_circuit = make_active_region_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> drc_placements{
         {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
@@ -707,7 +796,11 @@ void run_routing_evaluator_tests() {
     coupling_choice.selected_candidates.push_back(coupling_candidate);
     coupling_eval.global_routing.net_routes.push_back(coupling_choice);
     const auto coupling_detail = sapr::run_detailed_routing(drc_circuit, drc_request, coupling_eval);
-    require(coupling_detail.coupling_penalty > 100.0, "coupling penalty should scale with parallel overlap length");
-    require(coupling_detail.design_rule_violations > 0, "same-layer different-net overlap should count as DRC");
-    require(!coupling_detail.report.coupling_pairs.empty(), "coupling report should include net pair and overlap length");
+    require(coupling_detail.design_rule_violations == 0, "same-layer different-net overlap should be legalized before final DRC");
+    require(!coupling_detail.routes.empty(), "legalized detailed routing should keep route output");
+    require(
+        std::any_of(coupling_detail.routes.begin(), coupling_detail.routes.end(), [](const auto& route) {
+            return route.net == "P" && route.layer != "M1";
+        }),
+        "overlapping same-layer route should be reassigned when no alternative candidate exists");
 }

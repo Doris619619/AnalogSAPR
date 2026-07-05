@@ -11,7 +11,7 @@ namespace sapr::routing {
 
 // 表示每对 terminal 最多保留的候选路径数量。
 struct CandidateConfig {
-    int max_candidates_per_pair{3};
+    int max_candidates_per_pair{6};
 };
 
 // 为所有多端 net 生成 root terminal 到其它 terminal 的候选路径。

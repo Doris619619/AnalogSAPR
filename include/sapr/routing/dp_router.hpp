@@ -27,6 +27,8 @@ struct RoutingDpState {
     // 记录缺失 candidate 或 transition 失败的原因。
     std::vector<std::string> failure_messages;
     std::vector<RouteCandidate> selected_candidates;
+    // 记录当前 state 已选候选的金属占用，用于提前排除异网同层短路。
+    std::vector<RouteSegment> occupied_routes;
     PathMetrics metrics;
     double penalty{};
     double cost{};
