@@ -74,6 +74,34 @@ void write_json_string_array(std::ostringstream& out, const std::vector<std::str
     out << ']';
 }
 
+// 收集 space node 内的 LCP 标识，供 enhanced B*-tree 调试图展示空间节点结构。
+std::vector<std::string> lcp_ids_for_json(const SpaceNode& space) {
+    std::vector<std::string> ids;
+    ids.reserve(space.linking_points.size());
+    for (const auto& point : space.linking_points) ids.push_back(point.id);
+    return ids;
+}
+
+// 按论文树侧语义导出 space node：left space node 对应几何右侧空间，right space node 对应几何上方空间。
+void write_btree_space_node_json(
+    std::ostringstream& out,
+    const char* field_name,
+    const char* tree_side,
+    const char* geometry_space,
+    const SpaceNode& space) {
+    out << ", \"" << field_name << "\": {\"id\": ";
+    write_json_string(out, space.id);
+    out << ", \"tree_side\": ";
+    write_json_string(out, tree_side);
+    out << ", \"geometry_space\": ";
+    write_json_string(out, geometry_space);
+    out << ", \"required_space\": " << space.required_space()
+        << ", \"lcp_count\": " << space.linking_points.size()
+        << ", \"lcp_ids\": ";
+    write_json_string_array(out, lcp_ids_for_json(space));
+    out << '}';
+}
+
 // 将最终 best candidate 的 B*-tree、packing trace 和 metrics 导出为轻量 JSON。
 std::string make_btree_trace_json(const CandidateState& state) {
     std::ostringstream out;
@@ -104,8 +132,10 @@ std::string make_btree_trace_json(const CandidateState& state) {
             << ", \"right_space\": " << node.right_space.required_space()
             << ", \"top_space\": " << node.top_space.required_space()
             << ", \"right_lcp_count\": " << node.right_space.linking_points.size()
-            << ", \"top_lcp_count\": " << node.top_space.linking_points.size()
-            << '}';
+            << ", \"top_lcp_count\": " << node.top_space.linking_points.size();
+        write_btree_space_node_json(out, "left_space_node", "left_space_node", "right_space", node.right_space);
+        write_btree_space_node_json(out, "right_space_node", "right_space_node", "top_space", node.top_space);
+        out << '}';
     }
     out << "\n  ],\n";
     out << "  \"placements\": [\n";
