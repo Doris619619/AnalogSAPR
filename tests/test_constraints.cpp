@@ -16,6 +16,11 @@ void run_constraint_tests() {
     const auto pin_errors = sapr::validate_circuit(missing_pin);
     require(!pin_errors.empty(), "missing pin should be reported");
 
+    auto duplicate_terminal = circuit;
+    duplicate_terminal.nets.at("GND").terminals.push_back("M1.S");
+    const auto duplicate_errors = sapr::validate_circuit(duplicate_terminal);
+    require(!duplicate_errors.empty(), "terminal assigned to multiple nets should be reported");
+
     auto invalid_width = circuit;
     require(invalid_width.constraints.wire_widths.contains("VDD"), "sample should contain VDD width constraint");
     invalid_width.constraints.wire_widths.at("VDD").min_width = 10.0;

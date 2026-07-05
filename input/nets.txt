@@ -5,7 +5,7 @@
 # net          priority    terminals
 
 VDD            critical    M3.S M4.S
-GND            critical    M1.S M2.S R0.MINUS
+GND            critical    M5.S M5.B R0.MINUS
 OUT            critical    M3.D M1.D
 IN_P           normal      M1.G
 IN_N           normal      M2.G

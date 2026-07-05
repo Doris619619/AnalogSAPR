@@ -16,8 +16,8 @@ Grid::Grid(const GridConfig& config, double min_x, double min_y, double max_x, d
         throw std::runtime_error("grid layer_count must be positive");
     }
 
-    const double low_x = std::min(min_x, max_x) - config_.margin;
-    const double low_y = std::min(min_y, max_y) - config_.margin;
+    const double low_x = std::min(min_x, max_x);
+    const double low_y = std::min(min_y, max_y);
     const double high_x = std::max(min_x, max_x) + config_.margin;
     const double high_y = std::max(min_y, max_y) + config_.margin;
 

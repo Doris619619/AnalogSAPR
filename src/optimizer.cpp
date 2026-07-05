@@ -490,9 +490,6 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     if (feedback.routes.empty() && routing_evaluation.failed_nets > 0) {
         feedback.routes = selected_candidates_to_segments(routing_evaluation);
     }
-    if (feedback.routes.empty() && routing_evaluation.failed_nets > 0) {
-        feedback.routes = route_manhattan(circuit, request.placements);
-    }
     Solution solution;
     solution.placements = request.placements;
     solution.placement_order = request.placement_order;
