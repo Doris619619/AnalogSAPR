@@ -1,0 +1,5 @@
+# LPF_simple_pmos_pair_m1
+# id          w       h       active(x1,y1,x2,y2)         # info
+
+MP8          1.760   2.355   0.000,0.000,0.000,0.000  # pmos pch_ulvt_mac_CDNS_7565436834229_pair ox=0.000 oy=0.000
+MP15         1.760   2.355   0.000,0.000,0.000,0.000  # pmos pch_ulvt_mac_CDNS_7565436834229_pair ox=0.000 oy=0.000

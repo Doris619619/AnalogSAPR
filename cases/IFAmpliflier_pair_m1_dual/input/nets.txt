@@ -1,0 +1,4 @@
+# net          priority    terminals
+
+24             normal     XC18.PLUS XC19.PLUS
+OUT            critical   XC18.MINUS XC19.MINUS

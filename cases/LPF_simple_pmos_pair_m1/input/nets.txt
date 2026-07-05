@@ -1,0 +1,4 @@
+# net          priority    terminals
+
+AGND           critical   MP8.G MP15.G
+AVDD           critical   MP8.D MP15.D
