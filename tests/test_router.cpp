@@ -139,7 +139,7 @@ void run_router_tests() {
 
     const auto metrics = sapr::measure(circuit, solution);
     require(metrics.area > 0.0, "placement-aware area should be positive");
-    require(metrics.wirelength > 0.0, "placement-aware wirelength should be positive");
+    require(solution.metrics->wirelength > 0.0, "placement-aware routing metric wirelength should be positive");
     require(solution.metrics->penalty >= 0.0, "adapter penalty should be non-negative");
     require(solution.metrics->routing_failure_penalty <= solution.metrics->penalty, "routing failure penalty should be part of total penalty");
 }

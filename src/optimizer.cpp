@@ -163,8 +163,14 @@ std::string segment_key_for_trace(const WireSegmentRef& segment) {
 
 std::unordered_map<std::string, std::string> lcp_owner_map_for_trace(const RoutingEvaluationRequest& request) {
     std::unordered_map<std::string, std::string> owners;
+    std::unordered_map<std::string, std::string> owner_by_space;
     for (const auto& space : request.space_nodes) {
+        owner_by_space[space.id] = space.owner;
         for (const auto& point : space.linking_points) owners[point.id] = space.owner;
+    }
+    for (const auto& point : request.linking_points) {
+        const auto found = owner_by_space.find(point.space_node_id);
+        if (found != owner_by_space.end()) owners[point.id] = found->second;
     }
     return owners;
 }
@@ -233,13 +239,26 @@ Rect placed_active_rect(const Module& module, const Placement& placement) {
 }
 
 // 填充 routing request 中面向 DP/A* 的全局 pin、blocker 和 LCP 候选位置。
+// 判断 active 是否等于完整模块 bbox；这类 capacitor 占位不作为 active crossing DRC blocker。
+bool active_is_full_module_bbox(const Module& module) {
+    constexpr double kTolerance = 1e-9;
+    return std::abs(module.active.x1) <= kTolerance &&
+           std::abs(module.active.y1) <= kTolerance &&
+           std::abs(module.active.x2 - module.width) <= kTolerance &&
+           std::abs(module.active.y2 - module.height) <= kTolerance;
+}
+
 void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& request) {
     std::unordered_map<std::string, std::pair<double, double>> module_centers;
+    std::unordered_map<std::string, Rect> module_boxes;
     for (const auto& module_id : request.placement_order) {
         const auto& placement = request.placements.at(module_id);
         const auto size = placed_size(circuit.modules.at(module_id), placement);
         module_centers[module_id] = {placement.x + size.first / 2.0, placement.y + size.second / 2.0};
-        request.active_region_blockers.push_back(placed_active_rect(circuit.modules.at(module_id), placement));
+        module_boxes[module_id] = {placement.x, placement.y, placement.x + size.first, placement.y + size.second};
+        if (!active_is_full_module_bbox(circuit.modules.at(module_id))) {
+            request.active_region_blockers.push_back(placed_active_rect(circuit.modules.at(module_id), placement));
+        }
     }
     for (const auto& key : circuit.pin_order) {
         const auto& pin = circuit.pins.at(key);
@@ -247,26 +266,48 @@ void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& 
         const auto xy = placed_pin(circuit.modules.at(pin.module), pin, placement);
         request.placed_pins.push_back({key, pin.module, pin.name, xy.first, xy.second, pin.layer});
     }
+    std::unordered_map<std::string, LinkingControlPoint> logical_lcp_by_net;
     for (auto space : request.space_nodes) {
         const auto center = module_centers.contains(space.owner) ? module_centers.at(space.owner) : std::pair<double, double>{0.0, 0.0};
+        const auto box = module_boxes.contains(space.owner) ? module_boxes.at(space.owner) : Rect{center.first, center.second, center.first, center.second};
         const double offset = std::max(space.required_space(), 1.0);
         space.location_candidates.clear();
-        space.location_candidates.push_back({center.first + offset, center.second, space.id + ":edge"});
-        space.location_candidates.push_back({center.first, center.second + offset, space.id + ":top"});
-        space.location_candidates.push_back({center.first + offset / 2.0, center.second + offset / 2.0, space.id + ":center"});
+        space.location_candidates.push_back({box.x2 + offset, center.second, space.id + ":edge"});
+        space.location_candidates.push_back({center.first, box.y2 + offset, space.id + ":top"});
+        space.location_candidates.push_back({box.x2 + offset / 2.0, box.y2 + offset / 2.0, space.id + ":center"});
         for (auto point : space.linking_points) {
             point.location_candidates.clear();
             if (space.kind == SpaceNodeKind::Top) {
-                point.location_candidates.push_back({center.first, center.second + offset, point.id + ":top"});
+                point.location_candidates.push_back({center.first, box.y2 + offset, point.id + ":top"});
             } else if (space.kind == SpaceNodeKind::Cluster) {
-                point.location_candidates.push_back({center.first + offset / 2.0, center.second, point.id + ":axis"});
+                point.location_candidates.push_back({box.x2 + offset / 2.0, center.second, point.id + ":axis"});
             } else {
-                point.location_candidates.push_back({center.first + offset, center.second, point.id + ":right"});
+                point.location_candidates.push_back({box.x2 + offset, center.second, point.id + ":right"});
             }
-            point.location_candidates.push_back({center.first + offset / 2.0, center.second + offset / 2.0, point.id + ":center"});
-            point.location_candidates.push_back({center.first, center.second + offset, point.id + ":pin_projection"});
-            request.linking_points.push_back(std::move(point));
+            point.location_candidates.push_back({box.x2 + offset / 2.0, box.y2 + offset / 2.0, point.id + ":center"});
+            point.location_candidates.push_back({center.first, box.y2 + offset, point.id + ":pin_projection"});
+            if (point.segments.empty()) continue;
+            const std::string net_name = point.segments.front().net;
+            const std::string logical_id = net_name + ":lcp";
+            auto& logical = logical_lcp_by_net[net_name];
+            if (logical.id.empty()) {
+                logical = point;
+                logical.id = logical_id;
+                for (auto& segment : logical.segments) {
+                    if (segment.from == point.id) segment.from = logical_id;
+                    if (segment.to == point.id) segment.to = logical_id;
+                    segment.id = segment.net + ":" + segment.from + "->" + segment.to;
+                }
+                logical.location_candidates.clear();
+            }
+            for (auto location : point.location_candidates) {
+                location.id = point.id + "|" + location.id;
+                logical.location_candidates.push_back(std::move(location));
+            }
         }
+    }
+    for (auto& [_, point] : logical_lcp_by_net) {
+        request.linking_points.push_back(std::move(point));
     }
     std::unordered_map<std::string, NetTopology> topologies;
     for (const auto& [name, net] : circuit.nets) {
@@ -379,6 +420,7 @@ Solution make_solution(const CandidateState& state) {
     solution.routing_feedback_converged = state.feedback.metrics.routing_feedback_converged;
     solution.packing_time_dp_used = state.feedback.metrics.packing_time_dp_used;
     solution.dp_used = state.feedback.metrics.dp_used;
+    solution.routing_warnings = state.feedback.metrics.routing_warnings;
     return solution;
 }
 
@@ -516,6 +558,7 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.metrics.detailed_cost = detailed.detailed_cost;
     feedback.metrics.detailed_routes = static_cast<int>(detailed.routes.size());
     feedback.metrics.traceback_failures = detailed.traceback_failures;
+    feedback.metrics.routing_warnings = detailed.report.warnings;
     feedback.metrics.space_nodes_with_routes = detailed.space_nodes_with_routes;
     feedback.metrics.packing_trace_steps = static_cast<int>(request.packing_trace.steps.size());
     feedback.metrics.dp_used = routing_evaluation.used_bottom_up_dp;

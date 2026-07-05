@@ -50,15 +50,15 @@ std::vector<WireSegmentRef> make_segments_for_net(const Circuit& circuit, const 
     const auto [min_width, max_width] = width_range_for_net(circuit, net.name);
     const auto direction = flow_direction_for_net(circuit, net.name);
     const std::string root = net.terminals.front();
+    segments.push_back({net.name,
+                        root,
+                        lcp_id,
+                        min_width,
+                        max_width,
+                        direction,
+                        current_direction_for_endpoint(circuit, net.name, root),
+                        net.name + ":" + root + "->" + lcp_id});
     for (std::size_t index = 1; index < net.terminals.size(); ++index) {
-        segments.push_back({net.name,
-                            root,
-                            lcp_id,
-                            min_width,
-                            max_width,
-                            direction,
-                            current_direction_for_endpoint(circuit, net.name, root),
-                            net.name + ":" + root + "->" + lcp_id});
         segments.push_back({net.name,
                             lcp_id,
                             net.terminals[index],
@@ -98,7 +98,7 @@ BStarNode make_node(const Circuit& circuit, const std::string& module) {
     node.top_space = make_space_node(module + ":top", module, SpaceNodeKind::Top);
     for (const auto& net_name : circuit.net_order) {
         const auto& net = circuit.nets.at(net_name);
-        if (!net_touches_module(net, module) || net.terminals.size() < 2) continue;
+        if (!net_touches_module(net, module) || net.terminals.size() < 3) continue;
         const std::string lcp_id = module + ":" + net_name + ":lcp";
         LinkingControlPoint point{lcp_id, node.right_space.id, make_segments_for_net(circuit, net, lcp_id), {}};
         if (point.segments.size() >= 2) node.right_space.linking_points.push_back(std::move(point));
@@ -388,8 +388,11 @@ std::vector<LcpSlot> collect_lcp_slots(std::vector<SpaceNode*>& spaces) {
 bool is_valid_lcp(const LinkingControlPoint& point) {
     if (point.segments.size() < 2) return false;
     const std::string& net = point.segments.front().net;
+    std::unordered_set<std::string> segment_ids;
     for (const auto& segment : point.segments) {
         if (segment.net != net) return false;
+        const std::string key = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
+        if (!segment_ids.insert(key).second) return false;
     }
     return true;
 }

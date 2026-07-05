@@ -40,7 +40,8 @@ RoutingEvaluation make_evaluation(
     const Circuit& circuit,
     std::optional<routing::RoutingDpResult> bottom_up_dp = std::nullopt) {
     const bool use_dp = bottom_up_dp.has_value() && bottom_up_dp->success;
-    auto global_routing = use_dp
+    const bool has_dp = bottom_up_dp.has_value();
+    auto global_routing = has_dp
                               ? routing::run_global_routing(circuit, context, bottom_up_dp->traceback_candidates)
                               : routing::run_global_routing(circuit, context, candidates);
     RoutingEvaluation evaluation{
@@ -67,6 +68,17 @@ std::unordered_set<std::string> nets_with_lcp_topology(const RoutingEvaluationRe
 }
 
 // 把 LCP 的连续候选位置转换为指定层上的网格点。
+// 收集 LCP 物理候选位置，让 routing grid 覆盖论文 DP 要搜索的 resource point。
+std::vector<routing::Point> lcp_routing_points(const RoutingEvaluationRequest& request) {
+    std::vector<routing::Point> points;
+    for (const auto& point : request.linking_points) {
+        for (const auto& location : point.location_candidates) {
+            points.push_back(routing::Point{location.x, location.y});
+        }
+    }
+    return points;
+}
+
 routing::GridPoint lcp_grid_point(
     const routing::RoutingContext& context,
     const PhysicalLocationCandidate& location,
@@ -158,7 +170,7 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
                 candidate.to_terminal = segment.to;
                 candidate.segment_id = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
                 candidate.lcp_id = point.id;
-                candidate.wire_width = std::max(segment.min_width, 1.0);
+                candidate.wire_width = std::max(segment.min_width, 1e-9);
                 candidate.path = routing::GridPath{false, "LCP has no physical location candidate", {}, {}};
                 annotate_candidate(circuit, candidate, 50000.0, 50000.0, segment);
                 candidates.push_back(std::move(candidate));
@@ -175,7 +187,7 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
                 candidate.segment_id = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
                 candidate.lcp_id = point.id;
                 candidate.lcp_candidate_id = location.id;
-                candidate.wire_width = std::max(segment.min_width, 1.0);
+                candidate.wire_width = std::max(segment.min_width, 1e-9);
                 if (!start.has_value() || !goal.has_value()) {
                     candidate.path = routing::GridPath{false, "LCP endpoint cannot be resolved", {}, {}};
                     annotate_candidate(circuit, candidate, 50000.0, 50000.0, segment);
@@ -692,8 +704,9 @@ std::vector<const routing::NetRouteChoice*> ordered_detailed_routes(
 // 返回 detailed routing 应使用的候选路径，优先使用 bottom-up DP traceback。
 std::vector<routing::RouteCandidate> selected_candidates_for_detailed_routing(
     const RoutingEvaluation& evaluation) {
-    if (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->success) {
-        return evaluation.bottom_up_dp->traceback_candidates;
+    if (evaluation.bottom_up_dp.has_value()) {
+        if (evaluation.bottom_up_dp->success) return evaluation.bottom_up_dp->traceback_candidates;
+        return {};
     }
     std::vector<routing::RouteCandidate> candidates;
     for (const auto& net_route : evaluation.global_routing.net_routes) {
@@ -818,7 +831,7 @@ RoutingEvaluation evaluate_routing(
 RoutingEvaluation evaluate_routing(
     const Circuit& circuit,
     const RoutingEvaluationRequest& request) {
-    routing::RoutingContext context(circuit, request.placements);
+    routing::RoutingContext context(circuit, request.placements, routing::GridConfig{}, lcp_routing_points(request));
     auto candidates = routing::generate_route_candidates(circuit, context);
     for (auto& candidate : candidates) {
         annotate_candidate(circuit, candidate, 50000.0, 50000.0);
@@ -836,6 +849,9 @@ RoutingEvaluation evaluate_routing(
             candidates.end(),
             std::make_move_iterator(lcp_candidates.begin()),
             std::make_move_iterator(lcp_candidates.end()));
+    }
+    if (request.net_topologies.empty() || !request.tree.root.has_value()) {
+        return make_evaluation(std::move(context), std::move(candidates), circuit);
     }
     auto bottom_up_dp = routing::run_bottom_up_routing_dp(circuit, request, context, candidates);
     return make_evaluation(std::move(context), std::move(candidates), circuit, std::move(bottom_up_dp));
@@ -864,6 +880,16 @@ DetailedRoutingResult run_detailed_routing(
     const bool has_dp_traceback = evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->success;
     const int dp_state_id = has_dp_traceback ? evaluation.bottom_up_dp->best_state.id : -1;
     const std::string tree_node = has_dp_traceback ? evaluation.bottom_up_dp->best_state.tree_node : std::string{};
+    if (evaluation.bottom_up_dp.has_value() && !evaluation.bottom_up_dp->success) {
+        auto& trace = trace_for_net(result.report, "__dp__");
+        if (evaluation.bottom_up_dp->best_state.failure_messages.empty()) {
+            add_traceback_failure(result, trace, "bottom-up DP failed without a legal topology traceback");
+        } else {
+            for (const auto& failure : evaluation.bottom_up_dp->best_state.failure_messages) {
+                add_traceback_failure(result, trace, failure);
+            }
+        }
+    }
     routing::PathMetrics detailed_metrics;
     for (const auto& candidate : selected_candidates) {
         auto& trace = trace_for_net(result.report, candidate.net);
@@ -908,15 +934,18 @@ DetailedRoutingResult run_detailed_routing(
     result.design_rule_violations = static_cast<int>(drc_routes.size() + short_pairs.size());
     for (const auto route_index : drc_routes) {
         const auto& route = result.routes[route_index];
-        result.report.design_rule_segments.push_back(
-            route.net + ":" + route.layer + ":" + std::to_string(route_index));
+        const std::string message = route.net + ":" + route.layer + ":" + std::to_string(route_index);
+        result.report.design_rule_segments.push_back(message);
+        result.report.warnings.push_back("active-region DRC " + message);
     }
     for (const auto& [left_index, right_index] : short_pairs) {
         const auto& left = result.routes[left_index];
         const auto& right = result.routes[right_index];
-        result.report.design_rule_segments.push_back(
+        const std::string message =
             left.net + "<->" + right.net + ":" + left.layer + ":" +
-            std::to_string(left_index) + "," + std::to_string(right_index));
+            std::to_string(left_index) + "," + std::to_string(right_index);
+        result.report.design_rule_segments.push_back(message);
+        result.report.warnings.push_back("same-layer short DRC " + message);
     }
     result.design_rule_penalty = 100000.0 * static_cast<double>(result.design_rule_violations);
     const auto coupling_pairs = collect_detailed_coupling_findings(result.routes);
@@ -932,6 +961,12 @@ DetailedRoutingResult run_detailed_routing(
     }
     for (const auto& space_node_id : routed_space_nodes) {
         result.coupling_space_by_node[space_node_id] = result.coupling_penalty > 0.0 ? kDetailedSpacing : 0.0;
+    }
+    if (result.design_rule_violations > 0) {
+        result.routing_failure_penalty += kDetailedFailurePenalty * static_cast<double>(result.design_rule_violations);
+        result.report.warnings.push_back("detailed routing discarded routes with DRC violations");
+        result.routes.clear();
+        routed_space_nodes.clear();
     }
     result.space_nodes_with_routes = static_cast<int>(routed_space_nodes.size());
     result.detailed_routing_penalty =

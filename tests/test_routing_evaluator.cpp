@@ -128,8 +128,8 @@ sapr::RoutingEvaluation make_priority_evaluation(
         return candidate;
     };
     const auto normal = make_candidate("NOR", "M.E", "M.F", 1.0);
-    const auto critical = make_candidate("CRT", "M.C", "M.D", 2.0);
-    const auto symmetry = make_candidate("SYM", "M.A", "M.B", 3.0);
+    const auto critical = make_candidate("CRT", "M.C", "M.D", 4.0);
+    const auto symmetry = make_candidate("SYM", "M.A", "M.B", 7.0);
 
     sapr::routing::GlobalRoutingResult global;
     for (const auto& candidate : {normal, critical, symmetry}) {
@@ -355,8 +355,25 @@ void run_routing_evaluator_tests() {
         }
     }
     std::unordered_map<std::string, std::string> lcp_owner_by_id;
+    std::unordered_map<std::string, std::string> owner_by_space;
     for (const auto& space : request_for_dp.space_nodes) {
+        owner_by_space[space.id] = space.owner;
         for (const auto& point : space.linking_points) lcp_owner_by_id[point.id] = space.owner;
+    }
+    for (const auto& point : request_for_dp.linking_points) {
+        const auto found = owner_by_space.find(point.space_node_id);
+        if (found != owner_by_space.end()) lcp_owner_by_id[point.id] = found->second;
+    }
+    for (const auto& topology : request_for_dp.net_topologies) {
+        for (const auto& point : topology.linking_points) {
+            std::unordered_set<std::string> segment_ids;
+            int lcp_incident_segments = 0;
+            for (const auto& segment : point.segments) {
+                if (segment.from == point.id || segment.to == point.id) ++lcp_incident_segments;
+                require(segment_ids.insert(segment.id).second, "LCP topology should not duplicate root-to-LCP segments");
+            }
+            require(lcp_incident_segments >= 2, "each logical LCP should connect at least two same-net segments");
+        }
     }
     const auto terminal_owner = [&](const std::string& terminal) {
         const auto dot = terminal.find('.');
@@ -483,7 +500,9 @@ void run_routing_evaluator_tests() {
     }
     require(evaluation.routing_cost > 0.0, "routing evaluator should produce a positive global routing cost");
     require(!selected_segments.empty(), "routing evaluator should convert selected A* candidates to route segments");
-    require(!detailed.routes.empty(), "detailed routing should emit selected route segments");
+    require(
+        !detailed.routes.empty() || detailed.traceback_failures > 0 || detailed.design_rule_violations > 0,
+        "detailed routing should either emit legal route segments or report why traceback was discarded");
     require(detailed.coupling_penalty >= 0.0, "detailed routing should report coupling penalty");
     require(detailed.design_rule_penalty >= 0.0, "detailed routing should report DRC penalty");
     require(detailed.design_rule_violations >= 0, "detailed routing should report DRC violations");

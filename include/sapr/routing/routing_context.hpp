@@ -28,7 +28,8 @@ public:
     RoutingContext(
         const Circuit& circuit,
         const std::unordered_map<std::string, Placement>& placements,
-        const GridConfig& config = GridConfig{});
+        const GridConfig& config = GridConfig{},
+        const std::vector<Point>& extra_routing_points = {});
 
     // 禁止复制，避免复制内部网格所有权。
     RoutingContext(const RoutingContext&) = delete;

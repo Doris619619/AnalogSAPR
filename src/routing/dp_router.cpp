@@ -173,6 +173,76 @@ void append_candidate_packing_trace(
         transition);
 }
 
+// 收集论文 LCP topology 中必须被 DP 覆盖的唯一 wire segment id。
+std::vector<std::string> required_segment_keys(const RoutingEvaluationRequest& request) {
+    std::vector<std::string> keys;
+    for (const auto& topology : request.net_topologies) {
+        for (const auto& segment : topology.segments) {
+            append_unique(keys, segment_key(segment.net, segment.from, segment.to, segment.id));
+        }
+    }
+    return keys;
+}
+
+// 收集必须在 DP state 中绑定到唯一物理候选位置的 LCP id。
+std::vector<std::string> required_lcp_ids(const RoutingEvaluationRequest& request) {
+    std::vector<std::string> ids;
+    for (const auto& point : request.linking_points) append_unique(ids, point.id);
+    return ids;
+}
+
+// 检查 root state 是否完整覆盖 topology 中的所有必需 segment。
+bool state_covers_required_segments(const RoutingDpState& state, const std::vector<std::string>& required) {
+    for (const auto& key : required) {
+        if (!contains_value(state.covered_wire_segments, key)) return false;
+    }
+    return true;
+}
+
+// 检查每个 LCP 是否恰好被绑定到一个候选物理位置。
+bool state_binds_required_lcps(const RoutingDpState& state, const std::vector<std::string>& required) {
+    for (const auto& lcp_id : required) {
+        const auto found = state.lcp_location_by_id.find(lcp_id);
+        if (found == state.lcp_location_by_id.end() || found->second.empty()) return false;
+    }
+    return true;
+}
+
+// 根据论文语义判定 DP 是否成功：完整覆盖、LCP 位置一致且没有失败 transition。
+bool is_successful_root_state(
+    const RoutingDpState& state,
+    const std::vector<std::string>& required_segments,
+    const std::vector<std::string>& required_lcps) {
+    if (!state.failure_messages.empty()) return false;
+    if (required_segments.empty()) return !state.selected_candidates.empty();
+    if (!state_covers_required_segments(state, required_segments)) return false;
+    if (!state_binds_required_lcps(state, required_lcps)) return false;
+    return true;
+}
+
+// 在 DP 未成功但没有底层 A* failure 时，补充 topology 覆盖或 LCP 绑定的具体失败原因。
+void append_success_check_failures(
+    RoutingDpState& state,
+    const std::vector<std::string>& required_segments,
+    const std::vector<std::string>& required_lcps) {
+    if (!state.failure_messages.empty()) return;
+    if (required_segments.empty() && state.selected_candidates.empty()) {
+        append_unique(state.failure_messages, "bottom-up DP selected no traceback candidate");
+        return;
+    }
+    for (const auto& key : required_segments) {
+        if (!contains_value(state.covered_wire_segments, key)) {
+            append_unique(state.failure_messages, "required topology segment was not covered: " + key);
+        }
+    }
+    for (const auto& lcp_id : required_lcps) {
+        const auto found = state.lcp_location_by_id.find(lcp_id);
+        if (found == state.lcp_location_by_id.end() || found->second.empty()) {
+            append_unique(state.failure_messages, "LCP has no unique physical candidate binding: " + lcp_id);
+        }
+    }
+}
+
 // 将所有候选按逻辑线段分组。
 std::vector<CandidateGroup> make_candidate_groups(
     const RoutingEvaluationRequest& request,
@@ -218,8 +288,14 @@ std::vector<CandidateGroup> make_candidate_groups(
 // 根据 request.space_nodes 建立 LCP 所属模块查找表。
 std::unordered_map<std::string, std::string> make_lcp_owner_map(const RoutingEvaluationRequest& request) {
     std::unordered_map<std::string, std::string> result;
+    std::unordered_map<std::string, std::string> owner_by_space;
     for (const auto& space : request.space_nodes) {
+        owner_by_space[space.id] = space.owner;
         for (const auto& point : space.linking_points) result[point.id] = space.owner;
+    }
+    for (const auto& point : request.linking_points) {
+        const auto found = owner_by_space.find(point.space_node_id);
+        if (found != owner_by_space.end()) result[point.id] = found->second;
     }
     return result;
 }
@@ -229,6 +305,9 @@ std::unordered_map<std::string, std::string> make_lcp_space_map(const RoutingEva
     std::unordered_map<std::string, std::string> result;
     for (const auto& space : request.space_nodes) {
         for (const auto& point : space.linking_points) result[point.id] = space.id;
+    }
+    for (const auto& point : request.linking_points) {
+        if (!point.space_node_id.empty()) result[point.id] = point.space_node_id;
     }
     return result;
 }
@@ -415,7 +494,14 @@ void apply_segment_transition(
             RoutingDpState failed = state;
             failed.penalty += kMissingSegmentPenalty;
             append_unique(failed.covered_wire_segments, group.key);
-            append_unique(failed.failure_messages, "missing successful A* candidate for " + group.key);
+            std::string message = "missing successful A* candidate for " + group.key;
+            for (const auto& candidate : group.candidates) {
+                if (!candidate_matches_group(candidate, group)) continue;
+                if (!candidate.path.message.empty()) {
+                    message += " [" + candidate.lcp_candidate_id + ": " + candidate.path.message + "]";
+                }
+            }
+            append_unique(failed.failure_messages, message);
             failed.choice_message = "missing " + group.key;
             recompute_state_cost(failed);
             next_states.push_back(std::move(failed));
@@ -495,6 +581,8 @@ RoutingDpResult run_bottom_up_routing_dp(
     collect_post_order(*request.tree.root, nodes, visited, post_order);
     if (post_order.empty()) return result;
 
+    const auto required_segments = required_segment_keys(request);
+    const auto required_lcps = required_lcp_ids(request);
     const auto groups = make_candidate_groups(request, candidates);
     const auto lcp_owner_by_id = make_lcp_owner_map(request);
     const auto lcp_space_by_id = make_lcp_space_map(request);
@@ -546,7 +634,10 @@ RoutingDpResult run_bottom_up_routing_dp(
     if (root_found == result_by_node.end() || root_found->second.states.empty()) return result;
     result.best_state = root_found->second.states.front();
     result.traceback_candidates = traceback_candidates_from_state(result.best_state);
-    result.success = !result.traceback_candidates.empty() && result.best_state.failure_messages.empty();
+    result.success = is_successful_root_state(result.best_state, required_segments, required_lcps);
+    if (!result.success) {
+        append_success_check_failures(result.best_state, required_segments, required_lcps);
+    }
     return result;
 }
 
