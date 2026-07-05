@@ -46,6 +46,30 @@ bool same_line_direction(const GridPoint& first, const GridPoint& second, const 
     return dx1 == dx2 && dy1 == dy2;
 }
 
+// 判断网格点是否落在任一需要切分的矩形内。
+bool point_inside_any_rect(const Grid& grid, const GridPoint& point, const std::vector<Rect>& rects) {
+    const Point xy = grid.grid_to_point(point);
+    for (const auto& rect : rects) {
+        if (contains_point(rect, xy)) return true;
+    }
+    return false;
+}
+
+// 判断继续延长线段是否会跨过 active 内外边界，跨界后应立即切段。
+bool can_extend_without_crossing_split(
+    const Grid& grid,
+    const GridPoint& start,
+    const GridPoint& current,
+    const GridPoint& next,
+    const std::vector<Rect>& split_rects) {
+    if (split_rects.empty()) return true;
+    const bool start_inside = point_inside_any_rect(grid, start, split_rects);
+    const bool current_inside = point_inside_any_rect(grid, current, split_rects);
+    if (start_inside != current_inside) return false;
+    (void)next;
+    return true;
+}
+
 // 判断新线段是否能与上一条同网同层线段合并。
 bool can_merge_with_last(const RouteSegment& last, const RouteSegment& edge) {
     if (last.net != edge.net || last.layer != edge.layer || !same_coord(last.width, edge.width)) return false;
@@ -65,12 +89,13 @@ void append_segment(
     int layer,
     const GridPoint& start,
     const GridPoint& end,
-    double width) {
+    double width,
+    bool allow_merge = true) {
     const auto start_xy = grid.grid_to_point(start);
     const auto end_xy = grid.grid_to_point(end);
     if (same_coord(start_xy.x, end_xy.x) && same_coord(start_xy.y, end_xy.y)) return;
     RouteSegment edge{net, index_to_layer(layer), start_xy.x, start_xy.y, end_xy.x, end_xy.y, width};
-    if (!routes.empty() && can_merge_with_last(routes.back(), edge)) {
+    if (allow_merge && !routes.empty() && can_merge_with_last(routes.back(), edge)) {
         routes.back().x2 = edge.x2;
         routes.back().y2 = edge.y2;
         return;
@@ -96,7 +121,8 @@ Rect route_to_rect(const RouteSegment& route) {
 std::vector<RouteSegment> candidate_to_route_segments(
     const Grid& grid,
     const RouteCandidate& candidate,
-    double width) {
+    double width,
+    const std::vector<Rect>& split_rects) {
     std::vector<RouteSegment> routes;
     const auto points = prune_backtracks(candidate.path.points);
     if (!candidate.path.success || points.size() < 2) return routes;
@@ -109,14 +135,31 @@ std::vector<RouteSegment> candidate_to_route_segments(
             ++cursor;
             continue;
         }
-        while (cursor + 1 < points.size() && same_line_direction(points[cursor - 1], points[cursor], points[cursor + 1])) {
+        while (cursor + 1 < points.size() &&
+               same_line_direction(points[cursor - 1], points[cursor], points[cursor + 1]) &&
+               can_extend_without_crossing_split(grid, points[start], points[cursor], points[cursor + 1], split_rects)) {
             ++cursor;
         }
-        append_segment(routes, grid, candidate.net, points[start].layer, points[start], points[cursor], width);
+        append_segment(
+            routes,
+            grid,
+            candidate.net,
+            points[start].layer,
+            points[start],
+            points[cursor],
+            width,
+            split_rects.empty());
         start = cursor;
         ++cursor;
     }
     return routes;
+}
+
+std::vector<RouteSegment> candidate_to_route_segments(
+    const Grid& grid,
+    const RouteCandidate& candidate,
+    double width) {
+    return candidate_to_route_segments(grid, candidate, width, {});
 }
 
 bool same_layer_short(const RouteSegment& lhs, const RouteSegment& rhs) {

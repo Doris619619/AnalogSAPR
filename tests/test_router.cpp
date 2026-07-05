@@ -9,6 +9,7 @@
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
 #include "sapr/router.hpp"
+#include "sapr/routing/transform.hpp"
 #include "sapr/tree.hpp"
 
 namespace {
@@ -46,6 +47,15 @@ void run_router_tests() {
     require(sapr::placed_pin(module, pin, {"M1", 0, 0, 180, "R180"}) == std::pair<double, double>{3.2, 1.5}, "R180 pin transform failed");
     require(sapr::placed_pin(module, pin, {"M1", 0, 0, 270, "R270"}) == std::pair<double, double>{1.5, 3.2}, "R270 pin transform failed");
     require(sapr::placed_pin(module, pin, {"M1", 0, 0, 0, "MY"}) == std::pair<double, double>{3.2, 1.5}, "MY pin transform failed");
+    const auto routing_r90_pin =
+        sapr::routing::transform_pin_to_global(module, pin, {"M1", 0, 0, 90, "R90"});
+    require(approx(routing_r90_pin.x, 1.5) && approx(routing_r90_pin.y, 0.8), "routing R90 transform should match placement geometry");
+    const auto routing_r90_bbox =
+        sapr::routing::transform_module_bbox_to_global(module, {"M1", 0, 0, 90, "R90"});
+    require(
+        approx(routing_r90_bbox.x1, 0.0) && approx(routing_r90_bbox.y1, 0.0) &&
+            approx(routing_r90_bbox.x2, 3.0) && approx(routing_r90_bbox.y2, 4.0),
+        "routing R90 bbox should stay anchored like placement output");
 
     const auto chain = sapr::make_chain_tree(circuit);
     require(chain.root == std::optional<std::string>{"M1"}, "chain root should be M1");

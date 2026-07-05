@@ -41,8 +41,7 @@ RoutingEvaluation make_evaluation(
     const Circuit& circuit,
     std::optional<routing::RoutingDpResult> bottom_up_dp = std::nullopt) {
     const bool use_dp = bottom_up_dp.has_value() && bottom_up_dp->success;
-    const bool has_dp = bottom_up_dp.has_value();
-    auto global_routing = has_dp
+    auto global_routing = use_dp
                               ? routing::run_global_routing(circuit, context, bottom_up_dp->traceback_candidates)
                               : routing::run_global_routing(circuit, context, candidates);
     RoutingEvaluation evaluation{
@@ -462,7 +461,8 @@ void append_path_segments(
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate) {
     const double width = selected_width_for_candidate(evaluation, candidate);
-    auto converted = routing::candidate_to_route_segments(evaluation.context.grid(), candidate, width);
+    auto converted =
+        routing::candidate_to_route_segments(evaluation.context.grid(), candidate, width, evaluation.context.active_regions());
     routes.insert(routes.end(), converted.begin(), converted.end());
 }
 
@@ -472,7 +472,11 @@ std::vector<RouteSegment> detailed_path_segments(
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate) {
     const double width = detailed_width_for_candidate(circuit, evaluation, candidate);
-    return routing::candidate_to_route_segments(evaluation.context.grid(), candidate, width);
+    return routing::candidate_to_route_segments(
+        evaluation.context.grid(),
+        candidate,
+        width,
+        evaluation.context.active_regions());
 }
 
 // 表示 detailed routing 合法化后实际采用的候选和金属线段。
@@ -625,10 +629,122 @@ Rect route_to_rect(const RouteSegment& route) {
         route.width);
 }
 
-// 判断 route segment 端点是否位于指定 active region 内，允许 pin access corridor 从 active 内出入。
-bool route_endpoint_inside(const RouteSegment& route, const Rect& active) {
-    return routing::contains_point(active, routing::Point{route.x1, route.y1}) ||
-           routing::contains_point(active, routing::Point{route.x2, route.y2});
+// 判断两个连续坐标是否足够接近，用于匹配 pin access 起点。
+bool near_coord(double lhs, double rhs) {
+    return std::abs(lhs - rhs) <= 1e-6;
+}
+
+// 判断 route 端点是否贴近某个真实 pin，避免把任意 active 内端点都当作 pin access。
+bool endpoint_matches_pin(const routing::Point& point, const std::string& layer, const RoutingEvaluationRequest& request) {
+    constexpr double kPinAccessSnapTolerance = 1.0;
+    (void)layer;
+    for (const auto& pin : request.placed_pins) {
+        if (std::abs(point.x - pin.x) <= kPinAccessSnapTolerance &&
+            std::abs(point.y - pin.y) <= kPinAccessSnapTolerance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 判断点是否位于 active 内部，不把边界接触当作内部穿越。
+bool point_strictly_inside(const Rect& active, const routing::Point& point) {
+    const Rect rect = routing::normalize_rect(active);
+    constexpr double kBoundaryTolerance = 0.1;
+    return point.x > rect.x1 + kBoundaryTolerance && point.x < rect.x2 - kBoundaryTolerance &&
+           point.y > rect.y1 + kBoundaryTolerance && point.y < rect.y2 - kBoundaryTolerance;
+}
+
+// 判断点是否位于 active 边界上。
+bool point_on_active_boundary(const Rect& active, const routing::Point& point) {
+    const Rect rect = routing::normalize_rect(active);
+    constexpr double kBoundaryTolerance = 0.1;
+    const bool on_vertical =
+        (std::abs(point.x - rect.x1) <= kBoundaryTolerance || std::abs(point.x - rect.x2) <= kBoundaryTolerance) &&
+        point.y >= rect.y1 - kBoundaryTolerance && point.y <= rect.y2 + kBoundaryTolerance;
+    const bool on_horizontal =
+        (std::abs(point.y - rect.y1) <= kBoundaryTolerance || std::abs(point.y - rect.y2) <= kBoundaryTolerance) &&
+        point.x >= rect.x1 - kBoundaryTolerance && point.x <= rect.x2 + kBoundaryTolerance;
+    return on_vertical || on_horizontal;
+}
+
+// 返回从 active 内端点沿当前线段逃逸到边界的距离；非正交逃逸返回无效值。
+std::optional<double> access_distance_to_boundary(const routing::Point& inside, const routing::Point& outside, const Rect& active) {
+    const Rect rect = routing::normalize_rect(active);
+    if (near_coord(inside.x, outside.x)) {
+        if (outside.y < rect.y1) return inside.y - rect.y1;
+        if (outside.y > rect.y2) return rect.y2 - inside.y;
+        return std::nullopt;
+    }
+    if (near_coord(inside.y, outside.y)) {
+        if (outside.x < rect.x1) return inside.x - rect.x1;
+        if (outside.x > rect.x2) return rect.x2 - inside.x;
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+// 返回 pin 沿当前 access 方向到 active 边界的距离。
+std::optional<double> access_distance_from_pin_to_boundary(
+    const routing::Point& pin,
+    const routing::Point& toward,
+    const Rect& active) {
+    const Rect rect = routing::normalize_rect(active);
+    if (near_coord(pin.x, toward.x)) {
+        if (toward.y < pin.y) return pin.y - rect.y1;
+        if (toward.y > pin.y) return rect.y2 - pin.y;
+        return std::nullopt;
+    }
+    if (near_coord(pin.y, toward.y)) {
+        if (toward.x < pin.x) return pin.x - rect.x1;
+        if (toward.x > pin.x) return rect.x2 - pin.x;
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+// 只允许真实 pin 附近的一小段 active 逃逸走线，禁止用 pin 端点豁免长距离横穿 active。
+bool route_is_local_pin_access(
+    const RoutingEvaluationRequest& request,
+    const RouteSegment& route,
+    const Rect& active) {
+    const Rect rect = routing::normalize_rect(active);
+    const routing::Point first{route.x1, route.y1};
+    const routing::Point second{route.x2, route.y2};
+    const bool first_inside = routing::contains_point(rect, first);
+    const bool second_inside = routing::contains_point(rect, second);
+    const bool first_strict_inside = point_strictly_inside(rect, first);
+    const bool second_strict_inside = point_strictly_inside(rect, second);
+    const bool first_on_boundary = point_on_active_boundary(rect, first);
+    const bool second_on_boundary = point_on_active_boundary(rect, second);
+    if (!first_strict_inside && !second_strict_inside && (first_on_boundary != second_on_boundary)) return true;
+
+    const double max_access_length = std::min(2.0, 0.6 * std::min(routing::rect_width(rect), routing::rect_height(rect)));
+    if (first_inside != second_inside) {
+        const routing::Point inside = first_inside ? first : second;
+        const routing::Point outside = first_inside ? second : first;
+        if (!endpoint_matches_pin(inside, route.layer, request)) return false;
+
+        const auto distance = access_distance_to_boundary(inside, outside, rect);
+        if (!distance.has_value() || *distance < -1e-6) return false;
+        return *distance <= max_access_length + 1e-6;
+    }
+    if (first_inside && second_inside) {
+        const double route_length = std::abs(first.x - second.x) + std::abs(first.y - second.y);
+        if ((endpoint_matches_pin(first, route.layer, request) || endpoint_matches_pin(second, route.layer, request)) &&
+            route_length <= max_access_length + 1e-6) {
+            return true;
+        }
+        if (endpoint_matches_pin(first, route.layer, request)) {
+            const auto distance = access_distance_from_pin_to_boundary(first, second, rect);
+            return distance.has_value() && *distance <= max_access_length + 1e-6;
+        }
+        if (endpoint_matches_pin(second, route.layer, request)) {
+            const auto distance = access_distance_from_pin_to_boundary(second, first, rect);
+            return distance.has_value() && *distance <= max_access_length + 1e-6;
+        }
+    }
+    return false;
 }
 
 // 收集 detailed route 穿越 active region 的基础 DRC 违反线段索引。
@@ -641,7 +757,7 @@ std::vector<std::size_t> collect_active_region_crossings(
         const Rect metal = route_to_rect(route);
         for (const auto& active : request.active_region_blockers) {
             if (!routing::intersects(metal, active)) continue;
-            if (route_endpoint_inside(route, active)) continue;
+            if (route_is_local_pin_access(request, route, active)) continue;
             violations.push_back(index);
             break;
         }
@@ -760,7 +876,6 @@ std::vector<routing::RouteCandidate> selected_candidates_for_detailed_routing(
     const RoutingEvaluation& evaluation) {
     if (evaluation.bottom_up_dp.has_value()) {
         if (evaluation.bottom_up_dp->success) return evaluation.bottom_up_dp->traceback_candidates;
-        return {};
     }
     std::vector<routing::RouteCandidate> candidates;
     for (const auto& net_route : evaluation.global_routing.net_routes) {
@@ -886,10 +1001,11 @@ RoutingEvaluation evaluate_routing(
     const Circuit& circuit,
     const RoutingEvaluationRequest& request) {
     routing::RoutingContext context(circuit, request.placements, routing::GridConfig{}, lcp_routing_points(request));
-    auto candidates = routing::generate_route_candidates(circuit, context);
-    for (auto& candidate : candidates) {
+    auto direct_candidates = routing::generate_route_candidates(circuit, context);
+    for (auto& candidate : direct_candidates) {
         annotate_candidate(circuit, candidate, 50000.0, 50000.0);
     }
+    auto candidates = direct_candidates;
     const auto lcp_nets = nets_with_lcp_topology(request);
     if (!lcp_nets.empty()) {
         candidates.erase(
@@ -908,6 +1024,9 @@ RoutingEvaluation evaluate_routing(
         return make_evaluation(std::move(context), std::move(candidates), circuit);
     }
     auto bottom_up_dp = routing::run_bottom_up_routing_dp(circuit, request, context, candidates);
+    if (!bottom_up_dp.success) {
+        return make_evaluation(std::move(context), std::move(direct_candidates), circuit, std::move(bottom_up_dp));
+    }
     return make_evaluation(std::move(context), std::move(candidates), circuit, std::move(bottom_up_dp));
 }
 
@@ -1017,7 +1136,10 @@ DetailedRoutingResult run_detailed_routing(
     result.design_rule_violations = static_cast<int>(drc_routes.size() + short_pairs.size());
     for (const auto route_index : drc_routes) {
         const auto& route = result.routes[route_index];
-        const std::string message = route.net + ":" + route.layer + ":" + std::to_string(route_index);
+        const std::string message =
+            route.net + ":" + route.layer + ":" + std::to_string(route_index) +
+            " (" + std::to_string(route.x1) + "," + std::to_string(route.y1) + ")->(" +
+            std::to_string(route.x2) + "," + std::to_string(route.y2) + ")";
         result.report.design_rule_segments.push_back(message);
         result.report.warnings.push_back("active-region DRC " + message);
     }
@@ -1058,7 +1180,7 @@ DetailedRoutingResult run_detailed_routing(
     result.detailed_cost =
         detailed_metrics.wirelength + 3.0 * static_cast<double>(detailed_metrics.bend_count) +
         0.2 * static_cast<double>(detailed_metrics.via_count) + result.detailed_routing_penalty;
-    result.used_global_fallback = false;
+    result.used_global_fallback = evaluation.bottom_up_dp.has_value() && !evaluation.bottom_up_dp->success;
     return result;
 }
 

@@ -51,15 +51,6 @@ GridConfig adapt_grid_config_for_layout(const Circuit& circuit, const GridConfig
     return adapted;
 }
 
-// 判断输入的 active 是否只是完整 bbox；这种常见于 capacitor 占位，不应当当作 MOS active blocker。
-bool active_is_full_module_bbox(const Module& module) {
-    constexpr double kTolerance = 1e-9;
-    return std::abs(module.active.x1) <= kTolerance &&
-           std::abs(module.active.y1) <= kTolerance &&
-           std::abs(module.active.x2 - module.width) <= kTolerance &&
-           std::abs(module.active.y2 - module.height) <= kTolerance;
-}
-
 void add_access_line(ObstacleMap& obstacles, const Grid& grid, GridPoint start, GridPoint end) {
     const int dx = (end.ix > start.ix) ? 1 : (end.ix < start.ix ? -1 : 0);
     const int dy = (end.iy > start.iy) ? 1 : (end.iy < start.iy ? -1 : 0);
@@ -72,6 +63,31 @@ void add_access_line(ObstacleMap& obstacles, const Grid& grid, GridPoint start, 
         current.ix += dx;
         current.iy += dy;
     }
+}
+
+// 选择 pin 到 active 外最近边界的逃逸目标点。
+Point pin_access_target(const Point& pin_location, const Rect& active, double escape) {
+    const Rect rect = normalize_rect(active);
+    const double left = std::abs(pin_location.x - rect.x1);
+    const double right = std::abs(rect.x2 - pin_location.x);
+    const double bottom = std::abs(pin_location.y - rect.y1);
+    const double top = std::abs(rect.y2 - pin_location.y);
+
+    struct AccessCandidate {
+        double distance{};
+        Point target;
+    };
+    const std::vector<AccessCandidate> candidates{
+        {left, Point{rect.x1 - escape, pin_location.y}},
+        {right, Point{rect.x2 + escape, pin_location.y}},
+        {bottom, Point{pin_location.x, rect.y1 - escape}},
+        {top, Point{pin_location.x, rect.y2 + escape}},
+    };
+    return std::min_element(
+               candidates.begin(),
+               candidates.end(),
+               [](const auto& lhs, const auto& rhs) { return lhs.distance < rhs.distance; })
+        ->target;
 }
 
 // 为 pin 选择离 active region 最近的一侧，并放行一条到 active 外的短 access corridor。
@@ -87,35 +103,7 @@ void add_pin_access(
     }
 
     const double escape = 2.0 * grid.step();
-    const double left = std::abs(pin.location.x - rect.x1);
-    const double right = std::abs(rect.x2 - pin.location.x);
-    const double bottom = std::abs(pin.location.y - rect.y1);
-    const double top = std::abs(rect.y2 - pin.location.y);
-
-    struct AccessCandidate {
-        double distance{};
-        Point target;
-    };
-    const std::vector<AccessCandidate> candidates{
-        {left, Point{rect.x1 - escape, pin.location.y}},
-        {right, Point{rect.x2 + escape, pin.location.y}},
-        {bottom, Point{pin.location.x, rect.y1 - escape}},
-        {top, Point{pin.location.x, rect.y2 + escape}},
-    };
-    Point target = pin.location;
-    double best_distance = std::numeric_limits<double>::infinity();
-    for (const auto& candidate : candidates) {
-        const auto snapped = grid.snap_to_grid(candidate.target, pin.layer);
-        if (!grid.in_bounds(snapped)) continue;
-        if (candidate.distance < best_distance) {
-            best_distance = candidate.distance;
-            target = candidate.target;
-        }
-    }
-    if (!std::isfinite(best_distance)) {
-        target.x = std::clamp(pin.location.x, grid.min_x(), grid.max_x());
-        target.y = std::clamp(pin.location.y, grid.min_y(), grid.max_y());
-    }
+    const Point target = pin_access_target(pin.location, rect, escape);
     add_access_line(obstacles, grid, start, grid.snap_to_grid(target, pin.layer));
 }
 
@@ -147,10 +135,9 @@ RoutingContext::RoutingContext(
         const Rect active = transform_active_to_global(module, placement);
         include_rect(bbox, min_x, min_y, max_x, max_y, has_bounds);
         include_rect(active, min_x, min_y, max_x, max_y, has_bounds);
-        if (!active_is_full_module_bbox(module)) {
-            active_regions.push_back({module_id, active});
-            active_by_module[module_id] = active;
-        }
+        active_regions.push_back({module_id, active});
+        active_regions_.push_back(active);
+        active_by_module[module_id] = active;
     }
 
     for (const auto& [key, pin] : circuit_.pins) {
@@ -181,6 +168,19 @@ RoutingContext::RoutingContext(
 
     for (const auto& point : extra_routing_points) {
         include_point(point, min_x, min_y, max_x, max_y, has_bounds);
+    }
+
+    for (const auto& [_, global_pin] : global_pins_) {
+        const auto active_it = active_by_module.find(global_pin.module);
+        if (active_it != active_by_module.end() && contains_point(active_it->second, global_pin.location)) {
+            include_point(
+                pin_access_target(global_pin.location, active_it->second, 2.0 * config.step),
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                has_bounds);
+        }
     }
 
     if (!has_bounds) {
@@ -220,6 +220,10 @@ const Grid& RoutingContext::grid() const {
 // 返回障碍物地图。
 const ObstacleMap& RoutingContext::obstacles() const {
     return obstacles_;
+}
+
+const std::vector<Rect>& RoutingContext::active_regions() const {
+    return active_regions_;
 }
 
 // 返回全局 pin 查询表。

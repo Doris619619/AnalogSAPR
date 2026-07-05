@@ -10,6 +10,7 @@
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
 #include "sapr/routing/dp_router.hpp"
+#include "sapr/routing/geometry.hpp"
 #include "sapr/routing/global_router.hpp"
 #include "sapr/routing/grid.hpp"
 #include "sapr/routing/path_geometry.hpp"
@@ -36,6 +37,47 @@ sapr::Circuit make_active_region_test_circuit() {
     circuit.nets.emplace("N", sapr::Net{"N", sapr::Priority::Normal, {"M.A", "M.B"}});
     circuit.net_order.push_back("N");
     return circuit;
+}
+
+// 构造 active 覆盖完整 bbox 的最小电路，用于验证 full-bbox active 仍然是布线障碍。
+sapr::Circuit make_full_active_region_test_circuit() {
+    sapr::Circuit circuit;
+    circuit.modules.emplace("M", sapr::Module{"M", 10.0, 10.0, sapr::Rect{0.0, 0.0, 10.0, 10.0}, 0.0, 0.0, ""});
+    circuit.module_order.push_back("M");
+    circuit.pins.emplace("M.A", sapr::Pin{"M", "A", 0.0, 5.0, "M1"});
+    circuit.pins.emplace("M.B", sapr::Pin{"M", "B", 10.0, 5.0, "M1"});
+    circuit.pin_order = {"M.A", "M.B"};
+    circuit.nets.emplace("N", sapr::Net{"N", sapr::Priority::Normal, {"M.A", "M.B"}});
+    circuit.net_order.push_back("N");
+    return circuit;
+}
+
+// 构造 pin 位于左下边界附近的 full-active 电路，用于验证 grid 会纳入向外逃逸空间。
+sapr::Circuit make_boundary_access_test_circuit() {
+    sapr::Circuit circuit;
+    circuit.modules.emplace("M", sapr::Module{"M", 10.0, 10.0, sapr::Rect{0.0, 0.0, 10.0, 10.0}, 0.0, 0.0, ""});
+    circuit.module_order.push_back("M");
+    circuit.pins.emplace("M.A", sapr::Pin{"M", "A", 5.0, 0.1, "M1"});
+    circuit.pins.emplace("M.B", sapr::Pin{"M", "B", 9.9, 5.0, "M1"});
+    circuit.pin_order = {"M.A", "M.B"};
+    circuit.nets.emplace("N", sapr::Net{"N", sapr::Priority::Normal, {"M.A", "M.B"}});
+    circuit.net_order.push_back("N");
+    return circuit;
+}
+
+// 判断 route 金属是否穿过 active 的核心区域，排除边缘 pin access 的短接入段。
+bool route_crosses_active_core(const sapr::RouteSegment& route, const sapr::Rect& active) {
+    const sapr::Rect normalized = sapr::routing::normalize_rect(active);
+    const sapr::Rect core{
+        normalized.x1 + 2.0,
+        normalized.y1 + 2.0,
+        normalized.x2 - 2.0,
+        normalized.y2 - 2.0,
+    };
+    const sapr::Rect metal = sapr::routing::segment_to_rect(
+        sapr::routing::Segment{sapr::routing::Point{route.x1, route.y1}, sapr::routing::Point{route.x2, route.y2}},
+        route.width);
+    return sapr::routing::intersects(metal, core);
 }
 
 // 构造一条水平 selected candidate，让 detailed routing 只测试 DRC 统计逻辑。
@@ -675,6 +717,38 @@ void run_routing_evaluator_tests() {
     auto active_crossing_eval = make_line_evaluation(drc_circuit, drc_placements, 5.0);
     const auto active_crossing_detail = sapr::run_detailed_routing(drc_circuit, drc_request, active_crossing_eval);
     require(active_crossing_detail.design_rule_violations > 0, "active crossing route should count as DRC");
+
+    const auto full_active_circuit = make_full_active_region_test_circuit();
+    const std::unordered_map<std::string, sapr::Placement> full_active_placements{
+        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+    };
+    const auto full_active_eval = sapr::evaluate_routing(full_active_circuit, full_active_placements);
+    const auto full_active_segments = sapr::selected_candidates_to_segments(full_active_eval);
+    require(!full_active_segments.empty(), "full-bbox active route should still find a path through pin access");
+    const auto full_active_rect =
+        sapr::routing::transform_active_to_global(full_active_circuit.modules.at("M"), full_active_placements.at("M"));
+    for (const auto& segment : full_active_segments) {
+        require(
+            !route_crosses_active_core(segment, full_active_rect),
+            "full-bbox active should block long routes through the module core");
+    }
+
+    const auto boundary_circuit = make_boundary_access_test_circuit();
+    const std::unordered_map<std::string, sapr::Placement> boundary_placements{
+        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+    };
+    const sapr::routing::RoutingContext boundary_context(boundary_circuit, boundary_placements);
+    require(boundary_context.grid().min_y() < 0.0, "bottom pin access should expand routing grid below the layout");
+    const auto boundary_eval = sapr::evaluate_routing(boundary_circuit, boundary_placements);
+    const auto boundary_segments = sapr::selected_candidates_to_segments(boundary_eval);
+    require(!boundary_segments.empty(), "boundary pin access should still find a routed path");
+    const auto boundary_active_rect =
+        sapr::routing::transform_active_to_global(boundary_circuit.modules.at("M"), boundary_placements.at("M"));
+    for (const auto& segment : boundary_segments) {
+        require(
+            !route_crosses_active_core(segment, boundary_active_rect),
+            "boundary pin access should not become a long route through active core");
+    }
 
     const auto priority_circuit = make_priority_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> priority_placements{

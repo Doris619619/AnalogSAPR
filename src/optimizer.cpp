@@ -239,15 +239,6 @@ Rect placed_active_rect(const Module& module, const Placement& placement) {
 }
 
 // 填充 routing request 中面向 DP/A* 的全局 pin、blocker 和 LCP 候选位置。
-// 判断 active 是否等于完整模块 bbox；这类 capacitor 占位不作为 active crossing DRC blocker。
-bool active_is_full_module_bbox(const Module& module) {
-    constexpr double kTolerance = 1e-9;
-    return std::abs(module.active.x1) <= kTolerance &&
-           std::abs(module.active.y1) <= kTolerance &&
-           std::abs(module.active.x2 - module.width) <= kTolerance &&
-           std::abs(module.active.y2 - module.height) <= kTolerance;
-}
-
 void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& request) {
     std::unordered_map<std::string, std::pair<double, double>> module_centers;
     std::unordered_map<std::string, Rect> module_boxes;
@@ -256,9 +247,7 @@ void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& 
         const auto size = placed_size(circuit.modules.at(module_id), placement);
         module_centers[module_id] = {placement.x + size.first / 2.0, placement.y + size.second / 2.0};
         module_boxes[module_id] = {placement.x, placement.y, placement.x + size.first, placement.y + size.second};
-        if (!active_is_full_module_bbox(circuit.modules.at(module_id))) {
-            request.active_region_blockers.push_back(placed_active_rect(circuit.modules.at(module_id), placement));
-        }
+        request.active_region_blockers.push_back(placed_active_rect(circuit.modules.at(module_id), placement));
     }
     for (const auto& key : circuit.pin_order) {
         const auto& pin = circuit.pins.at(key);
@@ -279,13 +268,17 @@ void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& 
             point.location_candidates.clear();
             if (space.kind == SpaceNodeKind::Top) {
                 point.location_candidates.push_back({center.first, box.y2 + offset, point.id + ":top"});
+                point.location_candidates.push_back({box.x1 - offset, box.y2 + offset, point.id + ":top_left"});
+                point.location_candidates.push_back({box.x2 + offset, box.y2 + offset, point.id + ":top_right"});
             } else if (space.kind == SpaceNodeKind::Cluster) {
                 point.location_candidates.push_back({box.x2 + offset / 2.0, center.second, point.id + ":axis"});
+                point.location_candidates.push_back({box.x2 + offset, center.second, point.id + ":right_axis"});
+                point.location_candidates.push_back({box.x1 - offset, center.second, point.id + ":left_axis"});
             } else {
                 point.location_candidates.push_back({box.x2 + offset, center.second, point.id + ":right"});
+                point.location_candidates.push_back({box.x2 + offset, box.y2 + offset, point.id + ":right_top"});
+                point.location_candidates.push_back({box.x2 + offset, box.y1 - offset, point.id + ":right_bottom"});
             }
-            point.location_candidates.push_back({box.x2 + offset / 2.0, box.y2 + offset / 2.0, point.id + ":center"});
-            point.location_candidates.push_back({center.first, box.y2 + offset, point.id + ":pin_projection"});
             if (point.segments.empty()) continue;
             const std::string net_name = point.segments.front().net;
             const std::string logical_id = net_name + ":lcp";
@@ -342,6 +335,16 @@ double compute_phi_cost(Metrics& metrics, const Metrics& base, const SolverConfi
 }
 
 // 评价一棵增强 B*-tree 对应的候选状态。
+// 判断当前候选是否已经得到可直接输出的合法 detailed routing。
+bool has_clean_detailed_solution(const RoutingFeedback& feedback) {
+    const auto& metrics = feedback.metrics;
+    return !feedback.routes.empty() &&
+           metrics.penalty <= 1e-9 &&
+           metrics.design_rule_violations == 0 &&
+           metrics.routing_failures == 0 &&
+           metrics.traceback_failures == 0;
+}
+
 bool feedback_expands_space(
     const RoutingEvaluationRequest& request,
     const RoutingFeedback& feedback,
@@ -529,9 +532,6 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     const auto routing_evaluation = evaluate_routing(circuit, request);
     const auto detailed = run_detailed_routing(circuit, request, routing_evaluation);
     feedback.routes = detailed.routes;
-    if (feedback.routes.empty() && routing_evaluation.failed_nets > 0) {
-        feedback.routes = selected_candidates_to_segments(routing_evaluation);
-    }
     Solution solution;
     solution.placements = request.placements;
     solution.placement_order = request.placement_order;
@@ -551,7 +551,8 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.metrics.flow_penalty = std::max(routing_evaluation.global_routing.flow_penalty, detailed.flow_penalty);
     feedback.metrics.current_density_penalty =
         std::max(routing_evaluation.global_routing.current_density_penalty, detailed.current_density_penalty);
-    feedback.metrics.coupling_penalty = std::max(routing_evaluation.global_routing.coupling_penalty, detailed.coupling_penalty);
+    feedback.metrics.coupling_penalty =
+        detailed.routes.empty() ? routing_evaluation.global_routing.coupling_penalty : detailed.coupling_penalty;
     feedback.metrics.routing_failure_penalty =
         routing_evaluation.global_routing.routing_failure_penalty + detailed.routing_failure_penalty;
     feedback.metrics.detailed_routing_penalty = detailed.design_rule_penalty + detailed.routing_failure_penalty;
@@ -614,6 +615,9 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     const Metrics base_metrics = current.feedback.metrics;
     current.cost = compute_phi_cost(current.feedback.metrics, base_metrics, config);
     CandidateState best = current;
+    if (has_clean_detailed_solution(best.feedback)) {
+        return make_solution(best);
+    }
 
     std::mt19937 rng(config.seed);
     std::uniform_real_distribution<double> probability(0.0, 1.0);
@@ -626,6 +630,9 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
         const bool accept = delta <= 0.0 || probability(rng) < std::exp(-delta / std::max(temperature, 1e-9));
         if (accept) current = std::move(next);
         if (current.cost < best.cost) best = current;
+        if (has_clean_detailed_solution(best.feedback)) {
+            break;
+        }
         temperature *= config.cooling_rate;
     }
 

@@ -44,6 +44,8 @@ public:
     [[nodiscard]] const Grid& grid() const;
     // 返回障碍物地图。
     [[nodiscard]] const ObstacleMap& obstacles() const;
+    // 返回全局 active blocker 矩形，用于 detailed routing 切分 pin access 线段。
+    [[nodiscard]] const std::vector<Rect>& active_regions() const;
     // 返回所有成功转换的全局 pin。
     [[nodiscard]] const std::unordered_map<std::string, GlobalPin>& global_pins() const;
     // 返回指定 net 的默认线宽。
@@ -55,6 +57,7 @@ private:
     const Circuit& circuit_;
     std::unique_ptr<Grid> grid_;
     ObstacleMap obstacles_;
+    std::vector<Rect> active_regions_;
     std::unordered_map<std::string, GlobalPin> global_pins_;
     std::vector<std::string> warnings_;
 };
