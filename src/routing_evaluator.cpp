@@ -583,6 +583,20 @@ std::vector<std::size_t> collect_active_region_crossings(
 }
 
 // 判断两条同层异网线段是否存在近距离平行耦合风险。
+// 收集同层异网金属重叠，重叠代表真实短路，不能只作为 coupling 风险处理。
+std::vector<std::pair<std::size_t, std::size_t>> collect_same_layer_shorts(const std::vector<RouteSegment>& routes) {
+    std::vector<std::pair<std::size_t, std::size_t>> findings;
+    for (std::size_t i = 0; i < routes.size(); ++i) {
+        for (std::size_t j = i + 1; j < routes.size(); ++j) {
+            if (routes[i].net == routes[j].net || routes[i].layer != routes[j].layer) continue;
+            if (routing::intersects(route_to_rect(routes[i]), route_to_rect(routes[j]))) {
+                findings.push_back({i, j});
+            }
+        }
+    }
+    return findings;
+}
+
 bool near_parallel_coupling(const RouteSegment& lhs, const RouteSegment& rhs, double spacing) {
     if (lhs.net == rhs.net || lhs.layer != rhs.layer) return false;
     const bool lhs_horizontal = route_is_horizontal(lhs);
@@ -890,11 +904,19 @@ DetailedRoutingResult run_detailed_routing(
     }
     apply_detailed_flow_check(circuit, selected_candidates, result);
     const auto drc_routes = collect_active_region_crossings(request, result.routes);
-    result.design_rule_violations = static_cast<int>(drc_routes.size());
+    const auto short_pairs = collect_same_layer_shorts(result.routes);
+    result.design_rule_violations = static_cast<int>(drc_routes.size() + short_pairs.size());
     for (const auto route_index : drc_routes) {
         const auto& route = result.routes[route_index];
         result.report.design_rule_segments.push_back(
             route.net + ":" + route.layer + ":" + std::to_string(route_index));
+    }
+    for (const auto& [left_index, right_index] : short_pairs) {
+        const auto& left = result.routes[left_index];
+        const auto& right = result.routes[right_index];
+        result.report.design_rule_segments.push_back(
+            left.net + "<->" + right.net + ":" + left.layer + ":" +
+            std::to_string(left_index) + "," + std::to_string(right_index));
     }
     result.design_rule_penalty = 100000.0 * static_cast<double>(result.design_rule_violations);
     const auto coupling_pairs = collect_detailed_coupling_findings(result.routes);

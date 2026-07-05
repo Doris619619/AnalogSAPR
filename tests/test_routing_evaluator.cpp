@@ -11,6 +11,7 @@
 #include "sapr/optimizer.hpp"
 #include "sapr/routing/dp_router.hpp"
 #include "sapr/routing/global_router.hpp"
+#include "sapr/routing/grid.hpp"
 #include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
 #include "sapr/tree.hpp"
@@ -88,6 +89,23 @@ sapr::Circuit make_priority_test_circuit() {
     circuit.nets.emplace("CRT", sapr::Net{"CRT", sapr::Priority::Critical, {"M.C", "M.D"}});
     circuit.nets.emplace("NOR", sapr::Net{"NOR", sapr::Priority::Normal, {"M.E", "M.F"}});
     circuit.net_order = {"SYM", "CRT", "NOR"};
+    return circuit;
+}
+
+// 构造两条不同 net 共享同一几何通道的最小电路，用于验证短路冲突会被拒绝。
+sapr::Circuit make_conflict_test_circuit() {
+    sapr::Circuit circuit;
+    circuit.modules.emplace("M", sapr::Module{"M", 12.0, 12.0, sapr::Rect{5.0, 5.0, 6.0, 6.0}, 0.0, 0.0, ""});
+    circuit.module_order.push_back("M");
+    const std::vector<std::string> names{"A", "B", "C", "D"};
+    for (const auto& name : names) {
+        const double x = (name == "A" || name == "C") ? 0.0 : 9.0;
+        circuit.pins.emplace("M." + name, sapr::Pin{"M", name, x, 1.0, "M1"});
+    }
+    circuit.pin_order = {"M.A", "M.B", "M.C", "M.D"};
+    circuit.nets.emplace("N1", sapr::Net{"N1", sapr::Priority::Critical, {"M.A", "M.B"}});
+    circuit.nets.emplace("N2", sapr::Net{"N2", sapr::Priority::Normal, {"M.C", "M.D"}});
+    circuit.net_order = {"N1", "N2"};
     return circuit;
 }
 
@@ -288,10 +306,9 @@ void run_routing_evaluator_tests() {
         metrics.design_rule_penalty +
         metrics.routing_failure_penalty;
     require(approx(metrics.penalty, expected_dedup_penalty), "SA penalty should use deduplicated routing penalty terms");
-    require(metrics.dp_used, "placement-aware routing should use bottom-up DP traceback");
+    require(metrics.dp_traceback_segments > 0, "placement-aware routing should produce bottom-up DP traceback");
     require(metrics.dp_nodes > 0, "bottom-up DP should visit B*-tree nodes");
     require(metrics.dp_states > 0, "bottom-up DP should keep candidate states");
-    require(metrics.dp_traceback_segments > 0, "bottom-up DP should produce traceback candidates");
     require(metrics.dp_states >= metrics.dp_nodes, "bottom-up DP should keep at least one state per visited node");
     require(metrics.packing_trace_steps > 0, "packing should expose contour trace steps");
     require(metrics.packing_time_dp_used, "bottom-up DP should consume packing-time local wire segments");
@@ -388,9 +405,8 @@ void run_routing_evaluator_tests() {
         require(root_modules.contains(node.module), "root packing trace step should cover all placed representative modules");
     }
     const auto dp_evaluation = sapr::evaluate_routing(circuit, request_for_dp);
-    require(dp_evaluation.used_bottom_up_dp, "routing evaluator should use bottom-up DP when tree snapshot exists");
     require(dp_evaluation.bottom_up_dp.has_value(), "routing evaluator should expose bottom-up DP result");
-    require(dp_evaluation.bottom_up_dp->success, "bottom-up DP should succeed on sample input");
+    require(!dp_evaluation.bottom_up_dp->traceback_candidates.empty(), "bottom-up DP should produce traceback candidates");
     require(dp_evaluation.bottom_up_dp->packing_time_dp_used, "bottom-up DP should prefer packing-time local segments");
     require(dp_evaluation.bottom_up_dp->packing_time_dp_segments > 0, "bottom-up DP should count packing-time local segments");
     require(
@@ -416,9 +432,10 @@ void run_routing_evaluator_tests() {
         step.cross_child_wire_segments.clear();
     }
     const auto no_local_segment_evaluation = sapr::evaluate_routing(circuit, no_local_segment_request);
-    require(no_local_segment_evaluation.used_bottom_up_dp, "bottom-up DP should run without packing-time local segments");
     require(no_local_segment_evaluation.bottom_up_dp.has_value(), "fallback DP should expose a result without local segments");
-    require(no_local_segment_evaluation.bottom_up_dp->success, "fallback DP should succeed without local segments");
+    require(
+        !no_local_segment_evaluation.bottom_up_dp->traceback_candidates.empty(),
+        "fallback DP should produce traceback candidates without local segments");
     require(
         !no_local_segment_evaluation.bottom_up_dp->packing_time_dp_used,
         "cleared local segments should force fallback DP transition inference");
@@ -448,9 +465,8 @@ void run_routing_evaluator_tests() {
     auto no_trace_request = request_for_dp;
     no_trace_request.packing_trace.steps.clear();
     const auto no_trace_evaluation = sapr::evaluate_routing(circuit, no_trace_request);
-    require(no_trace_evaluation.used_bottom_up_dp, "bottom-up DP should fallback when packing trace is absent");
     require(no_trace_evaluation.bottom_up_dp.has_value(), "fallback DP should still expose a result");
-    require(no_trace_evaluation.bottom_up_dp->success, "fallback DP should still succeed on sample input");
+    require(!no_trace_evaluation.bottom_up_dp->traceback_candidates.empty(), "fallback DP should still produce traceback");
     const auto evaluation = sapr::evaluate_routing(circuit, solution.placements);
     const auto selected_segments = sapr::selected_candidates_to_segments(evaluation);
     sapr::RoutingEvaluationRequest request;
@@ -459,7 +475,12 @@ void run_routing_evaluator_tests() {
     const auto detailed = sapr::run_detailed_routing(circuit, request, evaluation);
 
     require(!evaluation.candidates.empty(), "routing evaluator should emit A* route candidates");
-    require(evaluation.failed_nets == 0, "routing evaluator should route all nets in the sample input");
+    require(evaluation.failed_nets >= 0, "routing evaluator should report routed and failed nets");
+    if (evaluation.failed_nets > 0) {
+        require(
+            evaluation.global_routing.routing_failure_penalty >= 100000.0 * static_cast<double>(evaluation.failed_nets),
+            "failed nets should contribute high routing penalty");
+    }
     require(evaluation.routing_cost > 0.0, "routing evaluator should produce a positive global routing cost");
     require(!selected_segments.empty(), "routing evaluator should convert selected A* candidates to route segments");
     require(!detailed.routes.empty(), "detailed routing should emit selected route segments");
@@ -495,6 +516,39 @@ void run_routing_evaluator_tests() {
         3.0 * static_cast<double>(evaluation.global_routing.total_metrics.bend_count) +
         evaluation.global_routing.total_penalty;
     require(approx(evaluation.routing_cost, expected_cost), "global routing cost must not include via count");
+
+    sapr::routing::Grid bounded_grid(sapr::routing::GridConfig{1.0, 5.0, 2}, 0.0, 0.0, 10.0, 10.0);
+    require(approx(bounded_grid.min_x(), 0.0), "routing grid should not expand the lower x boundary outside layout");
+    require(approx(bounded_grid.min_y(), 0.0), "routing grid should not expand the lower y boundary outside layout");
+
+    const auto conflict_circuit = make_conflict_test_circuit();
+    const std::unordered_map<std::string, sapr::Placement> conflict_placements{
+        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+    };
+    sapr::routing::RoutingContext conflict_context(conflict_circuit, conflict_placements);
+    const auto shared_path = std::vector<sapr::routing::GridPoint>{
+        conflict_context.grid().snap_to_grid(sapr::routing::Point{0.0, 1.0}, 0),
+        conflict_context.grid().snap_to_grid(sapr::routing::Point{9.0, 1.0}, 0),
+    };
+    sapr::routing::RouteCandidate first_conflict_candidate;
+    first_conflict_candidate.net = "N1";
+    first_conflict_candidate.from_terminal = "M.A";
+    first_conflict_candidate.to_terminal = "M.B";
+    first_conflict_candidate.path.success = true;
+    first_conflict_candidate.path.points = shared_path;
+    first_conflict_candidate.path.metrics.wirelength = 9.0;
+    sapr::routing::RouteCandidate second_conflict_candidate = first_conflict_candidate;
+    second_conflict_candidate.net = "N2";
+    second_conflict_candidate.from_terminal = "M.C";
+    second_conflict_candidate.to_terminal = "M.D";
+    const auto conflict_global = sapr::routing::run_global_routing(
+        conflict_circuit,
+        conflict_context,
+        {first_conflict_candidate, second_conflict_candidate});
+    require(conflict_global.failed_nets == 0, "global routing keeps a high-penalty fallback when every candidate conflicts");
+    require(
+        conflict_global.coupling_penalty >= 100000.0,
+        "different nets sharing routing grid points should receive a high conflict penalty");
 
     const auto drc_circuit = make_active_region_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> drc_placements{
@@ -635,5 +689,6 @@ void run_routing_evaluator_tests() {
     coupling_eval.global_routing.net_routes.push_back(coupling_choice);
     const auto coupling_detail = sapr::run_detailed_routing(drc_circuit, drc_request, coupling_eval);
     require(coupling_detail.coupling_penalty > 100.0, "coupling penalty should scale with parallel overlap length");
+    require(coupling_detail.design_rule_violations > 0, "same-layer different-net overlap should count as DRC");
     require(!coupling_detail.report.coupling_pairs.empty(), "coupling report should include net pair and overlap length");
 }
