@@ -68,4 +68,15 @@ if(BUILD_TESTING)
     set_tests_properties(sapr_validate PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     add_test(NAME sapr_run COMMAND sapr run --input ../input --output cli-output --sa-iterations 5)
     set_tests_properties(sapr_run PROPERTIES WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+    add_test(NAME sapr_run_outputs COMMAND ${CMAKE_COMMAND}
+        -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/cli-output
+        -DPNG_NAME=cli-output_layout.png
+        -P ${CMAKE_SOURCE_DIR}/tests/verify_cli_output.cmake
+    )
+    set_tests_properties(sapr_run_outputs PROPERTIES DEPENDS sapr_run)
+    add_test(NAME sapr_render_smoke COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DBINARY_DIR=${CMAKE_BINARY_DIR}
+        -P ${CMAKE_SOURCE_DIR}/tests/render_smoke.cmake
+    )
 endif()

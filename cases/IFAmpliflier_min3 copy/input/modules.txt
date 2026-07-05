@@ -1,0 +1,6 @@
+# IFAmpliflier_min3
+# id          w       h       active(x1,y1,x2,y2)         # info
+
+XC18         14.960  10.420  0.000,0.000,14.960,10.420 # capacitor cfmom_2t_CDNS_756543489853 ox=0.000 oy=0.000
+XC19         14.960  10.420  0.000,0.000,14.960,10.420 # capacitor cfmom_2t_CDNS_756543489853 ox=0.000 oy=0.000
+XC20         14.960  10.420  0.000,0.000,14.960,10.420 # capacitor cfmom_2t_CDNS_756543489853 ox=0.000 oy=0.000

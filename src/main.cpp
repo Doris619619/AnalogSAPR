@@ -1,8 +1,10 @@
 // 实现 sapr validate/run 命令行入口和稳定的指标输出。
 // 文件职责：实现命令行入口，负责输入校验、求解运行和 routing debug 输出。
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -66,7 +68,47 @@ void print_usage() {
               << "  sapr validate [--input input]\n"
               << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n"
               << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
-              << "           [--cooling-rate 0.96] [--dump-routing-eval]\n";
+              << "           [--cooling-rate 0.96] [--dump-routing-eval]\n"
+              << "           [--no-render] [--render-dpi 200] [--render-name name]\n";
+}
+
+std::string shell_quote(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 2);
+    escaped.push_back('"');
+    for (const char ch : value) {
+        if (ch == '"') escaped += "\\\"";
+        else escaped.push_back(ch);
+    }
+    escaped.push_back('"');
+    return escaped;
+}
+
+std::string shell_quote(const std::filesystem::path& value) {
+    return shell_quote(value.string());
+}
+
+std::filesystem::path renderer_script_path(const char*) {
+    const auto source_candidate = std::filesystem::path("tools") / "render_layout.py";
+    if (std::filesystem::exists(source_candidate)) return source_candidate;
+    const auto build_candidate = std::filesystem::path("..") / "tools" / "render_layout.py";
+    if (std::filesystem::exists(build_candidate)) return build_candidate;
+    return source_candidate;
+}
+
+int render_solution_png(const std::filesystem::path& input, const std::filesystem::path& output,
+                        const std::filesystem::path& renderer, int dpi, const std::string& render_name) {
+    std::ostringstream command;
+    command << "python " << shell_quote(renderer)
+            << " --input " << shell_quote(input)
+            << " --output " << shell_quote(output)
+            << " --dpi " << dpi;
+    if (!render_name.empty()) command << " --name " << shell_quote(render_name);
+    const int status = std::system(command.str().c_str());
+    if (status != 0) {
+        std::cerr << "layout rendering failed. Ensure Python and matplotlib are available, or rerun with --no-render.\n";
+    }
+    return status;
 }
 
 // 执行输入校验命令。
@@ -83,7 +125,7 @@ int run_validate(const std::vector<std::string>& args) {
 }
 
 // 执行论文 placement-aware 求解并输出结果与指标。
-int run_solver(const std::vector<std::string>& args) {
+int run_solver(const std::vector<std::string>& args, const char* executable_path) {
     const auto input = std::filesystem::path(option_value(args, "--input", "input"));
     const auto output = std::filesystem::path(option_value(args, "--output", "output"));
     sapr::SolverConfig config;
@@ -94,6 +136,10 @@ int run_solver(const std::vector<std::string>& args) {
     config.initial_temperature = option_double(args, "--initial-temperature", config.initial_temperature);
     config.cooling_rate = option_double(args, "--cooling-rate", config.cooling_rate);
     const bool dump_routing_eval = has_option(args, "--dump-routing-eval");
+    const bool render_png = !has_option(args, "--no-render");
+    const int render_dpi = option_int(args, "--render-dpi", 200);
+    if (render_dpi <= 0) throw std::runtime_error("invalid value for --render-dpi: must be positive");
+    const std::string render_name = option_value(args, "--render-name", "");
 
     const auto circuit = sapr::load_circuit(input);
     const auto solution = sapr::solve_baseline(circuit, config);
@@ -104,6 +150,10 @@ int run_solver(const std::vector<std::string>& args) {
         return 1;
     }
     sapr::write_solution(solution, output);
+    if (render_png) {
+        const int render_status = render_solution_png(input, output, renderer_script_path(executable_path), render_dpi, render_name);
+        if (render_status != 0) return 1;
+    }
     const auto metrics = solution.metrics.value_or(sapr::measure(circuit, solution));
     std::cout << std::fixed << std::setprecision(2)
               << "{\n"
@@ -172,7 +222,7 @@ int main(int argc, char* argv[]) {
         std::vector<std::string> args(argv + 2, argv + argc);
         const std::string command = argv[1];
         if (command == "validate") return run_validate(args);
-        if (command == "run") return run_solver(args);
+        if (command == "run") return run_solver(args, argv[0]);
         print_usage();
         return 2;
     } catch (const std::exception& error) {
