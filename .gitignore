@@ -16,5 +16,6 @@ output/cpp_stage*/
 # IDE and local files
 .idea/
 .vscode/
+*.code-workspace
 *.user
 

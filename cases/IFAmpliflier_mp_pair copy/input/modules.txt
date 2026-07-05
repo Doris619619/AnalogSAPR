@@ -1,0 +1,5 @@
+# IFAmpliflier_mp_pair
+# id          w       h       active(x1,y1,x2,y2)         # info
+
+MP8          1.120   2.355   0.205,0.210,0.915,2.210   # pmos pch_ulvt_mac_CDNS_756543489852 ox=-0.300 oy=-0.210
+MP22         2.320   2.355   0.205,0.145,2.115,2.145   # pmos pch_ulvt_mac_CDNS_7565434898532 ox=-0.300 oy=-0.145
