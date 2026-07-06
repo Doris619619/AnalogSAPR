@@ -2,6 +2,7 @@
 #include "sapr/optimizer.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -75,6 +76,77 @@ void write_json_string_array(std::ostringstream& out, const std::vector<std::str
 }
 
 // 收集 space node 内的 LCP 标识，供 enhanced B*-tree 调试图展示空间节点结构。
+// 将电流方向写成稳定字符串，供 B* 树可视化解释 LCP 拓扑。
+std::string current_direction_name(CurrentDirection direction) {
+    switch (direction) {
+        case CurrentDirection::In: return "in";
+        case CurrentDirection::Out: return "out";
+        case CurrentDirection::Unknown: return "unknown";
+    }
+    return "unknown";
+}
+
+// 在 trace 只用于可视化时，根据常见电源/输出网名恢复优先级标签。
+std::string trace_priority_name(const std::string& net) {
+    std::string upper = net;
+    std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+    });
+    if (upper == "VDD" || upper == "AVDD" || upper == "VCC" || upper == "GND" || upper == "AGND" ||
+        upper == "VSS" || upper == "OUT" || upper == "VOUT") {
+        return "critical";
+    }
+    return "normal";
+}
+
+// 写出一条 LCP wire segment，保留端点和电流方向，供结构图绘制 routing arc。
+void write_wire_segment_json(std::ostringstream& out, const WireSegmentRef& segment) {
+    out << "{\"id\": ";
+    write_json_string(out, segment.id);
+    out << ", \"from\": ";
+    write_json_string(out, segment.from);
+    out << ", \"to\": ";
+    write_json_string(out, segment.to);
+    out << ", \"current_direction\": ";
+    write_json_string(out, current_direction_name(segment.current_direction));
+    out << '}';
+}
+
+// 导出 net -> pin/LCP/pin 拓扑，让 B* 树结构图能显示论文中的布线弧线。
+void write_routing_topologies_json(std::ostringstream& out, const RoutingEvaluationRequest& request) {
+    out << "  \"routing_topologies\": [\n";
+    for (std::size_t topology_index = 0; topology_index < request.net_topologies.size(); ++topology_index) {
+        const auto& topology = request.net_topologies[topology_index];
+        if (topology_index != 0) out << ",\n";
+        out << "    {\"net\": ";
+        write_json_string(out, topology.net);
+        out << ", \"priority\": ";
+        write_json_string(out, trace_priority_name(topology.net));
+        out << ", \"pins\": ";
+        write_json_string_array(out, topology.pins);
+        out << ", \"linking_points\": [";
+        std::unordered_set<std::string> emitted_lcp_ids;
+        bool first_lcp = true;
+        for (const auto& point : topology.linking_points) {
+            if (!emitted_lcp_ids.insert(point.id).second) continue;
+            if (!first_lcp) out << ',';
+            first_lcp = false;
+            out << "{\"id\": ";
+            write_json_string(out, point.id);
+            out << ", \"space_node_id\": ";
+            write_json_string(out, point.space_node_id);
+            out << '}';
+        }
+        out << "], \"segments\": [";
+        for (std::size_t segment_index = 0; segment_index < topology.segments.size(); ++segment_index) {
+            if (segment_index != 0) out << ',';
+            write_wire_segment_json(out, topology.segments[segment_index]);
+        }
+        out << "]}";
+    }
+    out << "\n  ],\n";
+}
+
 std::vector<std::string> lcp_ids_for_json(const SpaceNode& space) {
     std::vector<std::string> ids;
     ids.reserve(space.linking_points.size());
@@ -189,6 +261,7 @@ std::string make_btree_trace_json(const CandidateState& state) {
         out << '}';
     }
     out << "\n  ],\n";
+    write_routing_topologies_json(out, state.request);
     out << "  \"metrics\": {"
         << "\"area\": " << metrics.area
         << ", \"wirelength\": " << metrics.wirelength

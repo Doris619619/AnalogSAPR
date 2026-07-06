@@ -19,6 +19,7 @@ PACK_COLOR = "#4CAF50"
 OCCUPIED_COLOR = "#90CAF9"
 ROUTING_SPACE_COLOR = "#F9A825"
 SPACE_EDGE_COLOR = "#616161"
+ROUTING_ARC_COLORS = ["#D81B60", "#00897B", "#5E35B1", "#C0CA33", "#6D4C41", "#039BE5"]
 
 
 # 输出目录名为空时提供稳定的默认图片名前缀。
@@ -68,6 +69,116 @@ def compute_space_positions(positions: dict[str, tuple[float, float]]) -> dict[t
         result[(node_id, "left")] = (x - 0.58, y - 0.86)
         result[(node_id, "right")] = (x + 0.58, y - 0.86)
     return result
+
+
+# 建立 module id 和 space node id 到结构图坐标的映射，供 routing topology arc 查找端点。
+def build_structure_anchor_maps(
+    nodes: dict[str, dict[str, Any]],
+    positions: dict[str, tuple[float, float]],
+    space_positions: dict[tuple[str, str], tuple[float, float]],
+) -> tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]:
+    module_positions: dict[str, tuple[float, float]] = {}
+    space_node_positions: dict[str, tuple[float, float]] = {}
+    for node_id, node in nodes.items():
+        if node_id not in positions:
+            continue
+        module_positions[node_id] = positions[node_id]
+        module_positions[node.get("module", node_id)] = positions[node_id]
+        for side, field in (("left", "left_space_node"), ("right", "right_space_node")):
+            space = node.get(field, {})
+            space_id = space.get("id")
+            if space_id:
+                space_node_positions[space_id] = space_positions[(node_id, side)]
+    return module_positions, space_node_positions
+
+
+# 从 terminal 名称中取出 module 名称，LCP terminal 会返回 None。
+def module_from_terminal(terminal: str) -> str | None:
+    if "." not in terminal:
+        return None
+    module, _pin = terminal.split(".", 1)
+    return module
+
+
+# 将 routing topology 中的 pin/LCP endpoint 映射到结构图坐标。
+def endpoint_position(
+    endpoint: str,
+    module_positions: dict[str, tuple[float, float]],
+    lcp_positions: dict[str, tuple[float, float]],
+) -> tuple[float, float] | None:
+    if endpoint in lcp_positions:
+        return lcp_positions[endpoint]
+    module = module_from_terminal(endpoint)
+    if module and module in module_positions:
+        return module_positions[module]
+    return module_positions.get(endpoint)
+
+
+# 为每个 LCP 选择结构图中的显示坐标；位置落在所属 space node 方块内部。
+def build_lcp_positions(trace: dict[str, Any], space_node_positions: dict[str, tuple[float, float]]) -> dict[str, tuple[float, float]]:
+    lcp_positions: dict[str, tuple[float, float]] = {}
+    per_space_count: dict[str, int] = {}
+    for topology in trace.get("routing_topologies", []):
+        for point in topology.get("linking_points", []):
+            lcp_id = point.get("id")
+            space_id = point.get("space_node_id")
+            if not lcp_id or not space_id or space_id not in space_node_positions:
+                continue
+            index = per_space_count.get(space_id, 0)
+            per_space_count[space_id] = index + 1
+            base_x, base_y = space_node_positions[space_id]
+            shown_index = min(index, 2)
+            x = base_x + (shown_index - 1) * 0.10
+            y = base_y - 0.10
+            lcp_positions[lcp_id] = (x, y)
+    return lcp_positions
+
+
+# 绘制论文拓扑意义上的 module -> LCP -> module 布线弧线。
+def draw_routing_topology_arcs(
+    ax: Any,
+    trace: dict[str, Any],
+    module_positions: dict[str, tuple[float, float]],
+    lcp_positions: dict[str, tuple[float, float]],
+) -> bool:
+    topologies = trace.get("routing_topologies", [])
+    if not topologies:
+        return False
+    drew_any = False
+    for topology_index, topology in enumerate(topologies):
+        color = ROUTING_ARC_COLORS[topology_index % len(ROUTING_ARC_COLORS)]
+        net = topology.get("net", "")
+        priority = topology.get("priority", "normal")
+        linewidth = 2.0 if priority == "critical" else 1.35
+        for segment_index, segment in enumerate(topology.get("segments", [])):
+            start = endpoint_position(segment.get("from", ""), module_positions, lcp_positions)
+            end = endpoint_position(segment.get("to", ""), module_positions, lcp_positions)
+            if start is None or end is None:
+                continue
+            rad = 0.22 if segment_index % 2 == 0 else -0.22
+            ax.annotate(
+                "",
+                xy=end,
+                xytext=start,
+                arrowprops={
+                    "arrowstyle": "->",
+                    "color": color,
+                    "linewidth": linewidth,
+                    "connectionstyle": f"arc3,rad={rad}",
+                    "alpha": 0.86,
+                },
+                zorder=3,
+            )
+            drew_any = True
+        if topology.get("segments"):
+            label_pos = None
+            for segment in topology.get("segments", []):
+                label_pos = endpoint_position(segment.get("to", ""), module_positions, lcp_positions)
+                if label_pos is not None:
+                    break
+            if label_pos is not None:
+                ax.text(label_pos[0] + 0.08, label_pos[1] + 0.08, str(net), fontsize=6, color=color, zorder=7)
+    return drew_any
 
 
 # 返回 space node 的短标签，同时展示论文树侧命名和几何空间含义。
@@ -136,6 +247,8 @@ def render_structure(trace: dict[str, Any], output_dir: Path, name: str, dpi: in
     nodes = {node["id"]: node for node in trace.get("nodes", [])}
     positions = compute_tree_positions(trace)
     space_positions = compute_space_positions(positions)
+    module_positions, space_node_positions = build_structure_anchor_maps(nodes, positions, space_positions)
+    lcp_positions = build_lcp_positions(trace, space_node_positions)
     width = max(9.0, min(22.0, 2.6 * max(len(nodes), 1)))
     max_depth = max((-y for _x, y in positions.values()), default=0.0)
     height = max(6.0, min(15.0, 1.35 * (2.5 + max_depth)))
@@ -173,6 +286,8 @@ def render_structure(trace: dict[str, Any], output_dir: Path, name: str, dpi: in
                 zorder=2,
             )
 
+    drew_routing_arcs = draw_routing_topology_arcs(ax, trace, module_positions, lcp_positions)
+
     for node_id, node in nodes.items():
         x, y = positions[node_id]
         circle = mpatches.Circle((x, y), 0.43, facecolor=MODULE_COLOR, edgecolor="#212121", linewidth=1.4, zorder=5)
@@ -196,6 +311,13 @@ def render_structure(trace: dict[str, Any], output_dir: Path, name: str, dpi: in
         mlines.Line2D([], [], color=LEFT_COLOR, linewidth=2.0, label="left space node -> left child = placed right"),
         mlines.Line2D([], [], color=RIGHT_COLOR, linewidth=2.0, label="right space node -> right child = placed above"),
     ]
+    if drew_routing_arcs:
+        legend_handles.extend(
+            [
+                mlines.Line2D([], [], color=ROUTING_ARC_COLORS[0], linewidth=1.35, label="routing topology arc"),
+                mlines.Line2D([], [], color=ROUTING_ARC_COLORS[0], linewidth=2.0, label="critical routing topology"),
+            ]
+        )
     ax.legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(1.02, 1.0), fontsize=8)
     ax.set_title(
         f"{name} enhanced B*-tree structure\n"
