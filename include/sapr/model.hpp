@@ -195,6 +195,7 @@ struct Solution {
     std::optional<bool> routing_feedback_converged;
     std::optional<bool> packing_time_dp_used;
     std::optional<bool> dp_used;
+    std::optional<std::string> btree_trace_json;
     std::vector<std::string> routing_warnings;
 };
 
