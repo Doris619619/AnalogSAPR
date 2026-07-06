@@ -18,6 +18,7 @@ struct GlobalRouterConfig {
     double failed_pair_penalty{100000.0};
     double flow_violation_penalty{50000.0};
     double current_density_penalty{50000.0};
+    double short_conflict_penalty{1000000.0};
 };
 
 // 表示一条 net 在全局布线阶段选中的候选路径集合。

@@ -1,4 +1,4 @@
 # module       x           y           angle  orient
 
 MP8            0.000       0.000       0      R0
-MP22           7.120       0.000       0      R0
+MP22           9.120       0.000       90     R90

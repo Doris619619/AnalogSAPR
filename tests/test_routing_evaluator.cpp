@@ -10,8 +10,10 @@
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
 #include "sapr/routing/dp_router.hpp"
+#include "sapr/routing/geometry.hpp"
 #include "sapr/routing/global_router.hpp"
 #include "sapr/routing/grid.hpp"
+#include "sapr/routing/path_geometry.hpp"
 #include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
 #include "sapr/tree.hpp"
@@ -35,6 +37,47 @@ sapr::Circuit make_active_region_test_circuit() {
     circuit.nets.emplace("N", sapr::Net{"N", sapr::Priority::Normal, {"M.A", "M.B"}});
     circuit.net_order.push_back("N");
     return circuit;
+}
+
+// 构造 active 覆盖完整 bbox 的最小电路，用于验证 full-bbox active 仍然是布线障碍。
+sapr::Circuit make_full_active_region_test_circuit() {
+    sapr::Circuit circuit;
+    circuit.modules.emplace("M", sapr::Module{"M", 10.0, 10.0, sapr::Rect{0.0, 0.0, 10.0, 10.0}, 0.0, 0.0, ""});
+    circuit.module_order.push_back("M");
+    circuit.pins.emplace("M.A", sapr::Pin{"M", "A", 0.0, 5.0, "M1"});
+    circuit.pins.emplace("M.B", sapr::Pin{"M", "B", 10.0, 5.0, "M1"});
+    circuit.pin_order = {"M.A", "M.B"};
+    circuit.nets.emplace("N", sapr::Net{"N", sapr::Priority::Normal, {"M.A", "M.B"}});
+    circuit.net_order.push_back("N");
+    return circuit;
+}
+
+// 构造 pin 位于左下边界附近的 full-active 电路，用于验证 grid 会纳入向外逃逸空间。
+sapr::Circuit make_boundary_access_test_circuit() {
+    sapr::Circuit circuit;
+    circuit.modules.emplace("M", sapr::Module{"M", 10.0, 10.0, sapr::Rect{0.0, 0.0, 10.0, 10.0}, 0.0, 0.0, ""});
+    circuit.module_order.push_back("M");
+    circuit.pins.emplace("M.A", sapr::Pin{"M", "A", 5.0, 0.1, "M1"});
+    circuit.pins.emplace("M.B", sapr::Pin{"M", "B", 9.9, 5.0, "M1"});
+    circuit.pin_order = {"M.A", "M.B"};
+    circuit.nets.emplace("N", sapr::Net{"N", sapr::Priority::Normal, {"M.A", "M.B"}});
+    circuit.net_order.push_back("N");
+    return circuit;
+}
+
+// 判断 route 金属是否穿过 active 的核心区域，排除边缘 pin access 的短接入段。
+bool route_crosses_active_core(const sapr::RouteSegment& route, const sapr::Rect& active) {
+    const sapr::Rect normalized = sapr::routing::normalize_rect(active);
+    const sapr::Rect core{
+        normalized.x1 + 2.0,
+        normalized.y1 + 2.0,
+        normalized.x2 - 2.0,
+        normalized.y2 - 2.0,
+    };
+    const sapr::Rect metal = sapr::routing::segment_to_rect(
+        sapr::routing::Segment{sapr::routing::Point{route.x1, route.y1}, sapr::routing::Point{route.x2, route.y2}},
+        route.width);
+    return sapr::routing::intersects(metal, core);
 }
 
 // 构造一条水平 selected candidate，让 detailed routing 只测试 DRC 统计逻辑。
@@ -109,6 +152,29 @@ sapr::Circuit make_conflict_test_circuit() {
     return circuit;
 }
 
+// 构造一条人工水平候选，用于精确测试短路合法化。
+sapr::routing::RouteCandidate make_horizontal_candidate(
+    const sapr::routing::RoutingContext& context,
+    const std::string& net,
+    const std::string& from,
+    const std::string& to,
+    double y,
+    int layer = 0) {
+    sapr::routing::RouteCandidate candidate;
+    candidate.net = net;
+    candidate.from_terminal = from;
+    candidate.to_terminal = to;
+    candidate.segment_id = net + ":" + from + "->" + to;
+    candidate.wire_width = 1.0;
+    candidate.path.success = true;
+    candidate.path.points = {
+        context.grid().snap_to_grid(sapr::routing::Point{0.0, y}, layer),
+        context.grid().snap_to_grid(sapr::routing::Point{9.0, y}, layer),
+    };
+    candidate.path.metrics.wirelength = 9.0;
+    return candidate;
+}
+
 sapr::RoutingEvaluation make_priority_evaluation(
     const sapr::Circuit& circuit,
     const std::unordered_map<std::string, sapr::Placement>& placements) {
@@ -128,8 +194,8 @@ sapr::RoutingEvaluation make_priority_evaluation(
         return candidate;
     };
     const auto normal = make_candidate("NOR", "M.E", "M.F", 1.0);
-    const auto critical = make_candidate("CRT", "M.C", "M.D", 2.0);
-    const auto symmetry = make_candidate("SYM", "M.A", "M.B", 3.0);
+    const auto critical = make_candidate("CRT", "M.C", "M.D", 4.0);
+    const auto symmetry = make_candidate("SYM", "M.A", "M.B", 7.0);
 
     sapr::routing::GlobalRoutingResult global;
     for (const auto& candidate : {normal, critical, symmetry}) {
@@ -355,8 +421,25 @@ void run_routing_evaluator_tests() {
         }
     }
     std::unordered_map<std::string, std::string> lcp_owner_by_id;
+    std::unordered_map<std::string, std::string> owner_by_space;
     for (const auto& space : request_for_dp.space_nodes) {
+        owner_by_space[space.id] = space.owner;
         for (const auto& point : space.linking_points) lcp_owner_by_id[point.id] = space.owner;
+    }
+    for (const auto& point : request_for_dp.linking_points) {
+        const auto found = owner_by_space.find(point.space_node_id);
+        if (found != owner_by_space.end()) lcp_owner_by_id[point.id] = found->second;
+    }
+    for (const auto& topology : request_for_dp.net_topologies) {
+        for (const auto& point : topology.linking_points) {
+            std::unordered_set<std::string> segment_ids;
+            int lcp_incident_segments = 0;
+            for (const auto& segment : point.segments) {
+                if (segment.from == point.id || segment.to == point.id) ++lcp_incident_segments;
+                require(segment_ids.insert(segment.id).second, "LCP topology should not duplicate root-to-LCP segments");
+            }
+            require(lcp_incident_segments >= 2, "each logical LCP should connect at least two same-net segments");
+        }
     }
     const auto terminal_owner = [&](const std::string& terminal) {
         const auto dot = terminal.find('.');
@@ -483,7 +566,9 @@ void run_routing_evaluator_tests() {
     }
     require(evaluation.routing_cost > 0.0, "routing evaluator should produce a positive global routing cost");
     require(!selected_segments.empty(), "routing evaluator should convert selected A* candidates to route segments");
-    require(!detailed.routes.empty(), "detailed routing should emit selected route segments");
+    require(
+        !detailed.routes.empty() || detailed.traceback_failures > 0 || detailed.design_rule_violations > 0,
+        "detailed routing should either emit legal route segments or report why traceback was discarded");
     require(detailed.coupling_penalty >= 0.0, "detailed routing should report coupling penalty");
     require(detailed.design_rule_penalty >= 0.0, "detailed routing should report DRC penalty");
     require(detailed.design_rule_violations >= 0, "detailed routing should report DRC violations");
@@ -550,6 +635,71 @@ void run_routing_evaluator_tests() {
         conflict_global.coupling_penalty >= 100000.0,
         "different nets sharing routing grid points should receive a high conflict penalty");
 
+    sapr::RouteSegment first_metal{"N1", "M1", 0.0, 1.0, 9.0, 1.0, 1.0};
+    sapr::RouteSegment second_metal{"N2", "M1", 0.0, 2.0, 9.0, 2.0, 1.0};
+    require(
+        sapr::routing::same_layer_short(first_metal, second_metal),
+        "same-layer metal rectangles should detect shorts even when centerlines use different tracks");
+
+    const auto preferred_first = make_horizontal_candidate(conflict_context, "N1", "M.A", "M.B", 1.0);
+    const auto short_second = make_horizontal_candidate(conflict_context, "N2", "M.C", "M.D", 2.0);
+    const auto legal_second = make_horizontal_candidate(conflict_context, "N2", "M.C", "M.D", 4.0);
+    const auto short_aware_global = sapr::routing::run_global_routing(
+        conflict_circuit,
+        conflict_context,
+        {preferred_first, short_second, legal_second});
+    require(short_aware_global.failed_nets == 0, "short-aware global routing should keep legal fallback candidates");
+    require(
+        short_aware_global.net_routes.size() == 2 &&
+            short_aware_global.net_routes[1].selected_candidates.front().path.points.front().iy ==
+                legal_second.path.points.front().iy,
+        "global routing should prefer a non-short candidate over a shorter same-layer short");
+
+    sapr::routing::GlobalRoutingResult detailed_global;
+    sapr::routing::NetRouteChoice first_choice;
+    first_choice.net = "N1";
+    first_choice.selected_candidates.push_back(preferred_first);
+    detailed_global.net_routes.push_back(first_choice);
+    sapr::routing::NetRouteChoice second_choice;
+    second_choice.net = "N2";
+    second_choice.selected_candidates.push_back(short_second);
+    detailed_global.net_routes.push_back(second_choice);
+    sapr::RoutingEvaluation short_detail_eval{
+        sapr::routing::RoutingContext(conflict_circuit, conflict_placements),
+        {preferred_first, short_second, legal_second},
+        std::move(detailed_global),
+        std::nullopt,
+        18.0,
+        0,
+        false,
+    };
+    sapr::RoutingEvaluationRequest short_detail_request;
+    short_detail_request.placements = conflict_placements;
+    short_detail_request.placement_order = {"M"};
+    const auto legalized_detail = sapr::run_detailed_routing(conflict_circuit, short_detail_request, short_detail_eval);
+    require(legalized_detail.design_rule_violations == 0, "detailed routing should legalize shorts with an alternative candidate");
+    require(!legalized_detail.routes.empty(), "detailed routing should keep legalized routes instead of clearing all output");
+
+    sapr::routing::GlobalRoutingResult layer_global;
+    layer_global.net_routes.push_back(first_choice);
+    layer_global.net_routes.push_back(second_choice);
+    sapr::RoutingEvaluation layer_detail_eval{
+        sapr::routing::RoutingContext(conflict_circuit, conflict_placements),
+        {preferred_first, short_second},
+        std::move(layer_global),
+        std::nullopt,
+        18.0,
+        0,
+        false,
+    };
+    const auto layer_detail = sapr::run_detailed_routing(conflict_circuit, short_detail_request, layer_detail_eval);
+    require(layer_detail.design_rule_violations == 0, "detailed routing should legalize shorts by reassigning layer when no alternative path exists");
+    require(
+        std::any_of(layer_detail.routes.begin(), layer_detail.routes.end(), [](const auto& route) {
+            return route.net == "N2" && route.layer != "M1";
+        }),
+        "layer reassignment should move the conflicting net away from the original metal layer");
+
     const auto drc_circuit = make_active_region_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> drc_placements{
         {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
@@ -567,6 +717,38 @@ void run_routing_evaluator_tests() {
     auto active_crossing_eval = make_line_evaluation(drc_circuit, drc_placements, 5.0);
     const auto active_crossing_detail = sapr::run_detailed_routing(drc_circuit, drc_request, active_crossing_eval);
     require(active_crossing_detail.design_rule_violations > 0, "active crossing route should count as DRC");
+
+    const auto full_active_circuit = make_full_active_region_test_circuit();
+    const std::unordered_map<std::string, sapr::Placement> full_active_placements{
+        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+    };
+    const auto full_active_eval = sapr::evaluate_routing(full_active_circuit, full_active_placements);
+    const auto full_active_segments = sapr::selected_candidates_to_segments(full_active_eval);
+    require(!full_active_segments.empty(), "full-bbox active route should still find a path through pin access");
+    const auto full_active_rect =
+        sapr::routing::transform_active_to_global(full_active_circuit.modules.at("M"), full_active_placements.at("M"));
+    for (const auto& segment : full_active_segments) {
+        require(
+            !route_crosses_active_core(segment, full_active_rect),
+            "full-bbox active should block long routes through the module core");
+    }
+
+    const auto boundary_circuit = make_boundary_access_test_circuit();
+    const std::unordered_map<std::string, sapr::Placement> boundary_placements{
+        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+    };
+    const sapr::routing::RoutingContext boundary_context(boundary_circuit, boundary_placements);
+    require(boundary_context.grid().min_y() < 0.0, "bottom pin access should expand routing grid below the layout");
+    const auto boundary_eval = sapr::evaluate_routing(boundary_circuit, boundary_placements);
+    const auto boundary_segments = sapr::selected_candidates_to_segments(boundary_eval);
+    require(!boundary_segments.empty(), "boundary pin access should still find a routed path");
+    const auto boundary_active_rect =
+        sapr::routing::transform_active_to_global(boundary_circuit.modules.at("M"), boundary_placements.at("M"));
+    for (const auto& segment : boundary_segments) {
+        require(
+            !route_crosses_active_core(segment, boundary_active_rect),
+            "boundary pin access should not become a long route through active core");
+    }
 
     const auto priority_circuit = make_priority_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> priority_placements{
@@ -688,7 +870,11 @@ void run_routing_evaluator_tests() {
     coupling_choice.selected_candidates.push_back(coupling_candidate);
     coupling_eval.global_routing.net_routes.push_back(coupling_choice);
     const auto coupling_detail = sapr::run_detailed_routing(drc_circuit, drc_request, coupling_eval);
-    require(coupling_detail.coupling_penalty > 100.0, "coupling penalty should scale with parallel overlap length");
-    require(coupling_detail.design_rule_violations > 0, "same-layer different-net overlap should count as DRC");
-    require(!coupling_detail.report.coupling_pairs.empty(), "coupling report should include net pair and overlap length");
+    require(coupling_detail.design_rule_violations == 0, "same-layer different-net overlap should be legalized before final DRC");
+    require(!coupling_detail.routes.empty(), "legalized detailed routing should keep route output");
+    require(
+        std::any_of(coupling_detail.routes.begin(), coupling_detail.routes.end(), [](const auto& route) {
+            return route.net == "P" && route.layer != "M1";
+        }),
+        "overlapping same-layer route should be reassigned when no alternative candidate exists");
 }

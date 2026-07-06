@@ -330,8 +330,14 @@ std::string segment_key_for_trace(const WireSegmentRef& segment) {
 
 std::unordered_map<std::string, std::string> lcp_owner_map_for_trace(const RoutingEvaluationRequest& request) {
     std::unordered_map<std::string, std::string> owners;
+    std::unordered_map<std::string, std::string> owner_by_space;
     for (const auto& space : request.space_nodes) {
+        owner_by_space[space.id] = space.owner;
         for (const auto& point : space.linking_points) owners[point.id] = space.owner;
+    }
+    for (const auto& point : request.linking_points) {
+        const auto found = owner_by_space.find(point.space_node_id);
+        if (found != owner_by_space.end()) owners[point.id] = found->second;
     }
     return owners;
 }
@@ -402,10 +408,12 @@ Rect placed_active_rect(const Module& module, const Placement& placement) {
 // 填充 routing request 中面向 DP/A* 的全局 pin、blocker 和 LCP 候选位置。
 void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& request) {
     std::unordered_map<std::string, std::pair<double, double>> module_centers;
+    std::unordered_map<std::string, Rect> module_boxes;
     for (const auto& module_id : request.placement_order) {
         const auto& placement = request.placements.at(module_id);
         const auto size = placed_size(circuit.modules.at(module_id), placement);
         module_centers[module_id] = {placement.x + size.first / 2.0, placement.y + size.second / 2.0};
+        module_boxes[module_id] = {placement.x, placement.y, placement.x + size.first, placement.y + size.second};
         request.active_region_blockers.push_back(placed_active_rect(circuit.modules.at(module_id), placement));
     }
     for (const auto& key : circuit.pin_order) {
@@ -414,26 +422,52 @@ void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& 
         const auto xy = placed_pin(circuit.modules.at(pin.module), pin, placement);
         request.placed_pins.push_back({key, pin.module, pin.name, xy.first, xy.second, pin.layer});
     }
+    std::unordered_map<std::string, LinkingControlPoint> logical_lcp_by_net;
     for (auto space : request.space_nodes) {
         const auto center = module_centers.contains(space.owner) ? module_centers.at(space.owner) : std::pair<double, double>{0.0, 0.0};
+        const auto box = module_boxes.contains(space.owner) ? module_boxes.at(space.owner) : Rect{center.first, center.second, center.first, center.second};
         const double offset = std::max(space.required_space(), 1.0);
         space.location_candidates.clear();
-        space.location_candidates.push_back({center.first + offset, center.second, space.id + ":edge"});
-        space.location_candidates.push_back({center.first, center.second + offset, space.id + ":top"});
-        space.location_candidates.push_back({center.first + offset / 2.0, center.second + offset / 2.0, space.id + ":center"});
+        space.location_candidates.push_back({box.x2 + offset, center.second, space.id + ":edge"});
+        space.location_candidates.push_back({center.first, box.y2 + offset, space.id + ":top"});
+        space.location_candidates.push_back({box.x2 + offset / 2.0, box.y2 + offset / 2.0, space.id + ":center"});
         for (auto point : space.linking_points) {
             point.location_candidates.clear();
             if (space.kind == SpaceNodeKind::Top) {
-                point.location_candidates.push_back({center.first, center.second + offset, point.id + ":top"});
+                point.location_candidates.push_back({center.first, box.y2 + offset, point.id + ":top"});
+                point.location_candidates.push_back({box.x1 - offset, box.y2 + offset, point.id + ":top_left"});
+                point.location_candidates.push_back({box.x2 + offset, box.y2 + offset, point.id + ":top_right"});
             } else if (space.kind == SpaceNodeKind::Cluster) {
-                point.location_candidates.push_back({center.first + offset / 2.0, center.second, point.id + ":axis"});
+                point.location_candidates.push_back({box.x2 + offset / 2.0, center.second, point.id + ":axis"});
+                point.location_candidates.push_back({box.x2 + offset, center.second, point.id + ":right_axis"});
+                point.location_candidates.push_back({box.x1 - offset, center.second, point.id + ":left_axis"});
             } else {
-                point.location_candidates.push_back({center.first + offset, center.second, point.id + ":right"});
+                point.location_candidates.push_back({box.x2 + offset, center.second, point.id + ":right"});
+                point.location_candidates.push_back({box.x2 + offset, box.y2 + offset, point.id + ":right_top"});
+                point.location_candidates.push_back({box.x2 + offset, box.y1 - offset, point.id + ":right_bottom"});
             }
-            point.location_candidates.push_back({center.first + offset / 2.0, center.second + offset / 2.0, point.id + ":center"});
-            point.location_candidates.push_back({center.first, center.second + offset, point.id + ":pin_projection"});
-            request.linking_points.push_back(std::move(point));
+            if (point.segments.empty()) continue;
+            const std::string net_name = point.segments.front().net;
+            const std::string logical_id = net_name + ":lcp";
+            auto& logical = logical_lcp_by_net[net_name];
+            if (logical.id.empty()) {
+                logical = point;
+                logical.id = logical_id;
+                for (auto& segment : logical.segments) {
+                    if (segment.from == point.id) segment.from = logical_id;
+                    if (segment.to == point.id) segment.to = logical_id;
+                    segment.id = segment.net + ":" + segment.from + "->" + segment.to;
+                }
+                logical.location_candidates.clear();
+            }
+            for (auto location : point.location_candidates) {
+                location.id = point.id + "|" + location.id;
+                logical.location_candidates.push_back(std::move(location));
+            }
         }
+    }
+    for (auto& [_, point] : logical_lcp_by_net) {
+        request.linking_points.push_back(std::move(point));
     }
     std::unordered_map<std::string, NetTopology> topologies;
     for (const auto& [name, net] : circuit.nets) {
@@ -468,6 +502,16 @@ double compute_phi_cost(Metrics& metrics, const Metrics& base, const SolverConfi
 }
 
 // 评价一棵增强 B*-tree 对应的候选状态。
+// 判断当前候选是否已经得到可直接输出的合法 detailed routing。
+bool has_clean_detailed_solution(const RoutingFeedback& feedback) {
+    const auto& metrics = feedback.metrics;
+    return !feedback.routes.empty() &&
+           metrics.penalty <= 1e-9 &&
+           metrics.design_rule_violations == 0 &&
+           metrics.routing_failures == 0 &&
+           metrics.traceback_failures == 0;
+}
+
 bool feedback_expands_space(
     const RoutingEvaluationRequest& request,
     const RoutingFeedback& feedback,
@@ -547,6 +591,7 @@ Solution make_solution(const CandidateState& state) {
     solution.packing_time_dp_used = state.feedback.metrics.packing_time_dp_used;
     solution.dp_used = state.feedback.metrics.dp_used;
     solution.btree_trace_json = make_btree_trace_json(state);
+    solution.routing_warnings = state.feedback.metrics.routing_warnings;
     return solution;
 }
 
@@ -655,9 +700,6 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     const auto routing_evaluation = evaluate_routing(circuit, request);
     const auto detailed = run_detailed_routing(circuit, request, routing_evaluation);
     feedback.routes = detailed.routes;
-    if (feedback.routes.empty() && routing_evaluation.failed_nets > 0) {
-        feedback.routes = selected_candidates_to_segments(routing_evaluation);
-    }
     Solution solution;
     solution.placements = request.placements;
     solution.placement_order = request.placement_order;
@@ -677,13 +719,15 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.metrics.flow_penalty = std::max(routing_evaluation.global_routing.flow_penalty, detailed.flow_penalty);
     feedback.metrics.current_density_penalty =
         std::max(routing_evaluation.global_routing.current_density_penalty, detailed.current_density_penalty);
-    feedback.metrics.coupling_penalty = std::max(routing_evaluation.global_routing.coupling_penalty, detailed.coupling_penalty);
+    feedback.metrics.coupling_penalty =
+        detailed.routes.empty() ? routing_evaluation.global_routing.coupling_penalty : detailed.coupling_penalty;
     feedback.metrics.routing_failure_penalty =
         routing_evaluation.global_routing.routing_failure_penalty + detailed.routing_failure_penalty;
     feedback.metrics.detailed_routing_penalty = detailed.design_rule_penalty + detailed.routing_failure_penalty;
     feedback.metrics.detailed_cost = detailed.detailed_cost;
     feedback.metrics.detailed_routes = static_cast<int>(detailed.routes.size());
     feedback.metrics.traceback_failures = detailed.traceback_failures;
+    feedback.metrics.routing_warnings = detailed.report.warnings;
     feedback.metrics.space_nodes_with_routes = detailed.space_nodes_with_routes;
     feedback.metrics.packing_trace_steps = static_cast<int>(request.packing_trace.steps.size());
     feedback.metrics.dp_used = routing_evaluation.used_bottom_up_dp;
@@ -739,6 +783,9 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     const Metrics base_metrics = current.feedback.metrics;
     current.cost = compute_phi_cost(current.feedback.metrics, base_metrics, config);
     CandidateState best = current;
+    if (has_clean_detailed_solution(best.feedback)) {
+        return make_solution(best);
+    }
 
     std::mt19937 rng(config.seed);
     std::uniform_real_distribution<double> probability(0.0, 1.0);
@@ -751,6 +798,9 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
         const bool accept = delta <= 0.0 || probability(rng) < std::exp(-delta / std::max(temperature, 1e-9));
         if (accept) current = std::move(next);
         if (current.cost < best.cost) best = current;
+        if (has_clean_detailed_solution(best.feedback)) {
+            break;
+        }
         temperature *= config.cooling_rate;
     }
 

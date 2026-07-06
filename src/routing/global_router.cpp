@@ -8,6 +8,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "sapr/routing/path_geometry.hpp"
+
 namespace sapr::routing {
 namespace {
 
@@ -130,6 +132,16 @@ double conflict_penalty(
 }
 
 // 判断候选路径是否与已选异网路径共用网格点，避免把耦合风险放大成真实短路。
+// 按 detailed routing 的金属矩形语义判断候选是否会与既有异网短路。
+bool shorts_with_existing_routes(
+    const RouteCandidate& candidate,
+    const RoutingContext& context,
+    const std::vector<RouteSegment>& occupied_routes) {
+    const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
+    const auto routes = candidate_to_route_segments(context.grid(), candidate, width);
+    return routes_short_with_existing(routes, occupied_routes);
+}
+
 bool conflicts_with_other_net(
     const RouteCandidate& candidate,
     const std::unordered_map<std::int64_t, std::string>& occupied_by_net) {
@@ -150,13 +162,26 @@ void occupy_path(const RouteCandidate& candidate, std::unordered_map<std::int64_
 }
 
 // 从一个 terminal pair group 中选择 DP cost 最低的成功候选。
+// 将选中候选的金属占用追加到全局短路检查表。
+void occupy_route_segments(
+    const RouteCandidate& candidate,
+    const RoutingContext& context,
+    std::vector<RouteSegment>& occupied_routes) {
+    const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
+    auto routes = candidate_to_route_segments(context.grid(), candidate, width);
+    occupied_routes.insert(occupied_routes.end(), routes.begin(), routes.end());
+}
+
 const RouteCandidate* choose_best_candidate(
     const CandidateGroup& group,
+    const RoutingContext& context,
     const std::unordered_map<std::int64_t, std::string>& occupied_by_net,
+    const std::vector<RouteSegment>& occupied_routes,
     const GlobalRouterConfig& config,
     double& selected_penalty) {
     const RouteCandidate* best = nullptr;
     double best_cost = std::numeric_limits<double>::infinity();
+    bool best_has_short = true;
     bool best_has_conflict = true;
     selected_penalty = 0.0;
 
@@ -164,12 +189,17 @@ const RouteCandidate* choose_best_candidate(
         if (!candidate.path.success) {
             continue;
         }
+        const bool has_short = shorts_with_existing_routes(candidate, context, occupied_routes);
         const bool has_conflict = conflicts_with_other_net(candidate, occupied_by_net);
-        const double penalty = conflict_penalty(candidate, occupied_by_net, config);
+        const double penalty = conflict_penalty(candidate, occupied_by_net, config) +
+                               (has_short ? config.short_conflict_penalty : 0.0);
         const double cost = candidate_dp_cost(candidate, config) + penalty;
-        if ((best_has_conflict && !has_conflict) || (has_conflict == best_has_conflict && cost < best_cost)) {
+        if ((best_has_short && !has_short) ||
+            (has_short == best_has_short && best_has_conflict && !has_conflict) ||
+            (has_short == best_has_short && has_conflict == best_has_conflict && cost < best_cost)) {
             best = &candidate;
             best_cost = cost;
+            best_has_short = has_short;
             best_has_conflict = has_conflict;
             selected_penalty = penalty;
         }
@@ -191,7 +221,9 @@ bool has_lcp_candidates(const std::vector<CandidateGroup>& groups) {
 void search_consistent_lcp_selection(
     const std::vector<CandidateGroup>& groups,
     std::size_t group_index,
+    const RoutingContext& context,
     const std::unordered_map<std::int64_t, std::string>& occupied_by_net,
+    const std::vector<RouteSegment>& occupied_routes,
     const GlobalRouterConfig& config,
     std::unordered_map<std::string, std::string>& assigned_location_by_lcp,
     std::vector<RouteCandidate>& current_candidates,
@@ -222,13 +254,17 @@ void search_consistent_lcp_selection(
             }
         }
 
-        const double penalty = conflict_penalty(candidate, occupied_by_net, config);
+        const bool has_short = shorts_with_existing_routes(candidate, context, occupied_routes);
+        const double penalty = conflict_penalty(candidate, occupied_by_net, config) +
+                               (has_short ? config.short_conflict_penalty : 0.0);
         current_candidates.push_back(candidate);
         current_conflict_penalties.push_back(penalty);
         search_consistent_lcp_selection(
             groups,
             group_index + 1,
+            context,
             occupied_by_net,
+            occupied_routes,
             config,
             assigned_location_by_lcp,
             current_candidates,
@@ -245,7 +281,9 @@ void search_consistent_lcp_selection(
 // 选择满足 LCP 位置一致性的最低代价候选组合。
 ConsistentSelection choose_consistent_lcp_selection(
     const std::vector<CandidateGroup>& groups,
+    const RoutingContext& context,
     const std::unordered_map<std::int64_t, std::string>& occupied_by_net,
+    const std::vector<RouteSegment>& occupied_routes,
     const GlobalRouterConfig& config) {
     ConsistentSelection best;
     std::unordered_map<std::string, std::string> assigned_location_by_lcp;
@@ -254,7 +292,9 @@ ConsistentSelection choose_consistent_lcp_selection(
     search_consistent_lcp_selection(
         groups,
         0,
+        context,
         occupied_by_net,
+        occupied_routes,
         config,
         assigned_location_by_lcp,
         current_candidates,
@@ -280,10 +320,9 @@ GlobalRoutingResult run_global_routing(
     const RoutingContext& context,
     const std::vector<RouteCandidate>& candidates,
     const GlobalRouterConfig& config) {
-    (void)context;
-
     GlobalRoutingResult result;
     std::unordered_map<std::int64_t, std::string> occupied_by_net;
+    std::vector<RouteSegment> occupied_routes;
 
     for (const Net* net : ordered_nets(circuit)) {
         NetRouteChoice choice;
@@ -299,7 +338,7 @@ GlobalRoutingResult run_global_routing(
         }
 
         if (!groups.empty() && has_lcp_candidates(groups)) {
-            const auto selection = choose_consistent_lcp_selection(groups, occupied_by_net, config);
+            const auto selection = choose_consistent_lcp_selection(groups, context, occupied_by_net, occupied_routes, config);
             if (selection.candidates.size() != groups.size()) {
                 choice.success = false;
                 choice.routing_failure_penalty += config.failed_pair_penalty;
@@ -323,7 +362,8 @@ GlobalRoutingResult run_global_routing(
         } else {
             for (const auto& group : groups) {
                 double penalty = 0.0;
-                const RouteCandidate* selected = choose_best_candidate(group, occupied_by_net, config, penalty);
+                const RouteCandidate* selected =
+                    choose_best_candidate(group, context, occupied_by_net, occupied_routes, config, penalty);
                 if (selected == nullptr) {
                     choice.success = false;
                     choice.routing_failure_penalty += config.failed_pair_penalty;
@@ -350,6 +390,7 @@ GlobalRoutingResult run_global_routing(
         } else {
             for (const auto& selected : choice.selected_candidates) {
                 occupy_path(selected, occupied_by_net);
+                occupy_route_segments(selected, context, occupied_routes);
             }
         }
 
