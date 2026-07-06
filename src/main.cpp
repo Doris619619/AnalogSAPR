@@ -261,6 +261,11 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
                   << "  detailed_cost: " << metrics.detailed_cost << '\n'
                   << "  detailed_routing_penalty: " << metrics.detailed_routing_penalty << '\n'
                   << "  routing_failure_penalty: " << metrics.routing_failure_penalty << '\n';
+        const auto& warnings = solution.routing_warnings.empty() ? metrics.routing_warnings : solution.routing_warnings;
+        if (!warnings.empty()) {
+            std::cout << "  routing_warnings:\n";
+            for (const auto& warning : warnings) std::cout << "    - " << warning << '\n';
+        }
     }
     return 0;
 }

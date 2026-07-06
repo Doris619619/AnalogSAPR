@@ -36,6 +36,21 @@ void include_rect(Rect rect, double& min_x, double& min_y, double& max_x, double
 }
 
 // 在指定网格段上放行 terminal access 点，让 active 内部 pin 可以逃逸到模块外。
+// 根据小尺寸版图和最小线宽选择更细的 grid step，避免相邻 pin 被 1um 默认网格吸到同一点。
+GridConfig adapt_grid_config_for_layout(const Circuit& circuit, const GridConfig& config, double width, double height) {
+    GridConfig adapted = config;
+    double min_width = std::numeric_limits<double>::infinity();
+    for (const auto& [_, rule] : circuit.constraints.wire_widths) {
+        min_width = std::min(min_width, rule.min_width);
+    }
+    const double extent = std::max(width, height);
+    if (std::isfinite(min_width) && extent > 0.0 && extent <= 50.0) {
+        const double detailed_step = std::max(min_width, extent / 300.0);
+        adapted.step = std::min(adapted.step, detailed_step);
+    }
+    return adapted;
+}
+
 void add_access_line(ObstacleMap& obstacles, const Grid& grid, GridPoint start, GridPoint end) {
     const int dx = (end.ix > start.ix) ? 1 : (end.ix < start.ix ? -1 : 0);
     const int dy = (end.iy > start.iy) ? 1 : (end.iy < start.iy ? -1 : 0);
@@ -48,6 +63,31 @@ void add_access_line(ObstacleMap& obstacles, const Grid& grid, GridPoint start, 
         current.ix += dx;
         current.iy += dy;
     }
+}
+
+// 选择 pin 到 active 外最近边界的逃逸目标点。
+Point pin_access_target(const Point& pin_location, const Rect& active, double escape) {
+    const Rect rect = normalize_rect(active);
+    const double left = std::abs(pin_location.x - rect.x1);
+    const double right = std::abs(rect.x2 - pin_location.x);
+    const double bottom = std::abs(pin_location.y - rect.y1);
+    const double top = std::abs(rect.y2 - pin_location.y);
+
+    struct AccessCandidate {
+        double distance{};
+        Point target;
+    };
+    const std::vector<AccessCandidate> candidates{
+        {left, Point{rect.x1 - escape, pin_location.y}},
+        {right, Point{rect.x2 + escape, pin_location.y}},
+        {bottom, Point{pin_location.x, rect.y1 - escape}},
+        {top, Point{pin_location.x, rect.y2 + escape}},
+    };
+    return std::min_element(
+               candidates.begin(),
+               candidates.end(),
+               [](const auto& lhs, const auto& rhs) { return lhs.distance < rhs.distance; })
+        ->target;
 }
 
 // 为 pin 选择离 active region 最近的一侧，并放行一条到 active 外的短 access corridor。
@@ -63,35 +103,7 @@ void add_pin_access(
     }
 
     const double escape = 2.0 * grid.step();
-    const double left = std::abs(pin.location.x - rect.x1);
-    const double right = std::abs(rect.x2 - pin.location.x);
-    const double bottom = std::abs(pin.location.y - rect.y1);
-    const double top = std::abs(rect.y2 - pin.location.y);
-
-    struct AccessCandidate {
-        double distance{};
-        Point target;
-    };
-    const std::vector<AccessCandidate> candidates{
-        {left, Point{rect.x1 - escape, pin.location.y}},
-        {right, Point{rect.x2 + escape, pin.location.y}},
-        {bottom, Point{pin.location.x, rect.y1 - escape}},
-        {top, Point{pin.location.x, rect.y2 + escape}},
-    };
-    Point target = pin.location;
-    double best_distance = std::numeric_limits<double>::infinity();
-    for (const auto& candidate : candidates) {
-        const auto snapped = grid.snap_to_grid(candidate.target, pin.layer);
-        if (!grid.in_bounds(snapped)) continue;
-        if (candidate.distance < best_distance) {
-            best_distance = candidate.distance;
-            target = candidate.target;
-        }
-    }
-    if (!std::isfinite(best_distance)) {
-        target.x = std::clamp(pin.location.x, grid.min_x(), grid.max_x());
-        target.y = std::clamp(pin.location.y, grid.min_y(), grid.max_y());
-    }
+    const Point target = pin_access_target(pin.location, rect, escape);
     add_access_line(obstacles, grid, start, grid.snap_to_grid(target, pin.layer));
 }
 
@@ -101,7 +113,8 @@ void add_pin_access(
 RoutingContext::RoutingContext(
     const Circuit& circuit,
     const std::unordered_map<std::string, Placement>& placements,
-    const GridConfig& config)
+    const GridConfig& config,
+    const std::vector<Point>& extra_routing_points)
     : circuit_(circuit) {
     double min_x = 0.0;
     double min_y = 0.0;
@@ -123,6 +136,7 @@ RoutingContext::RoutingContext(
         include_rect(bbox, min_x, min_y, max_x, max_y, has_bounds);
         include_rect(active, min_x, min_y, max_x, max_y, has_bounds);
         active_regions.push_back({module_id, active});
+        active_regions_.push_back(active);
         active_by_module[module_id] = active;
     }
 
@@ -152,12 +166,31 @@ RoutingContext::RoutingContext(
         }
     }
 
+    for (const auto& point : extra_routing_points) {
+        include_point(point, min_x, min_y, max_x, max_y, has_bounds);
+    }
+
+    for (const auto& [_, global_pin] : global_pins_) {
+        const auto active_it = active_by_module.find(global_pin.module);
+        if (active_it != active_by_module.end() && contains_point(active_it->second, global_pin.location)) {
+            include_point(
+                pin_access_target(global_pin.location, active_it->second, 2.0 * config.step),
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                has_bounds);
+        }
+    }
+
     if (!has_bounds) {
         min_x = min_y = 0.0;
         max_x = max_y = 0.0;
     }
 
-    grid_ = std::make_unique<Grid>(config, min_x, min_y, max_x, max_y);
+    const GridConfig effective_config =
+        adapt_grid_config_for_layout(circuit_, config, max_x - min_x, max_y - min_y);
+    grid_ = std::make_unique<Grid>(effective_config, min_x, min_y, max_x, max_y);
 
     for (const auto& [owner, active] : active_regions) {
         for (int layer = 0; layer < grid_->layer_count(); ++layer) {
@@ -187,6 +220,10 @@ const Grid& RoutingContext::grid() const {
 // 返回障碍物地图。
 const ObstacleMap& RoutingContext::obstacles() const {
     return obstacles_;
+}
+
+const std::vector<Rect>& RoutingContext::active_regions() const {
+    return active_regions_;
 }
 
 // 返回全局 pin 查询表。

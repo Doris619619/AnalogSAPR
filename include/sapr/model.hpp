@@ -170,6 +170,7 @@ struct Metrics {
     bool packing_time_dp_used{};
     bool dp_used{};
     double congestion_penalty{};
+    std::vector<std::string> routing_warnings;
 };
 
 // 汇总布局和布线结果，并可保存求解时的路由评价快照。
@@ -195,6 +196,7 @@ struct Solution {
     std::optional<bool> packing_time_dp_used;
     std::optional<bool> dp_used;
     std::optional<std::string> btree_trace_json;
+    std::vector<std::string> routing_warnings;
 };
 
 // 配置求解器的确定性参数和论文代价函数权重。
