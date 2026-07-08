@@ -761,6 +761,12 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.metrics.detailed_routes = static_cast<int>(detailed.routes.size());
     feedback.metrics.traceback_failures = detailed.traceback_failures;
     feedback.metrics.routing_warnings = detailed.report.warnings;
+    for (const auto& net_route : routing_evaluation.global_routing.net_routes) {
+        if (!net_route.success && !net_route.message.empty()) {
+            feedback.metrics.routing_warnings.push_back(
+                net_route.net + ": global routing failed: " + net_route.message);
+        }
+    }
     feedback.metrics.space_nodes_with_routes = detailed.space_nodes_with_routes;
     feedback.metrics.packing_trace_steps = static_cast<int>(request.packing_trace.steps.size());
     feedback.metrics.dp_used = routing_evaluation.used_bottom_up_dp;

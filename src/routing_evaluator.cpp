@@ -34,6 +34,19 @@ struct DetailedTopologyIndex {
     std::vector<WireSegmentRef> topology_segments;
 };
 
+// 合并 DP traceback 候选和未被 DP 覆盖 net 的普通候选，避免 direct net 在 DP 成功后丢失。
+std::vector<routing::RouteCandidate> merge_dp_traceback_with_uncovered_nets(
+    const std::vector<routing::RouteCandidate>& all_candidates,
+    const std::vector<routing::RouteCandidate>& traceback_candidates) {
+    std::vector<routing::RouteCandidate> merged = traceback_candidates;
+    std::unordered_set<std::string> covered_nets;
+    for (const auto& candidate : traceback_candidates) covered_nets.insert(candidate.net);
+    for (const auto& candidate : all_candidates) {
+        if (!covered_nets.contains(candidate.net)) merged.push_back(candidate);
+    }
+    return merged;
+}
+
 // 执行候选路径生成与 DP 全局布线选择的公共封装。
 RoutingEvaluation make_evaluation(
     routing::RoutingContext context,
@@ -41,9 +54,10 @@ RoutingEvaluation make_evaluation(
     const Circuit& circuit,
     std::optional<routing::RoutingDpResult> bottom_up_dp = std::nullopt) {
     const bool use_dp = bottom_up_dp.has_value() && bottom_up_dp->success;
-    auto global_routing = use_dp
-                              ? routing::run_global_routing(circuit, context, bottom_up_dp->traceback_candidates)
-                              : routing::run_global_routing(circuit, context, candidates);
+    const auto routing_candidates = use_dp
+                                        ? merge_dp_traceback_with_uncovered_nets(candidates, bottom_up_dp->traceback_candidates)
+                                        : candidates;
+    auto global_routing = routing::run_global_routing(circuit, context, routing_candidates);
     RoutingEvaluation evaluation{
         std::move(context),
         std::move(candidates),
@@ -462,6 +476,7 @@ void append_trace_node(
 // 判断候选是否能和 request 中的 LCP topology 对上。
 bool candidate_matches_lcp_topology(const DetailedTopologyIndex& index, const routing::RouteCandidate& candidate) {
     if (index.topology_segment_keys.empty()) return true;
+    if (lcp_ids_for_candidate(index, candidate).empty()) return true;
     if (index.topology_segment_keys.contains(segment_key(candidate))) return true;
     return index.topology_segment_keys.contains(segment_key(candidate.net, candidate.to_terminal, candidate.from_terminal));
 }
@@ -983,7 +998,19 @@ std::vector<const routing::NetRouteChoice*> ordered_detailed_routes(
 std::vector<routing::RouteCandidate> selected_candidates_for_detailed_routing(
     const RoutingEvaluation& evaluation) {
     if (evaluation.bottom_up_dp.has_value()) {
-        if (evaluation.bottom_up_dp->success) return evaluation.bottom_up_dp->traceback_candidates;
+        if (evaluation.bottom_up_dp->success) {
+            std::vector<routing::RouteCandidate> selected = evaluation.bottom_up_dp->traceback_candidates;
+            std::unordered_set<std::string> covered_nets;
+            for (const auto& candidate : selected) covered_nets.insert(candidate.net);
+            for (const auto& net_route : evaluation.global_routing.net_routes) {
+                if (!net_route.success || covered_nets.contains(net_route.net)) continue;
+                selected.insert(
+                    selected.end(),
+                    net_route.selected_candidates.begin(),
+                    net_route.selected_candidates.end());
+            }
+            return selected;
+        }
     }
     std::vector<routing::RouteCandidate> candidates;
     for (const auto& net_route : evaluation.global_routing.net_routes) {

@@ -26,6 +26,11 @@ std::filesystem::path source_input_dir() {
     return std::filesystem::path(SAPR_SOURCE_DIR) / "input";
 }
 
+// 返回 4ring mixed LCP/direct net 回归用例输入目录。
+std::filesystem::path mixed_lcp_direct_case_input_dir() {
+    return std::filesystem::path(SAPR_SOURCE_DIR) / "cases" / "4ring_2_left6_no_symmetry" / "input";
+}
+
 // 构造一个 active 小于 bbox 的最小电路，用于检查 DRC blocker 是否使用真实 active。
 sapr::Circuit make_active_region_test_circuit() {
     sapr::Circuit circuit;
@@ -585,6 +590,20 @@ void run_routing_evaluator_tests() {
     require(has_space_trace, "LCP DP transitions should record source space node id");
     for (const auto& node_result : dp_evaluation.bottom_up_dp->node_results) {
         require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
+    }
+    const auto mixed_circuit = sapr::load_circuit(mixed_lcp_direct_case_input_dir());
+    const auto mixed_request = sapr::pack_enhanced_tree(mixed_circuit, sapr::make_enhanced_tree(mixed_circuit), config);
+    const auto mixed_evaluation = sapr::evaluate_routing(mixed_circuit, mixed_request);
+    require(
+        mixed_evaluation.bottom_up_dp.has_value() && mixed_evaluation.bottom_up_dp->success,
+        "mixed LCP/direct case should use successful bottom-up DP");
+    require(mixed_evaluation.failed_nets == 0, "successful DP should not drop direct-only nets from global routing");
+    std::unordered_set<std::string> mixed_routed_nets;
+    for (const auto& segment : sapr::selected_candidates_to_segments(mixed_evaluation)) {
+        mixed_routed_nets.insert(segment.net);
+    }
+    for (const auto& net : mixed_circuit.net_order) {
+        require(mixed_routed_nets.contains(net), "mixed LCP/direct case should keep every net in selected routes");
     }
     auto no_local_segment_request = request_for_dp;
     for (auto& step : no_local_segment_request.packing_trace.steps) {
