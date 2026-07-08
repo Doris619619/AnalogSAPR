@@ -1,0 +1,14 @@
+# SYMMETRY_PAIR / SYMMETRY_SELF / FLOW / WIRE_WIDTH
+
+SYMMETRY_PAIR  sg_r13_r10  vertical  XR13  XR10
+SYMMETRY_PAIR  sg_r14_r9   vertical  XR14  XR9
+SYMMETRY_PAIR  sg_r27_r26  vertical  XR27  XR26
+SYMMETRY_PAIR  sg_r32_r30  vertical  XR32  XR30
+SYMMETRY_PAIR  sg_cap      vertical  XC5   XC6
+SYMMETRY_PAIR  sg_pmos     vertical  MP23  MP24
+SYMMETRY_PAIR  sg_tail     vertical  MM33  MM34
+
+WIRE_WIDTH     VDD    0.05  1.0
+WIRE_WIDTH     GND    0.05  1.0
+WIRE_WIDTH     LOI+   0.05  1.0
+WIRE_WIDTH     LOI-   0.05  1.0
