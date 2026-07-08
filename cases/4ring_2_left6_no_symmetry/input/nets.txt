@@ -1,0 +1,7 @@
+# net          priority    terminals
+
+8              normal     XR14.PLUS MM22.G XC5.MINUS
+9              normal     XR13.PLUS MM21.G
+12             normal     XC5.PLUS MP24.G
+GND            critical   MM22.B MM21.B
+VDD            critical   XR14.MINUS XR13.MINUS MP24.D

@@ -1,0 +1,7 @@
+# WIRE_WIDTH only; this case has no symmetry constraints
+
+WIRE_WIDTH  8    0.05  1.0
+WIRE_WIDTH  9    0.05  1.0
+WIRE_WIDTH  12   0.05  1.0
+WIRE_WIDTH  GND  0.05  1.0
+WIRE_WIDTH  VDD  0.05  1.0
