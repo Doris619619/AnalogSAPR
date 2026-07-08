@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,8 @@ class Module:
     width: float
     height: float
     active: tuple[float, float, float, float]
+    ox: float
+    oy: float
     device_type: str
     info: str
 
@@ -115,6 +118,11 @@ def infer_device_type(comment: str) -> str:
     return "unknown"
 
 
+def parse_comment_offset(comment: str, key: str) -> float:
+    match = re.search(rf"\b{re.escape(key)}=([-+]?\d+(?:\.\d+)?)", comment)
+    return float(match.group(1)) if match else 0.0
+
+
 # 加载器件定义，要求 modules.txt 至少包含 id、宽、高、有源区四列。
 def load_modules(input_dir: Path) -> dict[str, Module]:
     modules: dict[str, Module] = {}
@@ -126,6 +134,8 @@ def load_modules(input_dir: Path) -> dict[str, Module]:
             width=float(fields[1]),
             height=float(fields[2]),
             active=parse_rect(fields[3]),
+            ox=parse_comment_offset(comment, "ox"),
+            oy=parse_comment_offset(comment, "oy"),
             device_type=infer_device_type(comment),
             info=comment,
         )
@@ -176,26 +186,34 @@ def load_routes(output_dir: Path) -> list[Route]:
 
 # 将器件 BB 左下角局部坐标转换为全局坐标，语义对齐 src/geometry.cpp。
 def transform_point(x: float, y: float, module: Module, placement: Placement) -> tuple[float, float]:
-    if placement.orient == "MX":
-        gx, gy = x, module.height - y
-    elif placement.orient == "MY":
-        gx, gy = module.width - x, y
-    elif placement.orient == "MXR90":
-        gx, gy = y, x
-    elif placement.orient == "MYR90":
-        gx, gy = y, x
+    x += module.ox
+    y += module.oy
+    orient = placement.orient
+    if orient == "MY":
+        x = -x
+        angle = 0
+    elif orient == "MX":
+        y = -y
+        angle = 0
+    elif orient == "MXR90":
+        y = -y
+        angle = 90
+    elif orient == "MYR90":
+        x = -x
+        angle = 90
     else:
         angle = (placement.angle % 360 + 360) % 360
-        if angle == 0:
-            gx, gy = x, y
-        elif angle == 90:
-            gx, gy = module.height - y, x
-        elif angle == 180:
-            gx, gy = module.width - x, module.height - y
-        elif angle == 270:
-            gx, gy = y, module.width - x
-        else:
-            raise ValueError(f"unsupported placement angle: {placement.angle}")
+
+    if angle == 0:
+        gx, gy = x, y
+    elif angle == 90:
+        gx, gy = -y, x
+    elif angle == 180:
+        gx, gy = -x, -y
+    elif angle == 270:
+        gx, gy = y, -x
+    else:
+        raise ValueError(f"unsupported placement angle: {placement.angle}")
     return placement.x + gx, placement.y + gy
 
 
