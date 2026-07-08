@@ -26,6 +26,11 @@ std::filesystem::path source_input_dir() {
     return std::filesystem::path(SAPR_SOURCE_DIR) / "input";
 }
 
+// 返回 4ring mixed LCP/direct net 回归用例输入目录。
+std::filesystem::path mixed_lcp_direct_case_input_dir() {
+    return std::filesystem::path(SAPR_SOURCE_DIR) / "cases" / "4ring_2_left6_no_symmetry" / "input";
+}
+
 // 构造一个 active 小于 bbox 的最小电路，用于检查 DRC blocker 是否使用真实 active。
 sapr::Circuit make_active_region_test_circuit() {
     sapr::Circuit circuit;
@@ -230,7 +235,7 @@ sapr::RoutingEvaluationRequest make_lcp_request(
     sapr::LinkingControlPoint lcp;
     lcp.id = "LCP1";
     lcp.space_node_id = "S1";
-    if (with_location) lcp.location_candidates.push_back({4.0, 1.0, "LCP1:first"});
+    if (with_location) lcp.location_candidates.push_back({4.0, 1.0, "LCP1:first", "strict", false, 0.0, "test"});
     lcp.segments.push_back({"N", "M.A", "LCP1", 2.0, 4.0, std::nullopt, sapr::CurrentDirection::Out, "N:left"});
     lcp.segments.push_back({"N", "LCP1", "M.B", 2.0, 4.0, std::nullopt, sapr::CurrentDirection::In, "N:right"});
 
@@ -258,7 +263,7 @@ sapr::RoutingEvaluationRequest make_reverse_lcp_request(
     sapr::LinkingControlPoint lcp;
     lcp.id = "LCP1";
     lcp.space_node_id = "S1";
-    if (with_location) lcp.location_candidates.push_back({4.0, 1.0, "LCP1:first"});
+    if (with_location) lcp.location_candidates.push_back({4.0, 1.0, "LCP1:first", "strict", false, 0.0, "test"});
     lcp.segments.push_back({"N", "M.B", "LCP1", 2.0, 4.0, std::nullopt, sapr::CurrentDirection::In, "N:reverse_left"});
     lcp.segments.push_back({"N", "LCP1", "M.A", 2.0, 4.0, std::nullopt, sapr::CurrentDirection::Out, "N:reverse_right"});
 
@@ -320,6 +325,83 @@ sapr::RoutingEvaluation make_lcp_evaluation(
         false,
     };
     return evaluation;
+}
+
+// 构造 LCP-LCP 线段的 detailed routing 输入，用于验证两端 space 都收到 feedback。
+sapr::RoutingEvaluationRequest make_lcp_pair_request(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::RoutingEvaluationRequest request = make_lcp_request(circuit, placements, true);
+    request.linking_points.clear();
+    request.space_nodes.clear();
+    request.net_topologies.clear();
+
+    sapr::LinkingControlPoint left;
+    left.id = "LCP_A";
+    left.space_node_id = "S_A";
+    left.location_candidates.push_back({2.0, 1.0, "LCP_A:first", "strict", false, 0.0, "test"});
+
+    sapr::LinkingControlPoint right;
+    right.id = "LCP_B";
+    right.space_node_id = "S_B";
+    right.location_candidates.push_back({7.0, 1.0, "LCP_B:first", "strict", false, 0.0, "test"});
+
+    sapr::WireSegmentRef segment{"N", "LCP_A", "LCP_B", 2.0, 4.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:lcp_pair"};
+    left.segments.push_back(segment);
+    right.segments.push_back(segment);
+
+    sapr::SpaceNode left_space;
+    left_space.id = "S_A";
+    left_space.owner = "M";
+    left_space.kind = sapr::SpaceNodeKind::Right;
+    left_space.linking_points.push_back(left);
+
+    sapr::SpaceNode right_space = left_space;
+    right_space.id = "S_B";
+    right_space.linking_points.clear();
+    right_space.linking_points.push_back(right);
+
+    request.space_nodes.push_back(left_space);
+    request.space_nodes.push_back(right_space);
+    request.linking_points.push_back(left);
+    request.linking_points.push_back(right);
+    request.net_topologies.push_back({"N", {"M.A", "M.B"}, {left, right}, {segment}});
+    return request;
+}
+
+// 构造一条 LCP-LCP selected candidate。
+sapr::RoutingEvaluation make_lcp_pair_evaluation(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::routing::RoutingContext context(circuit, placements);
+    sapr::routing::RouteCandidate candidate;
+    candidate.net = "N";
+    candidate.from_terminal = "LCP_A";
+    candidate.to_terminal = "LCP_B";
+    candidate.segment_id = "N:lcp_pair";
+    candidate.lcp_id = "LCP_A";
+    candidate.lcp_candidate_id = "LCP_A:first";
+    candidate.source_lcp_id = "LCP_A";
+    candidate.source_lcp_candidate_id = "LCP_A:first";
+    candidate.target_lcp_id = "LCP_B";
+    candidate.target_lcp_candidate_id = "LCP_B:first";
+    candidate.wire_width = 2.0;
+    candidate.path.success = true;
+    candidate.path.points = {
+        context.grid().snap_to_grid(sapr::routing::Point{2.0, 1.0}, 0),
+        context.grid().snap_to_grid(sapr::routing::Point{7.0, 1.0}, 0),
+    };
+    candidate.path.metrics.wirelength = 5.0;
+
+    sapr::routing::NetRouteChoice choice;
+    choice.net = "N";
+    choice.success = true;
+    choice.selected_candidates.push_back(candidate);
+
+    sapr::routing::GlobalRoutingResult global;
+    global.net_routes.push_back(choice);
+
+    return {std::move(context), {candidate}, std::move(global), std::nullopt, 5.0, 0, false};
 }
 
 // 构造一条成功的人工候选路径，用于测试 LCP 多候选位置一致性选择。
@@ -508,6 +590,20 @@ void run_routing_evaluator_tests() {
     require(has_space_trace, "LCP DP transitions should record source space node id");
     for (const auto& node_result : dp_evaluation.bottom_up_dp->node_results) {
         require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
+    }
+    const auto mixed_circuit = sapr::load_circuit(mixed_lcp_direct_case_input_dir());
+    const auto mixed_request = sapr::pack_enhanced_tree(mixed_circuit, sapr::make_enhanced_tree(mixed_circuit), config);
+    const auto mixed_evaluation = sapr::evaluate_routing(mixed_circuit, mixed_request);
+    require(
+        mixed_evaluation.bottom_up_dp.has_value() && mixed_evaluation.bottom_up_dp->success,
+        "mixed LCP/direct case should use successful bottom-up DP");
+    require(mixed_evaluation.failed_nets == 0, "successful DP should not drop direct-only nets from global routing");
+    std::unordered_set<std::string> mixed_routed_nets;
+    for (const auto& segment : sapr::selected_candidates_to_segments(mixed_evaluation)) {
+        mixed_routed_nets.insert(segment.net);
+    }
+    for (const auto& net : mixed_circuit.net_order) {
+        require(mixed_routed_nets.contains(net), "mixed LCP/direct case should keep every net in selected routes");
     }
     auto no_local_segment_request = request_for_dp;
     for (auto& step : no_local_segment_request.packing_trace.steps) {
@@ -773,6 +869,12 @@ void run_routing_evaluator_tests() {
     require(lcp_detail.required_space_by_node.contains("S1"), "LCP detailed route should report required routing space");
     require(lcp_detail.required_space_by_node.at("S1") >= 3.0, "required space should include route width and spacing");
     require(lcp_detail.detailed_cost > 0.0, "detailed routing should report local detailed cost");
+
+    const auto lcp_pair_request = make_lcp_pair_request(drc_circuit, drc_placements);
+    const auto lcp_pair_eval = make_lcp_pair_evaluation(drc_circuit, drc_placements);
+    const auto lcp_pair_detail = sapr::run_detailed_routing(drc_circuit, lcp_pair_request, lcp_pair_eval);
+    require(lcp_pair_detail.required_space_by_node.contains("S_A"), "LCP-LCP route should feedback source space");
+    require(lcp_pair_detail.required_space_by_node.contains("S_B"), "LCP-LCP route should feedback target space");
 
     auto flow_circuit = drc_circuit;
     flow_circuit.constraints.flows.push_back({"N", "M.A", "M.B"});

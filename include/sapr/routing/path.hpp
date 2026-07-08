@@ -33,6 +33,10 @@ struct RouteCandidate {
     std::string segment_id;
     std::string lcp_id;
     std::string lcp_candidate_id;
+    std::string source_lcp_id;
+    std::string source_lcp_candidate_id;
+    std::string target_lcp_id;
+    std::string target_lcp_candidate_id;
     double wire_width{1.0};
     bool flow_ok{true};
     bool current_density_ok{true};

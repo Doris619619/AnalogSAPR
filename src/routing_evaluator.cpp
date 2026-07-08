@@ -34,6 +34,19 @@ struct DetailedTopologyIndex {
     std::vector<WireSegmentRef> topology_segments;
 };
 
+// 合并 DP traceback 候选和未被 DP 覆盖 net 的普通候选，避免 direct net 在 DP 成功后丢失。
+std::vector<routing::RouteCandidate> merge_dp_traceback_with_uncovered_nets(
+    const std::vector<routing::RouteCandidate>& all_candidates,
+    const std::vector<routing::RouteCandidate>& traceback_candidates) {
+    std::vector<routing::RouteCandidate> merged = traceback_candidates;
+    std::unordered_set<std::string> covered_nets;
+    for (const auto& candidate : traceback_candidates) covered_nets.insert(candidate.net);
+    for (const auto& candidate : all_candidates) {
+        if (!covered_nets.contains(candidate.net)) merged.push_back(candidate);
+    }
+    return merged;
+}
+
 // 执行候选路径生成与 DP 全局布线选择的公共封装。
 RoutingEvaluation make_evaluation(
     routing::RoutingContext context,
@@ -41,9 +54,10 @@ RoutingEvaluation make_evaluation(
     const Circuit& circuit,
     std::optional<routing::RoutingDpResult> bottom_up_dp = std::nullopt) {
     const bool use_dp = bottom_up_dp.has_value() && bottom_up_dp->success;
-    auto global_routing = use_dp
-                              ? routing::run_global_routing(circuit, context, bottom_up_dp->traceback_candidates)
-                              : routing::run_global_routing(circuit, context, candidates);
+    const auto routing_candidates = use_dp
+                                        ? merge_dp_traceback_with_uncovered_nets(candidates, bottom_up_dp->traceback_candidates)
+                                        : candidates;
+    auto global_routing = routing::run_global_routing(circuit, context, routing_candidates);
     RoutingEvaluation evaluation{
         std::move(context),
         std::move(candidates),
@@ -107,16 +121,36 @@ int layer_for_lcp_segment(
 }
 
 // 将 LCP segment endpoint 解析为 A* 可用的网格点。
+// 支持 pin-LCP 与 LCP-LCP segment，将任意 endpoint 解析到当前候选绑定下的网格点。
 std::optional<routing::GridPoint> endpoint_grid_point(
     const routing::RoutingContext& context,
-    const LinkingControlPoint& point,
-    const PhysicalLocationCandidate& location,
+    const std::unordered_map<std::string, LinkingControlPoint>& lcp_by_id,
+    const std::unordered_map<std::string, PhysicalLocationCandidate>& location_by_lcp,
     const WireSegmentRef& segment,
     const std::string& endpoint) {
-    if (endpoint == point.id) return lcp_grid_point(context, location, layer_for_lcp_segment(context, segment));
+    const auto lcp = lcp_by_id.find(endpoint);
+    if (lcp != lcp_by_id.end()) {
+        const auto location = location_by_lcp.find(endpoint);
+        if (location == location_by_lcp.end()) return std::nullopt;
+        return lcp_grid_point(context, location->second, layer_for_lcp_segment(context, segment));
+    }
     return pin_grid_point(context, endpoint);
 }
 
+// 返回候选中 endpoint 对应的 LCP 候选位置 id；pin endpoint 返回空。
+std::string lcp_candidate_for_endpoint(
+    const std::unordered_map<std::string, PhysicalLocationCandidate>& location_by_lcp,
+    const std::string& endpoint) {
+    const auto found = location_by_lcp.find(endpoint);
+    return found == location_by_lcp.end() ? std::string{} : found->second.id;
+}
+
+// 在运行 A* 前估计 LCP-LCP 候选组合代价，用于 top-K 截断。
+double endpoint_pair_distance(
+    const PhysicalLocationCandidate& left,
+    const PhysicalLocationCandidate& right) {
+    return std::abs(left.x - right.x) + std::abs(left.y - right.y) + left.penalty + right.penalty;
+}
 // 查找 net 的 FLOW 约束。
 std::optional<FlowConstraint> flow_for_net(const Circuit& circuit, const std::string& net) {
     for (const auto& flow : circuit.constraints.flows) {
@@ -161,51 +195,112 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
     const RoutingEvaluationRequest& request,
     const Circuit& circuit) {
     std::vector<routing::RouteCandidate> candidates;
+    std::unordered_map<std::string, LinkingControlPoint> lcp_by_id;
+    for (const auto& point : request.linking_points) lcp_by_id[point.id] = point;
+
+    std::unordered_map<std::string, WireSegmentRef> segment_by_id;
     for (const auto& point : request.linking_points) {
         for (const auto& segment : point.segments) {
-            if (point.location_candidates.empty()) {
-                routing::RouteCandidate candidate;
-                candidate.net = segment.net;
-                candidate.from_terminal = segment.from;
-                candidate.to_terminal = segment.to;
-                candidate.segment_id = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
-                candidate.lcp_id = point.id;
-                candidate.wire_width = std::max(segment.min_width, 1e-9);
-                candidate.path = routing::GridPath{false, "LCP has no physical location candidate", {}, {}};
+            const std::string id = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
+            segment_by_id.try_emplace(id, segment);
+        }
+    }
+
+    constexpr std::size_t kMaxPairwiseCandidatesPerSegment = 12;
+    for (const auto& [_, segment] : segment_by_id) {
+        std::vector<std::string> lcp_endpoints;
+        if (lcp_by_id.contains(segment.from)) lcp_endpoints.push_back(segment.from);
+        if (lcp_by_id.contains(segment.to)) lcp_endpoints.push_back(segment.to);
+        if (lcp_endpoints.empty()) continue;
+
+        bool missing_location = false;
+        for (const auto& lcp_id : lcp_endpoints) {
+            if (lcp_by_id.at(lcp_id).location_candidates.empty()) missing_location = true;
+        }
+        if (missing_location) {
+            routing::RouteCandidate candidate;
+            candidate.net = segment.net;
+            candidate.from_terminal = segment.from;
+            candidate.to_terminal = segment.to;
+            candidate.segment_id = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
+            candidate.lcp_id = lcp_endpoints.front();
+            if (lcp_by_id.contains(segment.from)) candidate.source_lcp_id = segment.from;
+            if (lcp_by_id.contains(segment.to)) candidate.target_lcp_id = segment.to;
+            candidate.wire_width = std::max(segment.min_width, 1e-9);
+            candidate.path = routing::GridPath{false, "LCP has no physical location candidate", {}, {}};
+            annotate_candidate(circuit, candidate, 50000.0, 50000.0, segment);
+            candidates.push_back(std::move(candidate));
+            continue;
+        }
+
+        struct LocationBinding {
+            std::unordered_map<std::string, PhysicalLocationCandidate> by_lcp;
+            double estimate{};
+        };
+        std::vector<LocationBinding> bindings;
+        if (lcp_endpoints.size() == 1) {
+            const auto& lcp = lcp_by_id.at(lcp_endpoints.front());
+            for (const auto& location : lcp.location_candidates) {
+                LocationBinding binding;
+                binding.by_lcp[lcp.id] = location;
+                binding.estimate = location.penalty;
+                bindings.push_back(std::move(binding));
+            }
+        } else {
+            const auto& first = lcp_by_id.at(lcp_endpoints[0]);
+            const auto& second = lcp_by_id.at(lcp_endpoints[1]);
+            for (const auto& first_location : first.location_candidates) {
+                for (const auto& second_location : second.location_candidates) {
+                    LocationBinding binding;
+                    binding.by_lcp[first.id] = first_location;
+                    binding.by_lcp[second.id] = second_location;
+                    binding.estimate = endpoint_pair_distance(first_location, second_location);
+                    bindings.push_back(std::move(binding));
+                }
+            }
+            std::sort(bindings.begin(), bindings.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs.estimate < rhs.estimate;
+            });
+            if (bindings.size() > kMaxPairwiseCandidatesPerSegment) bindings.resize(kMaxPairwiseCandidatesPerSegment);
+        }
+
+        for (const auto& binding : bindings) {
+            const auto start = endpoint_grid_point(context, lcp_by_id, binding.by_lcp, segment, segment.from);
+            const auto goal = endpoint_grid_point(context, lcp_by_id, binding.by_lcp, segment, segment.to);
+            routing::RouteCandidate candidate;
+            candidate.net = segment.net;
+            candidate.from_terminal = segment.from;
+            candidate.to_terminal = segment.to;
+            candidate.segment_id = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
+            candidate.wire_width = std::max(segment.min_width, 1e-9);
+            if (!lcp_endpoints.empty()) {
+                candidate.lcp_id = lcp_endpoints.front();
+                candidate.lcp_candidate_id = lcp_candidate_for_endpoint(binding.by_lcp, lcp_endpoints.front());
+            }
+            if (lcp_by_id.contains(segment.from)) {
+                candidate.source_lcp_id = segment.from;
+                candidate.source_lcp_candidate_id = lcp_candidate_for_endpoint(binding.by_lcp, segment.from);
+            }
+            if (lcp_by_id.contains(segment.to)) {
+                candidate.target_lcp_id = segment.to;
+                candidate.target_lcp_candidate_id = lcp_candidate_for_endpoint(binding.by_lcp, segment.to);
+            }
+            if (!start.has_value() || !goal.has_value()) {
+                candidate.path = routing::GridPath{false, "LCP endpoint cannot be resolved", {}, {}};
                 annotate_candidate(circuit, candidate, 50000.0, 50000.0, segment);
                 candidates.push_back(std::move(candidate));
                 continue;
             }
-            const auto& locations = point.location_candidates;
-            for (const auto& location : locations) {
-                const auto start = endpoint_grid_point(context, point, location, segment, segment.from);
-                const auto goal = endpoint_grid_point(context, point, location, segment, segment.to);
-                routing::RouteCandidate candidate;
-                candidate.net = segment.net;
-                candidate.from_terminal = segment.from;
-                candidate.to_terminal = segment.to;
-                candidate.segment_id = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
-                candidate.lcp_id = point.id;
-                candidate.lcp_candidate_id = location.id;
-                candidate.wire_width = std::max(segment.min_width, 1e-9);
-                if (!start.has_value() || !goal.has_value()) {
-                    candidate.path = routing::GridPath{false, "LCP endpoint cannot be resolved", {}, {}};
-                    annotate_candidate(circuit, candidate, 50000.0, 50000.0, segment);
-                    candidates.push_back(std::move(candidate));
-                    continue;
-                }
-                routing::AStarConfig config;
-                config.wire_width = candidate.wire_width;
-                candidate.path = routing::find_astar_path(context.grid(), context.obstacles(), *start, *goal, config);
-                annotate_candidate(circuit, candidate, 50000.0, 50000.0, segment);
-                candidates.push_back(std::move(candidate));
-            }
+            routing::AStarConfig config;
+            config.wire_width = candidate.wire_width;
+            candidate.path = routing::find_astar_path(context.grid(), context.obstacles(), *start, *goal, config);
+            for (const auto& [__, location] : binding.by_lcp) candidate.coupling_cost += location.penalty;
+            annotate_candidate(circuit, candidate, 50000.0, 50000.0, segment);
+            candidates.push_back(std::move(candidate));
         }
     }
     return candidates;
 }
-
-// 移除 A-B-A 型即时回折，减少 detailed routing 输出中的重复线段。
 [[maybe_unused]] std::vector<routing::GridPoint> prune_backtracks(std::vector<routing::GridPoint> points) {
     bool changed = true;
     while (changed) {
@@ -311,6 +406,33 @@ std::string space_node_for_candidate(const DetailedTopologyIndex& index, const r
 }
 
 // 返回或创建指定 net 的 detailed route trace。
+// 收集候选路径关联到的全部 LCP id，LCP-LCP segment 需要同时反馈两端 space。
+std::vector<std::string> lcp_ids_for_candidate(const DetailedTopologyIndex& index, const routing::RouteCandidate& candidate) {
+    std::vector<std::string> ids;
+    const auto append = [&](const std::string& id) {
+        if (id.empty()) return;
+        if (!index.lcp_by_id.contains(id) && !index.lcp_space_by_id.contains(id)) return;
+        if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+    };
+    append(candidate.source_lcp_id);
+    append(candidate.target_lcp_id);
+    append(candidate.lcp_id);
+    if (is_lcp_terminal(index, candidate.from_terminal)) append(candidate.from_terminal);
+    if (is_lcp_terminal(index, candidate.to_terminal)) append(candidate.to_terminal);
+    return ids;
+}
+
+// 收集候选路径关联到的全部 space node id，并去重。
+std::vector<std::string> space_nodes_for_candidate(const DetailedTopologyIndex& index, const routing::RouteCandidate& candidate) {
+    std::vector<std::string> spaces;
+    for (const auto& lcp_id : lcp_ids_for_candidate(index, candidate)) {
+        const auto found = index.lcp_space_by_id.find(lcp_id);
+        if (found == index.lcp_space_by_id.end()) continue;
+        if (std::find(spaces.begin(), spaces.end(), found->second) == spaces.end()) spaces.push_back(found->second);
+    }
+    return spaces;
+}
+
 DetailedRouteTrace& trace_for_net(DetailedRoutingReport& report, const std::string& net) {
     for (auto& trace : report.traces) {
         if (trace.net == net) return trace;
@@ -354,6 +476,7 @@ void append_trace_node(
 // 判断候选是否能和 request 中的 LCP topology 对上。
 bool candidate_matches_lcp_topology(const DetailedTopologyIndex& index, const routing::RouteCandidate& candidate) {
     if (index.topology_segment_keys.empty()) return true;
+    if (lcp_ids_for_candidate(index, candidate).empty()) return true;
     if (index.topology_segment_keys.contains(segment_key(candidate))) return true;
     return index.topology_segment_keys.contains(segment_key(candidate.net, candidate.to_terminal, candidate.from_terminal));
 }
@@ -875,7 +998,19 @@ std::vector<const routing::NetRouteChoice*> ordered_detailed_routes(
 std::vector<routing::RouteCandidate> selected_candidates_for_detailed_routing(
     const RoutingEvaluation& evaluation) {
     if (evaluation.bottom_up_dp.has_value()) {
-        if (evaluation.bottom_up_dp->success) return evaluation.bottom_up_dp->traceback_candidates;
+        if (evaluation.bottom_up_dp->success) {
+            std::vector<routing::RouteCandidate> selected = evaluation.bottom_up_dp->traceback_candidates;
+            std::unordered_set<std::string> covered_nets;
+            for (const auto& candidate : selected) covered_nets.insert(candidate.net);
+            for (const auto& net_route : evaluation.global_routing.net_routes) {
+                if (!net_route.success || covered_nets.contains(net_route.net)) continue;
+                selected.insert(
+                    selected.end(),
+                    net_route.selected_candidates.begin(),
+                    net_route.selected_candidates.end());
+            }
+            return selected;
+        }
     }
     std::vector<routing::RouteCandidate> candidates;
     for (const auto& net_route : evaluation.global_routing.net_routes) {
@@ -1098,15 +1233,16 @@ DetailedRoutingResult run_detailed_routing(
         detailed_metrics.wirelength += actual_candidate.path.metrics.wirelength;
         detailed_metrics.bend_count += actual_candidate.path.metrics.bend_count;
         detailed_metrics.via_count += actual_candidate.path.metrics.via_count;
-        const std::string lcp_id = lcp_id_for_candidate(topology_index, actual_candidate);
-        const std::string space_node_id = space_node_for_candidate(topology_index, actual_candidate);
+        const auto space_node_ids = space_nodes_for_candidate(topology_index, actual_candidate);
         const auto source_segment = wire_segment_for_candidate(topology_index, actual_candidate);
-        if (!space_node_id.empty()) {
+        for (const auto& space_node_id : space_node_ids) {
             routed_space_nodes.insert(space_node_id);
             update_space_requirement(result, space_node_id, detailed_width_for_candidate(circuit, evaluation, actual_candidate));
         }
-        if (!lcp_id.empty() && topology_index.lcp_without_location.contains(lcp_id)) {
-            add_traceback_failure(result, trace, "LCP " + lcp_id + " has no location candidate");
+        for (const auto& candidate_lcp_id : lcp_ids_for_candidate(topology_index, actual_candidate)) {
+            if (topology_index.lcp_without_location.contains(candidate_lcp_id)) {
+                add_traceback_failure(result, trace, "LCP " + candidate_lcp_id + " has no location candidate");
+            }
         }
         if (!candidate_matches_lcp_topology(topology_index, actual_candidate)) {
             add_traceback_failure(

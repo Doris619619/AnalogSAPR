@@ -156,6 +156,16 @@ bool append_candidate_if_consistent(
         if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.lcp_candidate_id) return false;
         if (assigned == state.lcp_location_by_id.end()) state.lcp_location_by_id[candidate.lcp_id] = candidate.lcp_candidate_id;
     }
+    if (!candidate.source_lcp_id.empty()) {
+        const auto assigned = state.lcp_location_by_id.find(candidate.source_lcp_id);
+        if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.source_lcp_candidate_id) return false;
+        if (assigned == state.lcp_location_by_id.end()) state.lcp_location_by_id[candidate.source_lcp_id] = candidate.source_lcp_candidate_id;
+    }
+    if (!candidate.target_lcp_id.empty()) {
+        const auto assigned = state.lcp_location_by_id.find(candidate.target_lcp_id);
+        if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.target_lcp_candidate_id) return false;
+        if (assigned == state.lcp_location_by_id.end()) state.lcp_location_by_id[candidate.target_lcp_id] = candidate.target_lcp_candidate_id;
+    }
     state.selected_candidates.push_back(candidate);
     state.occupied_routes.insert(state.occupied_routes.end(), candidate_routes.begin(), candidate_routes.end());
     add_candidate_metrics(state, candidate);
