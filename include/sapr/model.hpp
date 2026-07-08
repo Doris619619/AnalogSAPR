@@ -232,6 +232,10 @@ struct PhysicalLocationCandidate {
     double x{};
     double y{};
     std::string id;
+    std::string validity_level{"strict"};
+    bool is_fallback{};
+    double penalty{};
+    std::string reason;
 };
 
 // 表示增强 B*-tree 中的拓扑控制点。

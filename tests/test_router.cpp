@@ -3,6 +3,9 @@
 
 #include <filesystem>
 #include <random>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "sapr/geometry.hpp"
@@ -33,6 +36,52 @@ bool valid_lcp_topology(const sapr::LinkingControlPoint& point) {
 sapr::Rect placement_box(const sapr::Circuit& circuit, const sapr::Placement& placement) {
     const auto size = sapr::placed_size(circuit.modules.at(placement.module), placement);
     return {placement.x, placement.y, placement.x + size.first, placement.y + size.second};
+}
+
+// 构造单器件多端同坐标 net，用于稳定验证自动 LCP leaf/root 语义。
+sapr::Circuit make_same_location_lcp_circuit(int pin_count) {
+    sapr::Circuit circuit;
+    circuit.modules.emplace("M", sapr::Module{"M", 10.0, 10.0, sapr::Rect{1.0, 1.0, 2.0, 2.0}, 0.0, 0.0, ""});
+    circuit.module_order.push_back("M");
+    sapr::Net net{"N", sapr::Priority::Normal, {}};
+    for (int index = 0; index < pin_count; ++index) {
+        const std::string pin = "P" + std::to_string(index);
+        const std::string terminal = "M." + pin;
+        circuit.pins.emplace(terminal, sapr::Pin{"M", pin, 5.0, 5.0, "M1"});
+        circuit.pin_order.push_back(terminal);
+        net.terminals.push_back(terminal);
+    }
+    circuit.nets.emplace("N", net);
+    circuit.net_order.push_back("N");
+    return circuit;
+}
+
+// 统计包含指定 token 的 LCP 数量。
+int count_lcps_with_token(const sapr::RoutingEvaluationRequest& request, const std::string& token) {
+    int count = 0;
+    for (const auto& point : request.linking_points) {
+        if (point.id.find(token) != std::string::npos) ++count;
+    }
+    return count;
+}
+
+// 判断自动 LCP 拓扑里是否存在指定 FLOW 的有向可达路径。
+bool topology_has_flow_path(const sapr::RoutingEvaluationRequest& request, const std::string& out_pin, const std::string& in_pin) {
+    std::unordered_map<std::string, std::vector<std::string>> adjacency;
+    for (const auto& topology : request.net_topologies) {
+        for (const auto& segment : topology.segments) adjacency[segment.from].push_back(segment.to);
+    }
+    std::vector<std::string> frontier{out_pin};
+    std::unordered_set<std::string> visited;
+    while (!frontier.empty()) {
+        const auto current = frontier.back();
+        frontier.pop_back();
+        if (current == in_pin) return true;
+        if (!visited.insert(current).second) continue;
+        const auto next = adjacency.find(current);
+        if (next != adjacency.end()) frontier.insert(frontier.end(), next->second.begin(), next->second.end());
+    }
+    return false;
 }
 
 }  // namespace
@@ -145,6 +194,54 @@ void run_router_tests() {
         require(approx(solution.placements.at(id).x, repeat.placements.at(id).x), "fixed seed should preserve x");
         require(approx(solution.placements.at(id).y, repeat.placements.at(id).y), "fixed seed should preserve y");
         require(solution.placements.at(id).orient == repeat.placements.at(id).orient, "fixed seed should preserve orient");
+    }
+
+    const auto four_pin_circuit = make_same_location_lcp_circuit(4);
+    const auto four_pin_tree = sapr::make_enhanced_tree(four_pin_circuit);
+    const auto four_pin_request = sapr::pack_enhanced_tree(four_pin_circuit, four_pin_tree, config);
+    require(count_lcps_with_token(four_pin_request, ":leaf:") == 2, "4-pin net should create two leaf LCPs");
+    require(count_lcps_with_token(four_pin_request, ":root") == 1, "4-pin net should create one root LCP");
+    require(four_pin_request.linking_points.size() == 3, "4-pin actual LCP count should include root");
+    bool has_lcp_to_lcp = false;
+    for (const auto& topology : four_pin_request.net_topologies) {
+        for (const auto& segment : topology.segments) {
+            if (segment.from.find(":leaf:") != std::string::npos && segment.to.find(":root") != std::string::npos) {
+                has_lcp_to_lcp = true;
+            }
+        }
+    }
+    require(has_lcp_to_lcp, "root topology should include leaf-to-root LCP segment");
+    for (const auto& point : four_pin_request.linking_points) {
+        require(point.location_candidates.size() >= 3, "automatic LCP should expose at least three candidates");
+    }
+
+    auto flow_lcp_circuit = make_same_location_lcp_circuit(4);
+    flow_lcp_circuit.constraints.flows.push_back({"N", "M.P0", "M.P3"});
+    const auto flow_lcp_tree = sapr::make_enhanced_tree(flow_lcp_circuit);
+    const auto flow_lcp_request = sapr::pack_enhanced_tree(flow_lcp_circuit, flow_lcp_tree, config);
+    require(
+        topology_has_flow_path(flow_lcp_request, "M.P0", "M.P3"),
+        "automatic LCP topology should preserve FLOW reachability from source to sink");
+
+    auto blocked_lcp_circuit = make_same_location_lcp_circuit(4);
+    blocked_lcp_circuit.modules.at("M").active = {0.0, 0.0, 10.0, 10.0};
+    const auto blocked_lcp_tree = sapr::make_enhanced_tree(blocked_lcp_circuit);
+    const auto blocked_lcp_request = sapr::pack_enhanced_tree(blocked_lcp_circuit, blocked_lcp_tree, config);
+    for (const auto& point : blocked_lcp_request.linking_points) {
+        for (const auto& candidate : point.location_candidates) {
+            require(
+                candidate.validity_level != "strict",
+                "active-blocked LCP candidates should not be classified as strict");
+        }
+    }
+
+    const auto seven_pin_circuit = make_same_location_lcp_circuit(7);
+    const auto seven_pin_tree = sapr::make_enhanced_tree(seven_pin_circuit);
+    const auto seven_pin_request = sapr::pack_enhanced_tree(seven_pin_circuit, seven_pin_tree, config);
+    require(count_lcps_with_token(seven_pin_request, ":leaf:") == 3, "7-pin same-location net should split into 3 balanced leaves");
+    for (const auto& point : seven_pin_request.linking_points) {
+        if (point.id.find(":leaf:") == std::string::npos) continue;
+        require(point.segments.size() <= 3, "leaf cluster should respect max pins per leaf");
     }
 
     const auto metrics = sapr::measure(circuit, solution);

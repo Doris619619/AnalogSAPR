@@ -211,7 +211,7 @@ const RouteCandidate* choose_best_candidate(
 bool has_lcp_candidates(const std::vector<CandidateGroup>& groups) {
     for (const auto& group : groups) {
         for (const auto& candidate : group.candidates) {
-            if (!candidate.lcp_id.empty()) return true;
+            if (!candidate.lcp_id.empty() || !candidate.source_lcp_id.empty() || !candidate.target_lcp_id.empty()) return true;
         }
     }
     return false;
@@ -242,16 +242,20 @@ void search_consistent_lcp_selection(
     for (const auto& candidate : group.candidates) {
         if (!candidate.path.success) continue;
 
-        bool assigned_here = false;
-        if (!candidate.lcp_id.empty()) {
-            const auto assigned = assigned_location_by_lcp.find(candidate.lcp_id);
-            if (assigned != assigned_location_by_lcp.end() && assigned->second != candidate.lcp_candidate_id) {
-                continue;
-            }
-            if (assigned == assigned_location_by_lcp.end()) {
-                assigned_location_by_lcp[candidate.lcp_id] = candidate.lcp_candidate_id;
-                assigned_here = true;
-            }
+        std::vector<std::string> assigned_here;
+        auto bind_lcp = [&](const std::string& lcp_id, const std::string& candidate_id) {
+            if (lcp_id.empty()) return true;
+            const auto assigned = assigned_location_by_lcp.find(lcp_id);
+            if (assigned != assigned_location_by_lcp.end()) return assigned->second == candidate_id;
+            assigned_location_by_lcp[lcp_id] = candidate_id;
+            assigned_here.push_back(lcp_id);
+            return true;
+        };
+        if (!bind_lcp(candidate.lcp_id, candidate.lcp_candidate_id) ||
+            !bind_lcp(candidate.source_lcp_id, candidate.source_lcp_candidate_id) ||
+            !bind_lcp(candidate.target_lcp_id, candidate.target_lcp_candidate_id)) {
+            for (const auto& lcp_id : assigned_here) assigned_location_by_lcp.erase(lcp_id);
+            continue;
         }
 
         const bool has_short = shorts_with_existing_routes(candidate, context, occupied_routes);
@@ -274,7 +278,7 @@ void search_consistent_lcp_selection(
         current_conflict_penalties.pop_back();
         current_candidates.pop_back();
 
-        if (assigned_here) assigned_location_by_lcp.erase(candidate.lcp_id);
+        for (const auto& lcp_id : assigned_here) assigned_location_by_lcp.erase(lcp_id);
     }
 }
 

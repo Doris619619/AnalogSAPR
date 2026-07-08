@@ -10,6 +10,7 @@ add_library(sapr_core STATIC
     src/constraints.cpp
     src/geometry.cpp
     src/io.cpp
+    src/lcp_generator.cpp
     src/optimizer.cpp
     src/routing/astar.cpp
     src/routing/dp_router.cpp
