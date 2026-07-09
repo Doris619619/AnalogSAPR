@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(sapr_core STATIC
+    src/btree_trace.cpp
     src/constraints.cpp
     src/geometry.cpp
     src/io.cpp
@@ -25,6 +26,7 @@ add_library(sapr_core STATIC
     src/routing/transform.cpp
     src/router.cpp
     src/routing_evaluator.cpp
+    src/sa_btree_dump.cpp
     src/tree.cpp
 )
 target_include_directories(sapr_core PUBLIC include)
@@ -68,7 +70,7 @@ if(BUILD_TESTING)
     set_tests_properties(sapr_unit PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
     add_test(NAME sapr_validate COMMAND sapr validate --input input)
     set_tests_properties(sapr_validate PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-    add_test(NAME sapr_run COMMAND sapr run --input ../input --output cli-output --sa-iterations 5)
+    add_test(NAME sapr_run COMMAND sapr run --input ../input --output cli-output --sa-iterations 5 --no-dump-sa-btree)
     set_tests_properties(sapr_run PROPERTIES WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
     add_test(NAME sapr_run_outputs COMMAND ${CMAKE_COMMAND}
         -DOUTPUT_DIR=${CMAKE_BINARY_DIR}/cli-output
