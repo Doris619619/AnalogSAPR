@@ -232,6 +232,8 @@ struct SolverConfig {
     int routing_feedback_iterations{2};
     double routing_feedback_tolerance{1e-6};
     bool debug_search{};
+    double boundary_margin{-1.0};
+    double boundary_clearance{0.0};
     bool dump_sa_btree{true};
 };
 

@@ -62,6 +62,13 @@ bool same_point(const GridPoint& lhs, const GridPoint& rhs) {
     return lhs.ix == rhs.ix && lhs.iy == rhs.iy && lhs.layer == rhs.layer;
 }
 
+// 检查路由中心线是否仍位于芯片左、下边界内。
+bool metal_inside_chip_boundary(const GridPoint& point, const Grid& grid, double wire_width) {
+    (void)wire_width;
+    const Point location = grid.grid_to_point(point);
+    return location.x >= -1e-9 && location.y >= -1e-9;
+}
+
 // 根据相邻网格点推导移动方向。
 Direction direction_between(const GridPoint& from, const GridPoint& to) {
     if (from.layer != to.layer) return Direction::Via;
@@ -129,7 +136,6 @@ GridPath find_astar_path(
     if (!grid.in_bounds(start) || !grid.in_bounds(goal)) {
         return GridPath{false, "start or goal is outside grid bounds", {}, {}};
     }
-
     SearchState start_state{start, Direction::None};
     std::priority_queue<QueueNode, std::vector<QueueNode>, QueueCompare> open;
     std::unordered_map<std::int64_t, StateRecord> records;
@@ -161,6 +167,9 @@ GridPath find_astar_path(
 
         const StateRecord current_record = current_record_it->second;
         for (const auto& neighbor : grid.neighbors(current_node.state.point)) {
+            if (!metal_inside_chip_boundary(neighbor, grid, config.wire_width)) {
+                continue;
+            }
             if (!same_point(neighbor, goal) && obstacles.is_blocked(neighbor, grid, config.wire_width)) {
                 continue;
             }

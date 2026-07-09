@@ -69,6 +69,7 @@ void print_usage() {
     std::cerr << "Usage:\n"
               << "  sapr validate [--input input]\n"
               << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n"
+              << "           [--boundary-margin value] [--boundary-clearance 0]\n"
               << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
               << "           [--cooling-rate 0.96] [--dump-routing-eval]\n"
               << "           [--debug-search]\n"
@@ -192,6 +193,17 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     sapr::SolverConfig config;
     config.spacing = option_double(args, "--spacing", config.spacing);
     config.row_width = option_double(args, "--row-width", config.row_width);
+    if (has_option(args, "--boundary-margin")) {
+        config.boundary_margin = option_double(args, "--boundary-margin", config.boundary_margin);
+        if (config.boundary_margin < 0.0) {
+            throw std::runtime_error("invalid value for --boundary-margin: must be non-negative");
+        }
+    }
+    config.boundary_clearance =
+        option_double(args, "--boundary-clearance", config.boundary_clearance);
+    if (config.boundary_clearance < 0.0) {
+        throw std::runtime_error("invalid value for --boundary-clearance: must be non-negative");
+    }
     config.seed = option_uint(args, "--seed", config.seed);
     config.sa_iterations = option_int(args, "--sa-iterations", config.sa_iterations);
     config.initial_temperature = option_double(args, "--initial-temperature", config.initial_temperature);

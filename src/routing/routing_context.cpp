@@ -37,7 +37,7 @@ void include_rect(Rect rect, double& min_x, double& min_y, double& max_x, double
 
 // 在指定网格段上放行 terminal access 点，让 active 内部 pin 可以逃逸到模块外。
 // 根据小尺寸版图和最小线宽选择更细的 grid step，避免相邻 pin 被 1um 默认网格吸到同一点。
-GridConfig adapt_grid_config_for_layout(const Circuit& circuit, const GridConfig& config, double width, double height) {
+GridConfig make_effective_grid_config(const Circuit& circuit, const GridConfig& config, double width, double height) {
     GridConfig adapted = config;
     double min_width = std::numeric_limits<double>::infinity();
     for (const auto& [_, rule] : circuit.constraints.wire_widths) {
@@ -83,11 +83,16 @@ Point pin_access_target(const Point& pin_location, const Rect& active, double es
         {bottom, Point{pin_location.x, rect.y1 - escape}},
         {top, Point{pin_location.x, rect.y2 + escape}},
     };
-    return std::min_element(
-               candidates.begin(),
-               candidates.end(),
-               [](const auto& lhs, const auto& rhs) { return lhs.distance < rhs.distance; })
-        ->target;
+    const auto legal = std::min_element(
+        candidates.begin(),
+        candidates.end(),
+        [](const auto& lhs, const auto& rhs) {
+            const bool lhs_legal = lhs.target.x >= 0.0 && lhs.target.y >= 0.0;
+            const bool rhs_legal = rhs.target.x >= 0.0 && rhs.target.y >= 0.0;
+            if (lhs_legal != rhs_legal) return lhs_legal;
+            return lhs.distance < rhs.distance;
+        });
+    return Point{std::max(0.0, legal->target.x), std::max(0.0, legal->target.y)};
 }
 
 // 为 pin 选择离 active region 最近的一侧，并放行一条到 active 外的短 access corridor。
@@ -108,6 +113,14 @@ void add_pin_access(
 }
 
 }  // namespace
+
+GridConfig effective_grid_config_for_layout(
+    const Circuit& circuit,
+    const GridConfig& config,
+    double width,
+    double height) {
+    return make_effective_grid_config(circuit, config, width, height);
+}
 
 // 构建网格、障碍物、全局 pin 和 terminal 例外点。
 RoutingContext::RoutingContext(
@@ -189,7 +202,7 @@ RoutingContext::RoutingContext(
     }
 
     const GridConfig effective_config =
-        adapt_grid_config_for_layout(circuit_, config, max_x - min_x, max_y - min_y);
+        effective_grid_config_for_layout(circuit_, config, max_x - min_x, max_y - min_y);
     grid_ = std::make_unique<Grid>(effective_config, min_x, min_y, max_x, max_y);
 
     for (const auto& [owner, active] : active_regions) {
