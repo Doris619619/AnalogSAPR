@@ -70,6 +70,7 @@ void print_usage() {
               << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n"
               << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
               << "           [--cooling-rate 0.96] [--dump-routing-eval]\n"
+              << "           [--debug-search]\n"
               << "           [--no-render] [--render-dpi 200] [--render-name name]\n"
               << "           [--dump-btree] [--render-btree-name name]\n";
 }
@@ -182,6 +183,7 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     config.sa_iterations = option_int(args, "--sa-iterations", config.sa_iterations);
     config.initial_temperature = option_double(args, "--initial-temperature", config.initial_temperature);
     config.cooling_rate = option_double(args, "--cooling-rate", config.cooling_rate);
+    config.debug_search = has_option(args, "--debug-search");
     const bool dump_routing_eval = has_option(args, "--dump-routing-eval");
     const bool render_png = !has_option(args, "--no-render");
     const int render_dpi = option_int(args, "--render-dpi", 200);

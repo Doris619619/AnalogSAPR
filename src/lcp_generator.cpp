@@ -684,10 +684,68 @@ std::unordered_map<std::string, Rect> module_boxes_for_request(const Circuit& ci
     return boxes;
 }
 
+// 从已放置 pin 表中构建快速查找表，供持久化 LCP 刷新候选点时恢复几何上下文。
+std::unordered_map<std::string, PinInfo> placed_pin_map(const RoutingEvaluationRequest& request) {
+    std::unordered_map<std::string, PinInfo> result;
+    for (const auto& pin : request.placed_pins) {
+        result[pin.key] = {pin.key, pin.module, pin.x, pin.y, routing::layer_to_index(pin.layer)};
+    }
+    return result;
+}
+
+// 根据已有 LCP 的 segment 端点恢复候选点生成所需的轻量工作对象。
+WorkingLcp working_lcp_from_existing(
+    const LinkingControlPoint& point,
+    const SpaceNode& space,
+    const std::unordered_map<std::string, PinInfo>& pins,
+    const std::unordered_map<std::string, Rect>& module_boxes) {
+    WorkingLcp lcp;
+    lcp.point = point;
+    lcp.point.location_candidates.clear();
+    if (!point.segments.empty()) {
+        lcp.net = point.segments.front().net;
+        for (const auto& segment : point.segments) {
+            lcp.required_width = std::max(lcp.required_width, std::max(segment.min_width, segment.max_width));
+        }
+    }
+
+    Rect box{};
+    bool has_box = false;
+    std::vector<PinInfo> endpoint_pins;
+    for (const auto& segment : point.segments) {
+        for (const auto& endpoint : {segment.from, segment.to}) {
+            const auto found = pins.find(endpoint);
+            if (found == pins.end()) continue;
+            endpoint_pins.push_back(found->second);
+            include_point(box, has_box, found->second.x, found->second.y);
+            const auto owner_box = module_boxes.find(found->second.module);
+            if (owner_box != module_boxes.end()) include_rect(box, has_box, owner_box->second);
+        }
+    }
+    if (!has_box) {
+        for (const auto& candidate : point.location_candidates) {
+            include_point(box, has_box, candidate.x, candidate.y);
+        }
+    }
+    if (!has_box) {
+        const auto owner_box = module_boxes.find(space.owner);
+        if (owner_box != module_boxes.end()) {
+            box = owner_box->second;
+            has_box = true;
+        }
+    }
+    if (!has_box) box = {0.0, 0.0, 0.0, 0.0};
+    lcp.support_bbox = box;
+    lcp.ideal_x = (box.x1 + box.x2) / 2.0;
+    lcp.ideal_y = (box.y1 + box.y2) / 2.0;
+    lcp.direction = endpoint_pins.empty() ? NetDirection::Neutral : direction_for_pins(endpoint_pins);
+    return lcp;
+}
+
 }  // namespace
 
 // 自动生成 placement-aware LCP 拓扑和候选点，并写入 routing request。
-void generate_automatic_lcps(const Circuit& circuit, RoutingEvaluationRequest& request) {
+void generate_initial_lcp_topology(const Circuit& circuit, RoutingEvaluationRequest& request) {
     request.linking_points.clear();
     for (auto& space : request.space_nodes) {
         space.linking_points.clear();
@@ -712,6 +770,35 @@ void generate_automatic_lcps(const Circuit& circuit, RoutingEvaluationRequest& r
             return node.id == lcp.point.space_node_id;
         });
         if (space != request.space_nodes.end()) space->linking_points.push_back(std::move(lcp.point));
+    }
+}
+
+// 基于已有 LCP 拓扑刷新物理候选点，保持 space_node_id 和 segments 不变。
+void refresh_lcp_location_candidates(const Circuit& circuit, RoutingEvaluationRequest& request) {
+    request.linking_points.clear();
+    const auto module_boxes = module_boxes_for_request(circuit, request);
+    const auto pins = placed_pin_map(request);
+    for (auto& space : request.space_nodes) {
+        space.location_candidates.clear();
+        for (auto& point : space.linking_points) {
+            point.space_node_id = space.id;
+            auto lcp = working_lcp_from_existing(point, space, pins, module_boxes);
+            generate_candidates_for_lcp(lcp, request.space_nodes, module_boxes, request.active_region_blockers);
+            point = std::move(lcp.point);
+            request.linking_points.push_back(point);
+        }
+    }
+}
+
+// 保持旧入口语义，供现有调用点继续使用。
+void generate_automatic_lcps(const Circuit& circuit, RoutingEvaluationRequest& request) {
+    const bool has_existing_lcp = std::any_of(request.space_nodes.begin(), request.space_nodes.end(), [](const SpaceNode& space) {
+        return !space.linking_points.empty();
+    });
+    if (has_existing_lcp) {
+        refresh_lcp_location_candidates(circuit, request);
+    } else {
+        generate_initial_lcp_topology(circuit, request);
     }
 }
 

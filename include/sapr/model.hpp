@@ -151,6 +151,8 @@ struct Metrics {
     double design_rule_penalty{};
     double detailed_routing_penalty{};
     double detailed_cost{};
+    double row_width_overflow{};
+    double row_width_penalty{};
     int flow_violations{};
     int current_density_violations{};
     int design_rule_violations{};
@@ -211,8 +213,19 @@ struct SolverConfig {
     double wirelength_weight{1.0};
     double bend_weight{0.2};
     double via_weight{0.2};
+    double row_width_weight{1.0};
     int routing_feedback_iterations{2};
     double routing_feedback_tolerance{1e-6};
+    bool debug_search{};
+};
+
+// 表示一次 SA 扰动的调试摘要，供命令行诊断搜索状态是否真实变化。
+struct PerturbationReport {
+    std::string move;
+    bool changed{};
+    bool used_lcp_move{};
+    std::size_t lcp_before{};
+    std::size_t lcp_after{};
 };
 
 // 表示 linking-control point 连接的一条逻辑线段。
