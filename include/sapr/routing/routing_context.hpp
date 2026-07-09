@@ -12,6 +12,13 @@
 
 namespace sapr::routing {
 
+// 根据布局尺寸和线宽约束返回 routing context 实际使用的网格配置。
+GridConfig effective_grid_config_for_layout(
+    const Circuit& circuit,
+    const GridConfig& config,
+    double width,
+    double height);
+
 // 表示转换到全局坐标后的 pin 信息。
 struct GlobalPin {
     std::string key;

@@ -478,8 +478,32 @@ void run_routing_evaluator_tests() {
     require(
         single_loop_solution.metrics->routing_feedback_iterations == 1,
         "routing_feedback_iterations=1 should keep current single-pass behavior");
-    const auto request_for_dp = sapr::pack_enhanced_tree(circuit, sapr::make_enhanced_tree(circuit), config);
+    const auto boundary_tree = sapr::make_enhanced_tree(circuit);
+    const auto request_for_dp = sapr::pack_enhanced_tree(circuit, boundary_tree, config);
     require(!request_for_dp.packing_trace.steps.empty(), "pack_enhanced_tree should record contour trace");
+    require(boundary_tree.root.has_value(), "boundary margin test requires a root node");
+    const auto& auto_root = request_for_dp.placements.at(*boundary_tree.root);
+    require(auto_root.x > 0.0 && auto_root.y > 0.0, "auto boundary margin should move the root inside the chip");
+
+    auto zero_margin_config = config;
+    zero_margin_config.boundary_margin = 0.0;
+    const auto zero_margin_request = sapr::pack_enhanced_tree(circuit, boundary_tree, zero_margin_config);
+    auto explicit_margin_config = config;
+    explicit_margin_config.boundary_margin = 1.5;
+    const auto explicit_margin_request = sapr::pack_enhanced_tree(circuit, boundary_tree, explicit_margin_config);
+    const auto& zero_root = zero_margin_request.placements.at(*boundary_tree.root);
+    const auto& explicit_root = explicit_margin_request.placements.at(*boundary_tree.root);
+    require(approx(explicit_root.x - zero_root.x, 1.5), "explicit boundary margin should shift root x");
+    require(approx(explicit_root.y - zero_root.y, 1.5), "explicit boundary margin should shift root y");
+    for (const auto& [id, zero_placement] : zero_margin_request.placements) {
+        const auto& shifted = explicit_margin_request.placements.at(id);
+        require(approx(shifted.x - zero_placement.x, 1.5), "boundary margin should preserve relative x placement");
+        require(approx(shifted.y - zero_placement.y, 1.5), "boundary margin should preserve relative y placement");
+    }
+    require(
+        approx(explicit_margin_request.packing_trace.steps.front().occupied_bbox.x1, 1.5) &&
+            approx(explicit_margin_request.packing_trace.steps.front().occupied_bbox.y1, 1.5),
+        "packing trace root bbox should start at the explicit boundary margin");
     require(
         request_for_dp.packing_trace.steps.size() == request_for_dp.tree.nodes.size(),
         "packing trace should contain one step per representative tree node");
@@ -835,13 +859,18 @@ void run_routing_evaluator_tests() {
         {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
     };
     const sapr::routing::RoutingContext boundary_context(boundary_circuit, boundary_placements);
-    require(boundary_context.grid().min_y() < 0.0, "bottom pin access should expand routing grid below the layout");
+    require(boundary_context.grid().min_x() >= 0.0, "routing grid should not extend left of the chip boundary");
+    require(boundary_context.grid().min_y() >= 0.0, "routing grid should not extend below the chip boundary");
     const auto boundary_eval = sapr::evaluate_routing(boundary_circuit, boundary_placements);
     const auto boundary_segments = sapr::selected_candidates_to_segments(boundary_eval);
     require(!boundary_segments.empty(), "boundary pin access should still find a routed path");
     const auto boundary_active_rect =
         sapr::routing::transform_active_to_global(boundary_circuit.modules.at("M"), boundary_placements.at("M"));
     for (const auto& segment : boundary_segments) {
+        require(
+            std::min(segment.x1, segment.x2) >= -1e-9 &&
+                std::min(segment.y1, segment.y2) >= -1e-9,
+            "route centerline should remain inside the non-negative chip boundary");
         require(
             !route_crosses_active_core(segment, boundary_active_rect),
             "boundary pin access should not become a long route through active core");

@@ -107,6 +107,14 @@ OK
   --seed 1
 ```
 
+配置芯片左、下边界预留：
+
+```powershell
+.\build\sapr.exe run --input input --output output --boundary-margin 1.5 --boundary-clearance 0.1
+```
+
+未指定 `--boundary-margin` 时，程序按最大线宽的一半、边界 clearance 和两倍有效网格步长自动估算；该参数独立于器件间 `--spacing`。
+
 需要查看 routing/packing 联合评估细节时，可以追加：
 
 ```powershell

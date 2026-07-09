@@ -184,36 +184,29 @@ def load_routes(output_dir: Path) -> list[Route]:
     return routes
 
 
-# 将器件 BB 左下角局部坐标转换为全局坐标，语义对齐 src/geometry.cpp。
+# 将 BB 左下角局部坐标转换为全局坐标；ox/oy 仅作为 GDS 元数据保留。
 def transform_point(x: float, y: float, module: Module, placement: Placement) -> tuple[float, float]:
-    x += module.ox
-    y += module.oy
     orient = placement.orient
-    if orient == "MY":
-        x = -x
-        angle = 0
-    elif orient == "MX":
-        y = -y
-        angle = 0
+    if orient == "MX":
+        gx, gy = x, module.height - y
+    elif orient == "MY":
+        gx, gy = module.width - x, y
     elif orient == "MXR90":
-        y = -y
-        angle = 90
+        gx, gy = y, x
     elif orient == "MYR90":
-        x = -x
-        angle = 90
+        gx, gy = y, x
     else:
         angle = (placement.angle % 360 + 360) % 360
-
-    if angle == 0:
-        gx, gy = x, y
-    elif angle == 90:
-        gx, gy = -y, x
-    elif angle == 180:
-        gx, gy = -x, -y
-    elif angle == 270:
-        gx, gy = y, -x
-    else:
-        raise ValueError(f"unsupported placement angle: {placement.angle}")
+        if angle == 0:
+            gx, gy = x, y
+        elif angle == 90:
+            gx, gy = module.height - y, x
+        elif angle == 180:
+            gx, gy = module.width - x, module.height - y
+        elif angle == 270:
+            gx, gy = y, module.width - x
+        else:
+            raise ValueError(f"unsupported placement angle: {placement.angle}")
     return placement.x + gx, placement.y + gy
 
 
