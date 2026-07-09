@@ -1,0 +1,1918 @@
+{
+  "summary": {
+    "routing_cost": 3.60011e+06,
+    "candidate_count": 23,
+    "dp_used": false,
+    "failed_nets": 0,
+    "detailed_routes": 26,
+    "space_nodes_with_routes": 0,
+    "traceback_failures": 6,
+    "design_rule_violations": 0,
+    "flow_violations": 0,
+    "current_density_violations": 0,
+    "detailed_cost": 600109,
+    "phi_cost": 0
+  },
+  "lcp_topologies": [
+    {
+      "net": "8",
+      "pins": [
+        "XR14.PLUS",
+        "MM22.G",
+        "XC5.MINUS"
+      ],
+      "linking_points": [
+        {
+          "id": "8:leaf:0",
+          "space_node_id": "MP24:right",
+          "location_candidates": [
+            {
+              "id": "8:leaf:0:median",
+              "x": 11.7346,
+              "y": 9.32207,
+              "validity_level": "strict",
+              "is_fallback": false,
+              "penalty": 0,
+              "reason": "median"
+            },
+            {
+              "id": "8:leaf:0:aligned_x",
+              "x": 11.7346,
+              "y": 9.32207,
+              "validity_level": "relaxed",
+              "is_fallback": false,
+              "penalty": 10,
+              "reason": "aligned_x"
+            },
+            {
+              "id": "8:leaf:0:width_offset",
+              "x": 23.7946,
+              "y": 9.32207,
+              "validity_level": "relaxed",
+              "is_fallback": false,
+              "penalty": 20,
+              "reason": "width_offset"
+            },
+            {
+              "id": "8:leaf:0:space_projection",
+              "x": 10.5846,
+              "y": 11.4396,
+              "validity_level": "emergency",
+              "is_fallback": true,
+              "penalty": 10000,
+              "reason": "space_projection_active_blocker"
+            }
+          ]
+        }
+      ],
+      "segments": [
+        {
+          "id": "8:XR14.PLUS->8:leaf:0",
+          "from": "XR14.PLUS",
+          "to": "8:leaf:0",
+          "current_direction": "unknown"
+        },
+        {
+          "id": "8:MM22.G->8:leaf:0",
+          "from": "MM22.G",
+          "to": "8:leaf:0",
+          "current_direction": "unknown"
+        },
+        {
+          "id": "8:XC5.MINUS->8:leaf:0",
+          "from": "XC5.MINUS",
+          "to": "8:leaf:0",
+          "current_direction": "unknown"
+        }
+      ]
+    },
+    {
+      "net": "VDD",
+      "pins": [
+        "XR14.MINUS",
+        "XR13.MINUS",
+        "MP24.D"
+      ],
+      "linking_points": [
+        {
+          "id": "VDD:leaf:0",
+          "space_node_id": "XR13:right",
+          "location_candidates": [
+            {
+              "id": "VDD:leaf:0:median",
+              "x": 16.4146,
+              "y": 9.32207,
+              "validity_level": "strict",
+              "is_fallback": false,
+              "penalty": 0,
+              "reason": "median"
+            },
+            {
+              "id": "VDD:leaf:0:aligned_x",
+              "x": 16.4146,
+              "y": 9.32207,
+              "validity_level": "relaxed",
+              "is_fallback": false,
+              "penalty": 10,
+              "reason": "aligned_x"
+            },
+            {
+              "id": "VDD:leaf:0:width_offset",
+              "x": 23.7946,
+              "y": 9.32207,
+              "validity_level": "relaxed",
+              "is_fallback": false,
+              "penalty": 20,
+              "reason": "width_offset"
+            },
+            {
+              "id": "VDD:leaf:0:space_projection",
+              "x": 22.3596,
+              "y": 4.02957,
+              "validity_level": "emergency",
+              "is_fallback": true,
+              "penalty": 10000,
+              "reason": "space_projection_active_blocker"
+            }
+          ]
+        }
+      ],
+      "segments": [
+        {
+          "id": "VDD:XR14.MINUS->VDD:leaf:0",
+          "from": "XR14.MINUS",
+          "to": "VDD:leaf:0",
+          "current_direction": "unknown"
+        },
+        {
+          "id": "VDD:XR13.MINUS->VDD:leaf:0",
+          "from": "XR13.MINUS",
+          "to": "VDD:leaf:0",
+          "current_direction": "unknown"
+        },
+        {
+          "id": "VDD:MP24.D->VDD:leaf:0",
+          "from": "MP24.D",
+          "to": "VDD:leaf:0",
+          "current_direction": "unknown"
+        }
+      ]
+    }
+  ],
+  "final_candidates": [
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "MM22.G",
+      "segment_id": "8:XR14.PLUS->MM22.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 13.2555,
+      "bend_count": 2,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "MM22.G",
+      "segment_id": "8:XR14.PLUS->MM22.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 13.2555,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "MM22.G",
+      "segment_id": "8:XR14.PLUS->MM22.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 13.2555,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "MM22.G",
+      "segment_id": "8:XR14.PLUS->MM22.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 13.2555,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "XC5.MINUS",
+      "segment_id": "8:XR14.PLUS->XC5.MINUS",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 23.9677,
+      "bend_count": 3,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "XC5.MINUS",
+      "segment_id": "8:XR14.PLUS->XC5.MINUS",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 23.9677,
+      "bend_count": 1,
+      "via_count": 2
+    },
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "XC5.MINUS",
+      "segment_id": "8:XR14.PLUS->XC5.MINUS",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 23.9677,
+      "bend_count": 0,
+      "via_count": 4
+    },
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "XC5.MINUS",
+      "segment_id": "8:XR14.PLUS->XC5.MINUS",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 23.9677,
+      "bend_count": 0,
+      "via_count": 4
+    },
+    {
+      "net": "9",
+      "from": "XR13.PLUS",
+      "to": "MM21.G",
+      "segment_id": "9:XR13.PLUS->MM21.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 22.0411,
+      "bend_count": 2,
+      "via_count": 0
+    },
+    {
+      "net": "9",
+      "from": "XR13.PLUS",
+      "to": "MM21.G",
+      "segment_id": "9:XR13.PLUS->MM21.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 22.0411,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "9",
+      "from": "XR13.PLUS",
+      "to": "MM21.G",
+      "segment_id": "9:XR13.PLUS->MM21.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 22.0411,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "9",
+      "from": "XR13.PLUS",
+      "to": "MM21.G",
+      "segment_id": "9:XR13.PLUS->MM21.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 22.0411,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "12",
+      "from": "XC5.PLUS",
+      "to": "MP24.G",
+      "segment_id": "12:XC5.PLUS->MP24.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 8.63147,
+      "bend_count": 1,
+      "via_count": 0
+    },
+    {
+      "net": "12",
+      "from": "XC5.PLUS",
+      "to": "MP24.G",
+      "segment_id": "12:XC5.PLUS->MP24.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 8.63147,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "12",
+      "from": "XC5.PLUS",
+      "to": "MP24.G",
+      "segment_id": "12:XC5.PLUS->MP24.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 8.63147,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "GND",
+      "from": "MM22.B",
+      "to": "MM21.B",
+      "segment_id": "GND:MM22.B->MM21.B",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 4.70107,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "XR13.MINUS",
+      "segment_id": "VDD:XR14.MINUS->XR13.MINUS",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 17.6483,
+      "bend_count": 1,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "XR13.MINUS",
+      "segment_id": "VDD:XR14.MINUS->XR13.MINUS",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 17.6483,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "XR13.MINUS",
+      "segment_id": "VDD:XR14.MINUS->XR13.MINUS",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 17.6483,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "MP24.D",
+      "segment_id": "VDD:XR14.MINUS->MP24.D",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 15.9528,
+      "bend_count": 3,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "MP24.D",
+      "segment_id": "VDD:XR14.MINUS->MP24.D",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 15.9528,
+      "bend_count": 1,
+      "via_count": 2
+    },
+    {
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "MP24.D",
+      "segment_id": "VDD:XR14.MINUS->MP24.D",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 15.9528,
+      "bend_count": 0,
+      "via_count": 4
+    },
+    {
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "MP24.D",
+      "segment_id": "VDD:XR14.MINUS->MP24.D",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 15.9528,
+      "bend_count": 1,
+      "via_count": 2
+    }
+  ],
+  "all_candidates": [
+    {
+      "net": "9",
+      "from": "XR13.PLUS",
+      "to": "MM21.G",
+      "segment_id": "9:XR13.PLUS->MM21.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 22.0411,
+      "bend_count": 2,
+      "via_count": 0
+    },
+    {
+      "net": "9",
+      "from": "XR13.PLUS",
+      "to": "MM21.G",
+      "segment_id": "9:XR13.PLUS->MM21.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 22.0411,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "9",
+      "from": "XR13.PLUS",
+      "to": "MM21.G",
+      "segment_id": "9:XR13.PLUS->MM21.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 22.0411,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "9",
+      "from": "XR13.PLUS",
+      "to": "MM21.G",
+      "segment_id": "9:XR13.PLUS->MM21.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 22.0411,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "12",
+      "from": "XC5.PLUS",
+      "to": "MP24.G",
+      "segment_id": "12:XC5.PLUS->MP24.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 8.63147,
+      "bend_count": 1,
+      "via_count": 0
+    },
+    {
+      "net": "12",
+      "from": "XC5.PLUS",
+      "to": "MP24.G",
+      "segment_id": "12:XC5.PLUS->MP24.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 8.63147,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "12",
+      "from": "XC5.PLUS",
+      "to": "MP24.G",
+      "segment_id": "12:XC5.PLUS->MP24.G",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 8.63147,
+      "bend_count": 0,
+      "via_count": 2
+    },
+    {
+      "net": "GND",
+      "from": "MM22.B",
+      "to": "MM21.B",
+      "segment_id": "GND:MM22.B->MM21.B",
+      "lcp_candidate_id": "",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "",
+      "path_success": true,
+      "path_message": "success",
+      "wirelength": 4.70107,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "MM22.G",
+      "to": "8:leaf:0",
+      "segment_id": "8:MM22.G->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:median",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:median",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "MM22.G",
+      "to": "8:leaf:0",
+      "segment_id": "8:MM22.G->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:aligned_x",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:aligned_x",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "MM22.G",
+      "to": "8:leaf:0",
+      "segment_id": "8:MM22.G->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:width_offset",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:width_offset",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "MM22.G",
+      "to": "8:leaf:0",
+      "segment_id": "8:MM22.G->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:space_projection",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:space_projection",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XR14.PLUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:median",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:median",
+      "path_success": false,
+      "path_message": "LCP candidate is not multi-terminal reachable; 8:leaf:0@8:leaf:0:median missing 8:MM22.G->8:leaf:0; 8:leaf:0@8:leaf:0:median missing 8:XC5.MINUS->8:leaf:0",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XR14.PLUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:aligned_x",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:aligned_x",
+      "path_success": false,
+      "path_message": "LCP candidate is not multi-terminal reachable; 8:leaf:0@8:leaf:0:aligned_x missing 8:MM22.G->8:leaf:0; 8:leaf:0@8:leaf:0:aligned_x missing 8:XC5.MINUS->8:leaf:0",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XR14.PLUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:width_offset",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:width_offset",
+      "path_success": false,
+      "path_message": "LCP candidate is not multi-terminal reachable; 8:leaf:0@8:leaf:0:width_offset missing 8:MM22.G->8:leaf:0; 8:leaf:0@8:leaf:0:width_offset missing 8:XC5.MINUS->8:leaf:0",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XR14.PLUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:space_projection",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:space_projection",
+      "path_success": false,
+      "path_message": "A* exceeded max expanded nodes",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "MP24.D",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:MP24.D->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:median",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:median",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "MP24.D",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:MP24.D->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:aligned_x",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:aligned_x",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "MP24.D",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:MP24.D->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:width_offset",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:width_offset",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "MP24.D",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:MP24.D->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:space_projection",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:space_projection",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR14.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:median",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:median",
+      "path_success": false,
+      "path_message": "LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:median missing VDD:MP24.D->VDD:leaf:0",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR14.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:aligned_x",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:aligned_x",
+      "path_success": false,
+      "path_message": "LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:aligned_x missing VDD:MP24.D->VDD:leaf:0",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR14.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:width_offset",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:width_offset",
+      "path_success": false,
+      "path_message": "LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:width_offset missing VDD:MP24.D->VDD:leaf:0",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR14.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:space_projection",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:space_projection",
+      "path_success": false,
+      "path_message": "A* exceeded max expanded nodes",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "XR13.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR13.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:median",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:median",
+      "path_success": false,
+      "path_message": "LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:median missing VDD:MP24.D->VDD:leaf:0",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "XR13.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR13.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:aligned_x",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:aligned_x",
+      "path_success": false,
+      "path_message": "LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:aligned_x missing VDD:MP24.D->VDD:leaf:0",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "XR13.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR13.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:width_offset",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:width_offset",
+      "path_success": false,
+      "path_message": "LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:width_offset missing VDD:MP24.D->VDD:leaf:0",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "VDD",
+      "from": "XR13.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR13.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:space_projection",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "VDD:leaf:0:space_projection",
+      "path_success": false,
+      "path_message": "A* exceeded max expanded nodes",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "XC5.MINUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XC5.MINUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:median",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:median",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "XC5.MINUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XC5.MINUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:aligned_x",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:aligned_x",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "XC5.MINUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XC5.MINUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:width_offset",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:width_offset",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    },
+    {
+      "net": "8",
+      "from": "XC5.MINUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XC5.MINUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:space_projection",
+      "source_lcp_candidate_id": "",
+      "target_lcp_candidate_id": "8:leaf:0:space_projection",
+      "path_success": false,
+      "path_message": "A* could not find a feasible path",
+      "wirelength": 0,
+      "bend_count": 0,
+      "via_count": 0
+    }
+  ],
+  "dp_traceback_candidates": [],
+  "dp_candidate_events": [
+    {
+      "group_key": "VDD:XR13.MINUS->VDD:leaf:0",
+      "net": "VDD",
+      "from": "XR13.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR13.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:median",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "VDD:XR13.MINUS->VDD:leaf:0",
+      "net": "VDD",
+      "from": "XR13.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR13.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:aligned_x",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "VDD:XR13.MINUS->VDD:leaf:0",
+      "net": "VDD",
+      "from": "XR13.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR13.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:width_offset",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "VDD:XR13.MINUS->VDD:leaf:0",
+      "net": "VDD",
+      "from": "XR13.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR13.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:space_projection",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:XR14.PLUS->8:leaf:0",
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XR14.PLUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:median",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:XR14.PLUS->8:leaf:0",
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XR14.PLUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:aligned_x",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:XR14.PLUS->8:leaf:0",
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XR14.PLUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:width_offset",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:XR14.PLUS->8:leaf:0",
+      "net": "8",
+      "from": "XR14.PLUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XR14.PLUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:space_projection",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:MM22.G->8:leaf:0",
+      "net": "8",
+      "from": "MM22.G",
+      "to": "8:leaf:0",
+      "segment_id": "8:MM22.G->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:median",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:MM22.G->8:leaf:0",
+      "net": "8",
+      "from": "MM22.G",
+      "to": "8:leaf:0",
+      "segment_id": "8:MM22.G->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:aligned_x",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:MM22.G->8:leaf:0",
+      "net": "8",
+      "from": "MM22.G",
+      "to": "8:leaf:0",
+      "segment_id": "8:MM22.G->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:width_offset",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:MM22.G->8:leaf:0",
+      "net": "8",
+      "from": "MM22.G",
+      "to": "8:leaf:0",
+      "segment_id": "8:MM22.G->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:space_projection",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:XC5.MINUS->8:leaf:0",
+      "net": "8",
+      "from": "XC5.MINUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XC5.MINUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:median",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:XC5.MINUS->8:leaf:0",
+      "net": "8",
+      "from": "XC5.MINUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XC5.MINUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:aligned_x",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:XC5.MINUS->8:leaf:0",
+      "net": "8",
+      "from": "XC5.MINUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XC5.MINUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:width_offset",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "8:XC5.MINUS->8:leaf:0",
+      "net": "8",
+      "from": "XC5.MINUS",
+      "to": "8:leaf:0",
+      "segment_id": "8:XC5.MINUS->8:leaf:0",
+      "lcp_candidate_id": "8:leaf:0:space_projection",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "VDD:XR14.MINUS->VDD:leaf:0",
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR14.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:median",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "VDD:XR14.MINUS->VDD:leaf:0",
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR14.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:aligned_x",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "VDD:XR14.MINUS->VDD:leaf:0",
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR14.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:width_offset",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "VDD:XR14.MINUS->VDD:leaf:0",
+      "net": "VDD",
+      "from": "XR14.MINUS",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:XR14.MINUS->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:space_projection",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "VDD:MP24.D->VDD:leaf:0",
+      "net": "VDD",
+      "from": "MP24.D",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:MP24.D->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:median",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "VDD:MP24.D->VDD:leaf:0",
+      "net": "VDD",
+      "from": "MP24.D",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:MP24.D->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:aligned_x",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "VDD:MP24.D->VDD:leaf:0",
+      "net": "VDD",
+      "from": "MP24.D",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:MP24.D->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:width_offset",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    },
+    {
+      "group_key": "VDD:MP24.D->VDD:leaf:0",
+      "net": "VDD",
+      "from": "MP24.D",
+      "to": "VDD:leaf:0",
+      "segment_id": "VDD:MP24.D->VDD:leaf:0",
+      "lcp_candidate_id": "VDD:leaf:0:space_projection",
+      "state_lcp_candidate_id": "",
+      "reason": "path_fail",
+      "selected": false
+    }
+  ],
+  "final_routes": [
+    {
+      "net": "GND",
+      "layer": "M1",
+      "x1": 5.70293,
+      "y1": 11.56,
+      "x2": 5.47173,
+      "y2": 11.56,
+      "width": 0.05
+    },
+    {
+      "net": "GND",
+      "layer": "M1",
+      "x1": 5.47173,
+      "y1": 11.56,
+      "x2": 1.156,
+      "y2": 11.56,
+      "width": 0.05
+    },
+    {
+      "net": "GND",
+      "layer": "M1",
+      "x1": 1.156,
+      "y1": 11.56,
+      "x2": 1.00187,
+      "y2": 11.56,
+      "width": 0.05
+    },
+    {
+      "net": "VDD",
+      "layer": "M1",
+      "x1": 22.7347,
+      "y1": 14.4885,
+      "x2": 22.7347,
+      "y2": 0.6936,
+      "width": 0.05
+    },
+    {
+      "net": "VDD",
+      "layer": "M2",
+      "x1": 22.7347,
+      "y1": 0.6936,
+      "x2": 19.0355,
+      "y2": 0.6936,
+      "width": 0.05
+    },
+    {
+      "net": "VDD",
+      "layer": "M1",
+      "x1": 19.0355,
+      "y1": 0.6936,
+      "x2": 18.8813,
+      "y2": 0.6936,
+      "width": 0.05
+    },
+    {
+      "net": "VDD",
+      "layer": "M1",
+      "x1": 22.7347,
+      "y1": 14.4885,
+      "x2": 22.7347,
+      "y2": 11.1747,
+      "width": 0.05
+    },
+    {
+      "net": "VDD",
+      "layer": "M2",
+      "x1": 22.7347,
+      "y1": 11.1747,
+      "x2": 11.4829,
+      "y2": 11.1747,
+      "width": 0.05
+    },
+    {
+      "net": "VDD",
+      "layer": "M1",
+      "x1": 11.4829,
+      "y1": 11.1747,
+      "x2": 11.4829,
+      "y2": 11.4059,
+      "width": 0.05
+    },
+    {
+      "net": "VDD",
+      "layer": "M2",
+      "x1": 11.4829,
+      "y1": 11.4059,
+      "x2": 11.4059,
+      "y2": 11.4059,
+      "width": 0.05
+    },
+    {
+      "net": "VDD",
+      "layer": "M1",
+      "x1": 11.4059,
+      "y1": 11.4059,
+      "x2": 10.3269,
+      "y2": 11.4059,
+      "width": 0.05
+    },
+    {
+      "net": "8",
+      "layer": "M1",
+      "x1": 16.1069,
+      "y1": 14.4885,
+      "x2": 6.62773,
+      "y2": 14.4885,
+      "width": 0.05
+    },
+    {
+      "net": "8",
+      "layer": "M2",
+      "x1": 6.62773,
+      "y1": 14.4885,
+      "x2": 6.62773,
+      "y2": 11.56,
+      "width": 0.05
+    },
+    {
+      "net": "8",
+      "layer": "M1",
+      "x1": 6.62773,
+      "y1": 11.56,
+      "x2": 5.78,
+      "y2": 11.56,
+      "width": 0.05
+    },
+    {
+      "net": "8",
+      "layer": "M3",
+      "x1": 16.1069,
+      "y1": 14.4885,
+      "x2": 11.6371,
+      "y2": 14.4885,
+      "width": 0.05
+    },
+    {
+      "net": "8",
+      "layer": "M3",
+      "x1": 11.6371,
+      "y1": 14.4885,
+      "x2": 11.6371,
+      "y2": 0.616533,
+      "width": 0.05
+    },
+    {
+      "net": "8",
+      "layer": "M3",
+      "x1": 11.6371,
+      "y1": 0.616533,
+      "x2": 6.08827,
+      "y2": 0.616533,
+      "width": 0.05
+    },
+    {
+      "net": "8",
+      "layer": "M3",
+      "x1": 6.08827,
+      "y1": 0.616533,
+      "x2": 6.08827,
+      "y2": 0.6936,
+      "width": 0.05
+    },
+    {
+      "net": "9",
+      "layer": "M2",
+      "x1": 18.8813,
+      "y1": 7.32133,
+      "x2": 1.23307,
+      "y2": 7.32133,
+      "width": 0.05
+    },
+    {
+      "net": "9",
+      "layer": "M2",
+      "x1": 1.23307,
+      "y1": 7.32133,
+      "x2": 1.23307,
+      "y2": 11.56,
+      "width": 0.05
+    },
+    {
+      "net": "9",
+      "layer": "M2",
+      "x1": 1.23307,
+      "y1": 11.56,
+      "x2": 1.156,
+      "y2": 11.56,
+      "width": 0.05
+    },
+    {
+      "net": "9",
+      "layer": "M2",
+      "x1": 1.156,
+      "y1": 11.56,
+      "x2": 1.07893,
+      "y2": 11.56,
+      "width": 0.05
+    },
+    {
+      "net": "12",
+      "layer": "M1",
+      "x1": 6.08827,
+      "y1": 7.01307,
+      "x2": 6.08827,
+      "y2": 7.09013,
+      "width": 0.05
+    },
+    {
+      "net": "12",
+      "layer": "M1",
+      "x1": 6.08827,
+      "y1": 7.09013,
+      "x2": 6.08827,
+      "y2": 11.4059,
+      "width": 0.05
+    },
+    {
+      "net": "12",
+      "layer": "M2",
+      "x1": 6.08827,
+      "y1": 11.4059,
+      "x2": 10.2499,
+      "y2": 11.4059,
+      "width": 0.05
+    },
+    {
+      "net": "12",
+      "layer": "M2",
+      "x1": 10.2499,
+      "y1": 11.4059,
+      "x2": 10.3269,
+      "y2": 11.4059,
+      "width": 0.05
+    }
+  ],
+  "detailed_traces": [
+    {
+      "net": "__dp__",
+      "nodes": [],
+      "segments": [],
+      "warnings": [
+        "missing successful A* candidate for VDD:XR13.MINUS->VDD:leaf:0 [VDD:leaf:0:median: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:median missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:aligned_x: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:aligned_x missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:width_offset: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:width_offset missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:space_projection: A* exceeded max expanded nodes]",
+        "missing successful A* candidate for 8:XR14.PLUS->8:leaf:0 [8:leaf:0:median: LCP candidate is not multi-terminal reachable; 8:leaf:0@8:leaf:0:median missing 8:MM22.G->8:leaf:0; 8:leaf:0@8:leaf:0:median missing 8:XC5.MINUS->8:leaf:0] [8:leaf:0:aligned_x: LCP candidate is not multi-terminal reachable; 8:leaf:0@8:leaf:0:aligned_x missing 8:MM22.G->8:leaf:0; 8:leaf:0@8:leaf:0:aligned_x missing 8:XC5.MINUS->8:leaf:0] [8:leaf:0:width_offset: LCP candidate is not multi-terminal reachable; 8:leaf:0@8:leaf:0:width_offset missing 8:MM22.G->8:leaf:0; 8:leaf:0@8:leaf:0:width_offset missing 8:XC5.MINUS->8:leaf:0] [8:leaf:0:space_projection: A* exceeded max expanded nodes]",
+        "missing successful A* candidate for 8:MM22.G->8:leaf:0 [8:leaf:0:median: A* could not find a feasible path] [8:leaf:0:aligned_x: A* could not find a feasible path] [8:leaf:0:width_offset: A* could not find a feasible path] [8:leaf:0:space_projection: A* could not find a feasible path]",
+        "missing successful A* candidate for 8:XC5.MINUS->8:leaf:0 [8:leaf:0:median: A* could not find a feasible path] [8:leaf:0:aligned_x: A* could not find a feasible path] [8:leaf:0:width_offset: A* could not find a feasible path] [8:leaf:0:space_projection: A* could not find a feasible path]",
+        "missing successful A* candidate for VDD:XR14.MINUS->VDD:leaf:0 [VDD:leaf:0:median: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:median missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:aligned_x: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:aligned_x missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:width_offset: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:width_offset missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:space_projection: A* exceeded max expanded nodes]",
+        "missing successful A* candidate for VDD:MP24.D->VDD:leaf:0 [VDD:leaf:0:median: A* could not find a feasible path] [VDD:leaf:0:aligned_x: A* could not find a feasible path] [VDD:leaf:0:width_offset: A* could not find a feasible path] [VDD:leaf:0:space_projection: A* could not find a feasible path]"
+      ]
+    },
+    {
+      "net": "GND",
+      "nodes": [
+        {
+          "id": "MM22.B",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 5.69457,
+          "y": 11.5896,
+          "layer": "M1"
+        },
+        {
+          "id": "MM21.B",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 1.01457,
+          "y": 11.5896,
+          "layer": "M1"
+        }
+      ],
+      "segments": [
+        {
+          "route_index": 0,
+          "dp_state_id": -1,
+          "net": "GND",
+          "from": "MM22.B",
+          "to": "MM21.B",
+          "tree_node": "",
+          "segment_id": "GND:MM22.B->MM21.B",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 1,
+          "dp_state_id": -1,
+          "net": "GND",
+          "from": "MM22.B",
+          "to": "MM21.B",
+          "tree_node": "",
+          "segment_id": "GND:MM22.B->MM21.B",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 2,
+          "dp_state_id": -1,
+          "net": "GND",
+          "from": "MM22.B",
+          "to": "MM21.B",
+          "tree_node": "",
+          "segment_id": "GND:MM22.B->MM21.B",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "net": "VDD",
+      "nodes": [
+        {
+          "id": "XR14.MINUS",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 22.7396,
+          "y": 14.5066,
+          "layer": "M1"
+        },
+        {
+          "id": "XR13.MINUS",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 18.8966,
+          "y": 0.729567,
+          "layer": "M1"
+        },
+        {
+          "id": "MP24.D",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 10.3596,
+          "y": 11.3896,
+          "layer": "M1"
+        }
+      ],
+      "segments": [
+        {
+          "route_index": 3,
+          "dp_state_id": -1,
+          "net": "VDD",
+          "from": "XR14.MINUS",
+          "to": "XR13.MINUS",
+          "tree_node": "",
+          "segment_id": "VDD:XR14.MINUS->XR13.MINUS",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 4,
+          "dp_state_id": -1,
+          "net": "VDD",
+          "from": "XR14.MINUS",
+          "to": "XR13.MINUS",
+          "tree_node": "",
+          "segment_id": "VDD:XR14.MINUS->XR13.MINUS",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 5,
+          "dp_state_id": -1,
+          "net": "VDD",
+          "from": "XR14.MINUS",
+          "to": "XR13.MINUS",
+          "tree_node": "",
+          "segment_id": "VDD:XR14.MINUS->XR13.MINUS",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 6,
+          "dp_state_id": -1,
+          "net": "VDD",
+          "from": "XR14.MINUS",
+          "to": "MP24.D",
+          "tree_node": "",
+          "segment_id": "VDD:XR14.MINUS->MP24.D",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 7,
+          "dp_state_id": -1,
+          "net": "VDD",
+          "from": "XR14.MINUS",
+          "to": "MP24.D",
+          "tree_node": "",
+          "segment_id": "VDD:XR14.MINUS->MP24.D",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 8,
+          "dp_state_id": -1,
+          "net": "VDD",
+          "from": "XR14.MINUS",
+          "to": "MP24.D",
+          "tree_node": "",
+          "segment_id": "VDD:XR14.MINUS->MP24.D",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 9,
+          "dp_state_id": -1,
+          "net": "VDD",
+          "from": "XR14.MINUS",
+          "to": "MP24.D",
+          "tree_node": "",
+          "segment_id": "VDD:XR14.MINUS->MP24.D",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 10,
+          "dp_state_id": -1,
+          "net": "VDD",
+          "from": "XR14.MINUS",
+          "to": "MP24.D",
+          "tree_node": "",
+          "segment_id": "VDD:XR14.MINUS->MP24.D",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        }
+      ],
+      "warnings": []
+    },
+    {
+      "net": "8",
+      "nodes": [
+        {
+          "id": "XR14.PLUS",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 16.1396,
+          "y": 14.5066,
+          "layer": "M1"
+        },
+        {
+          "id": "MM22.G",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 5.75957,
+          "y": 11.5896,
+          "layer": "M1"
+        },
+        {
+          "id": "XC5.MINUS",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 6.05457,
+          "y": 0.729567,
+          "layer": "M1"
+        }
+      ],
+      "segments": [
+        {
+          "route_index": 11,
+          "dp_state_id": -1,
+          "net": "8",
+          "from": "XR14.PLUS",
+          "to": "MM22.G",
+          "tree_node": "",
+          "segment_id": "8:XR14.PLUS->MM22.G",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 12,
+          "dp_state_id": -1,
+          "net": "8",
+          "from": "XR14.PLUS",
+          "to": "MM22.G",
+          "tree_node": "",
+          "segment_id": "8:XR14.PLUS->MM22.G",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 13,
+          "dp_state_id": -1,
+          "net": "8",
+          "from": "XR14.PLUS",
+          "to": "MM22.G",
+          "tree_node": "",
+          "segment_id": "8:XR14.PLUS->MM22.G",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 14,
+          "dp_state_id": -1,
+          "net": "8",
+          "from": "XR14.PLUS",
+          "to": "XC5.MINUS",
+          "tree_node": "",
+          "segment_id": "8:XR14.PLUS->XC5.MINUS",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 15,
+          "dp_state_id": -1,
+          "net": "8",
+          "from": "XR14.PLUS",
+          "to": "XC5.MINUS",
+          "tree_node": "",
+          "segment_id": "8:XR14.PLUS->XC5.MINUS",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 16,
+          "dp_state_id": -1,
+          "net": "8",
+          "from": "XR14.PLUS",
+          "to": "XC5.MINUS",
+          "tree_node": "",
+          "segment_id": "8:XR14.PLUS->XC5.MINUS",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 17,
+          "dp_state_id": -1,
+          "net": "8",
+          "from": "XR14.PLUS",
+          "to": "XC5.MINUS",
+          "tree_node": "",
+          "segment_id": "8:XR14.PLUS->XC5.MINUS",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        }
+      ],
+      "warnings": [
+        "8: detailed routing reassigned candidate layer"
+      ]
+    },
+    {
+      "net": "9",
+      "nodes": [
+        {
+          "id": "XR13.PLUS",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 18.8966,
+          "y": 7.32957,
+          "layer": "M1"
+        },
+        {
+          "id": "MM21.G",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 1.07957,
+          "y": 11.5896,
+          "layer": "M1"
+        }
+      ],
+      "segments": [
+        {
+          "route_index": 18,
+          "dp_state_id": -1,
+          "net": "9",
+          "from": "XR13.PLUS",
+          "to": "MM21.G",
+          "tree_node": "",
+          "segment_id": "9:XR13.PLUS->MM21.G",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 19,
+          "dp_state_id": -1,
+          "net": "9",
+          "from": "XR13.PLUS",
+          "to": "MM21.G",
+          "tree_node": "",
+          "segment_id": "9:XR13.PLUS->MM21.G",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 20,
+          "dp_state_id": -1,
+          "net": "9",
+          "from": "XR13.PLUS",
+          "to": "MM21.G",
+          "tree_node": "",
+          "segment_id": "9:XR13.PLUS->MM21.G",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 21,
+          "dp_state_id": -1,
+          "net": "9",
+          "from": "XR13.PLUS",
+          "to": "MM21.G",
+          "tree_node": "",
+          "segment_id": "9:XR13.PLUS->MM21.G",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        }
+      ],
+      "warnings": [
+        "9: detailed routing reassigned candidate layer"
+      ]
+    },
+    {
+      "net": "12",
+      "nodes": [
+        {
+          "id": "XC5.PLUS",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 6.05457,
+          "y": 6.98957,
+          "layer": "M1"
+        },
+        {
+          "id": "MP24.G",
+          "kind": "pin",
+          "space_node_id": "",
+          "x": 10.3096,
+          "y": 11.4396,
+          "layer": "M1"
+        }
+      ],
+      "segments": [
+        {
+          "route_index": 22,
+          "dp_state_id": -1,
+          "net": "12",
+          "from": "XC5.PLUS",
+          "to": "MP24.G",
+          "tree_node": "",
+          "segment_id": "12:XC5.PLUS->MP24.G",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 23,
+          "dp_state_id": -1,
+          "net": "12",
+          "from": "XC5.PLUS",
+          "to": "MP24.G",
+          "tree_node": "",
+          "segment_id": "12:XC5.PLUS->MP24.G",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 24,
+          "dp_state_id": -1,
+          "net": "12",
+          "from": "XC5.PLUS",
+          "to": "MP24.G",
+          "tree_node": "",
+          "segment_id": "12:XC5.PLUS->MP24.G",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        },
+        {
+          "route_index": 25,
+          "dp_state_id": -1,
+          "net": "12",
+          "from": "XC5.PLUS",
+          "to": "MP24.G",
+          "tree_node": "",
+          "segment_id": "12:XC5.PLUS->MP24.G",
+          "lcp_id": "",
+          "lcp_candidate_id": "",
+          "space_node_id": ""
+        }
+      ],
+      "warnings": []
+    }
+  ],
+  "warnings": [
+    "missing successful A* candidate for VDD:XR13.MINUS->VDD:leaf:0 [VDD:leaf:0:median: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:median missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:aligned_x: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:aligned_x missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:width_offset: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:width_offset missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:space_projection: A* exceeded max expanded nodes]",
+    "missing successful A* candidate for 8:XR14.PLUS->8:leaf:0 [8:leaf:0:median: LCP candidate is not multi-terminal reachable; 8:leaf:0@8:leaf:0:median missing 8:MM22.G->8:leaf:0; 8:leaf:0@8:leaf:0:median missing 8:XC5.MINUS->8:leaf:0] [8:leaf:0:aligned_x: LCP candidate is not multi-terminal reachable; 8:leaf:0@8:leaf:0:aligned_x missing 8:MM22.G->8:leaf:0; 8:leaf:0@8:leaf:0:aligned_x missing 8:XC5.MINUS->8:leaf:0] [8:leaf:0:width_offset: LCP candidate is not multi-terminal reachable; 8:leaf:0@8:leaf:0:width_offset missing 8:MM22.G->8:leaf:0; 8:leaf:0@8:leaf:0:width_offset missing 8:XC5.MINUS->8:leaf:0] [8:leaf:0:space_projection: A* exceeded max expanded nodes]",
+    "missing successful A* candidate for 8:MM22.G->8:leaf:0 [8:leaf:0:median: A* could not find a feasible path] [8:leaf:0:aligned_x: A* could not find a feasible path] [8:leaf:0:width_offset: A* could not find a feasible path] [8:leaf:0:space_projection: A* could not find a feasible path]",
+    "missing successful A* candidate for 8:XC5.MINUS->8:leaf:0 [8:leaf:0:median: A* could not find a feasible path] [8:leaf:0:aligned_x: A* could not find a feasible path] [8:leaf:0:width_offset: A* could not find a feasible path] [8:leaf:0:space_projection: A* could not find a feasible path]",
+    "missing successful A* candidate for VDD:XR14.MINUS->VDD:leaf:0 [VDD:leaf:0:median: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:median missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:aligned_x: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:aligned_x missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:width_offset: LCP candidate is not multi-terminal reachable; VDD:leaf:0@VDD:leaf:0:width_offset missing VDD:MP24.D->VDD:leaf:0] [VDD:leaf:0:space_projection: A* exceeded max expanded nodes]",
+    "missing successful A* candidate for VDD:MP24.D->VDD:leaf:0 [VDD:leaf:0:median: A* could not find a feasible path] [VDD:leaf:0:aligned_x: A* could not find a feasible path] [VDD:leaf:0:width_offset: A* could not find a feasible path] [VDD:leaf:0:space_projection: A* could not find a feasible path]",
+    "8: detailed routing reassigned candidate layer",
+    "9: detailed routing reassigned candidate layer"
+  ],
+  "design_rule_segments": [],
+  "coupling_pairs": []
+}
