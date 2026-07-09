@@ -432,7 +432,65 @@ sapr::routing::RouteCandidate make_manual_lcp_candidate(
 }  // namespace
 
 // 运行 routing evaluator 的集成测试。
+// 验证输出线段归一化只合并同网同层同宽的共线区间。
+void test_collinear_same_net_route_merge() {
+    const auto merged_duplicate = sapr::routing::merge_collinear_same_net_routes({
+        {"VDD", "M1", 0.0, 1.0, 5.0, 1.0, 1.0},
+        {"VDD", "M1", 0.0, 1.0, 5.0, 1.0, 1.0},
+        {"VDD", "M1", 5.0, 1.0, 0.0, 1.0, 1.0},
+    });
+    require(merged_duplicate.size() == 1, "duplicate and reverse duplicate horizontal routes should merge");
+    require(approx(merged_duplicate.front().x1, 0.0) && approx(merged_duplicate.front().x2, 5.0),
+            "duplicate merge should keep the full horizontal interval");
+
+    const auto merged_overlap = sapr::routing::merge_collinear_same_net_routes({
+        {"VDD", "M1", 0.0, 2.0, 5.0, 2.0, 1.0},
+        {"VDD", "M1", 3.0, 2.0, 8.0, 2.0, 1.0},
+    });
+    require(merged_overlap.size() == 1, "partially overlapping same-net routes should merge");
+    require(approx(merged_overlap.front().x1, 0.0) && approx(merged_overlap.front().x2, 8.0),
+            "overlap merge should span the union interval");
+
+    const auto merged_subset = sapr::routing::merge_collinear_same_net_routes({
+        {"VDD", "M1", 0.0, 3.0, 10.0, 3.0, 1.0},
+        {"VDD", "M1", 2.0, 3.0, 4.0, 3.0, 1.0},
+    });
+    require(merged_subset.size() == 1, "subset same-net route should be absorbed");
+    require(approx(merged_subset.front().x1, 0.0) && approx(merged_subset.front().x2, 10.0),
+            "subset merge should keep the parent interval");
+
+    const auto merged_touching = sapr::routing::merge_collinear_same_net_routes({
+        {"VDD", "M1", 0.0, 4.0, 5.0, 4.0, 1.0},
+        {"VDD", "M1", 5.0, 4.0, 9.0, 4.0, 1.0},
+    });
+    require(merged_touching.size() == 1, "touching same-net collinear routes should merge");
+    require(approx(merged_touching.front().x1, 0.0) && approx(merged_touching.front().x2, 9.0),
+            "touching merge should span both intervals");
+
+    const auto different_net = sapr::routing::merge_collinear_same_net_routes({
+        {"VDD", "M1", 0.0, 5.0, 5.0, 5.0, 1.0},
+        {"GND", "M1", 3.0, 5.0, 8.0, 5.0, 1.0},
+    });
+    require(different_net.size() == 2, "different nets should not merge");
+
+    const auto different_layer = sapr::routing::merge_collinear_same_net_routes({
+        {"VDD", "M1", 0.0, 6.0, 5.0, 6.0, 1.0},
+        {"VDD", "M2", 3.0, 6.0, 8.0, 6.0, 1.0},
+    });
+    require(different_layer.size() == 2, "different layers should not merge");
+
+    const auto vertical = sapr::routing::merge_collinear_same_net_routes({
+        {"VDD", "M1", 7.0, 0.0, 7.0, 5.0, 1.0},
+        {"VDD", "M1", 7.0, 3.0, 7.0, 8.0, 1.0},
+    });
+    require(vertical.size() == 1, "vertical overlapping same-net routes should merge");
+    require(approx(vertical.front().y1, 0.0) && approx(vertical.front().y2, 8.0),
+            "vertical merge should span the union interval");
+}
+
+// 运行 routing evaluator 的集成测试。
 void run_routing_evaluator_tests() {
+    test_collinear_same_net_route_merge();
     const auto circuit = sapr::load_circuit(source_input_dir());
     sapr::SolverConfig config;
     config.sa_iterations = 0;

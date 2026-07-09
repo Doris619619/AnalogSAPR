@@ -1260,7 +1260,7 @@ std::vector<RouteSegment> selected_candidates_to_segments(
     for (const auto& candidate : selected_candidates_for_detailed_routing(evaluation)) {
         append_path_segments(routes, evaluation, candidate);
     }
-    return routes;
+    return routing::merge_collinear_same_net_routes(routes);
 }
 
 // 执行论文 top-down detailed routing 阶段，当前基于 DP 选中子问题回溯并清理路径。
@@ -1355,6 +1355,7 @@ DetailedRoutingResult run_detailed_routing(
         }
     }
     apply_detailed_flow_check(circuit, legalized_candidates, result);
+    result.routes = routing::merge_collinear_same_net_routes(result.routes);
     const auto drc_routes = collect_active_region_crossings(request, result.routes);
     const auto short_pairs = collect_same_layer_shorts(result.routes);
     result.design_rule_violations = static_cast<int>(drc_routes.size() + short_pairs.size());
