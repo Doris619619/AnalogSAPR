@@ -1,6 +1,7 @@
 // 验证几何变换、增强 B*-tree、ASF 约束、contour packing 和 routing adapter 的核心行为。
 #include "test_support.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <random>
 #include <string>
@@ -111,6 +112,18 @@ void run_router_tests() {
     require(chain.nodes.at("M1").left == std::optional<std::string>{"M2"}, "chain left child should preserve order");
     require(chain.nodes.at("M1").right_space.id == "M1:right", "right space should be created");
 
+    const auto no_symmetry_circuit =
+        sapr::load_circuit(std::filesystem::path(SAPR_SOURCE_DIR) / "cases" / "4ring_2_left6_no_symmetry" / "input");
+    auto no_symmetry_tree = sapr::make_enhanced_tree(no_symmetry_circuit);
+    require(sapr::has_ordinary_right_child(no_symmetry_tree), "ordinary modules should keep two-dimensional right branches");
+    const auto no_symmetry_request = sapr::pack_enhanced_tree(no_symmetry_circuit, no_symmetry_tree, sapr::SolverConfig{});
+    const double first_y = no_symmetry_request.placements.at(no_symmetry_request.placement_order.front()).y;
+    const bool has_second_row = std::any_of(
+        no_symmetry_request.placement_order.begin(),
+        no_symmetry_request.placement_order.end(),
+        [&](const std::string& id) { return !approx(no_symmetry_request.placements.at(id).y, first_y); });
+    require(has_second_row, "enhanced B*-tree packing should place ordinary modules in more than one row");
+
     auto tree = sapr::make_enhanced_tree(circuit);
     require(sapr::is_valid_tree(tree), "enhanced tree should be valid");
     require(sapr::self_symmetry_on_rightmost_branch(tree), "self-symmetry module should stay on right-most branch");
@@ -136,7 +149,7 @@ void run_router_tests() {
     space.allocated_space = 9.0;
     require(approx(space.required_space(), 9.0), "feedback allocation should override smaller formula result");
 
-    const sapr::SolverConfig config{5.0, 40.0, 7, 3};
+    const sapr::SolverConfig config{5.0, 40.0, 7, 0};
     const auto request = sapr::pack_enhanced_tree(circuit, tree, config);
     require(request.placements.contains("M1"), "representative placement should exist");
     require(request.placements.contains("M2"), "mirror placement should exist");

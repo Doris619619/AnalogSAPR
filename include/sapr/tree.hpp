@@ -20,6 +20,12 @@ EnhancedBStarTree make_chain_tree(const Circuit& circuit);
 // 收集树中全部 space node，作为 routing adapter 的评价输入。
 std::vector<SpaceNode> collect_space_nodes(const EnhancedBStarTree& tree);
 
+// 统计当前树状态中持久化保存的 LCP 数量。
+std::size_t count_tree_lcps(const EnhancedBStarTree& tree);
+
+// 判断普通模块主树中是否存在 right child，用于验证二维 B*-tree 搜索自由度。
+bool has_ordinary_right_child(const EnhancedBStarTree& tree);
+
 // 检查增强 B*-tree 是否仍是单根、无环且 parent/child 关系一致。
 bool is_valid_tree(const EnhancedBStarTree& tree);
 
@@ -30,6 +36,6 @@ bool self_symmetry_on_rightmost_branch(const EnhancedBStarTree& tree);
 void apply_routing_feedback(EnhancedBStarTree& tree, const RoutingFeedback& feedback);
 
 // 对增强 B*-tree 执行一次论文 placement 侧扰动：delete-insert、swap 或 rotate。
-void perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937& rng);
+PerturbationReport perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937& rng);
 
 }  // namespace sapr

@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <random>
 #include <sstream>
@@ -521,6 +522,69 @@ void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& 
 }
 
 // 计算当前 metrics 的论文归一化总代价。
+// 将 request 中已经生成或刷新的 LCP 写回 tree 的对应 space node。
+void write_request_lcps_to_tree(EnhancedBStarTree& tree, const RoutingEvaluationRequest& request) {
+    auto clear_space = [](SpaceNode& space) {
+        space.linking_points.clear();
+        space.location_candidates.clear();
+    };
+    for (auto& [id, node] : tree.nodes) {
+        (void)id;
+        clear_space(node.right_space);
+        clear_space(node.top_space);
+    }
+    for (auto& group : tree.symmetry_groups) {
+        clear_space(group.space_group);
+        clear_space(group.space_cluster);
+        for (auto& space : group.space_group_bundle.spaces) clear_space(space);
+        for (auto& space : group.space_cluster_bundle.spaces) clear_space(space);
+    }
+
+    auto copy_if_matching = [](SpaceNode& target, const SpaceNode& source) {
+        if (target.id != source.id) return;
+        target.linking_points = source.linking_points;
+        target.location_candidates = source.location_candidates;
+    };
+    for (const auto& source : request.space_nodes) {
+        for (auto& [id, node] : tree.nodes) {
+            (void)id;
+            copy_if_matching(node.right_space, source);
+            copy_if_matching(node.top_space, source);
+        }
+        for (auto& group : tree.symmetry_groups) {
+            copy_if_matching(group.space_group, source);
+            copy_if_matching(group.space_cluster, source);
+            for (auto& space : group.space_group_bundle.spaces) copy_if_matching(space, source);
+            for (auto& space : group.space_cluster_bundle.spaces) copy_if_matching(space, source);
+        }
+    }
+}
+
+// 为初始 tree 生成一次持久化 LCP 拓扑，使 LCP 扰动进入 SA state。
+void initialize_tree_lcps(const Circuit& circuit, EnhancedBStarTree& tree, const SolverConfig& config) {
+    const auto request = pack_enhanced_tree(circuit, tree, config);
+    write_request_lcps_to_tree(tree, request);
+}
+
+// 根据当前 placement bbox 计算 row-width 溢出惩罚。
+void apply_row_width_metrics(const Circuit& circuit, const RoutingEvaluationRequest& request, Metrics& metrics, const SolverConfig& config) {
+    if (config.row_width <= 0.0 || request.placements.empty()) {
+        metrics.row_width_overflow = 0.0;
+        metrics.row_width_penalty = 0.0;
+        return;
+    }
+    double min_x = std::numeric_limits<double>::infinity();
+    double max_x = -std::numeric_limits<double>::infinity();
+    for (const auto& [module, placement] : request.placements) {
+        const auto size = placed_size(circuit.modules.at(module), placement);
+        min_x = std::min(min_x, placement.x);
+        max_x = std::max(max_x, placement.x + size.first);
+    }
+    const double width = std::max(0.0, max_x - min_x);
+    metrics.row_width_overflow = std::max(0.0, width - config.row_width);
+    metrics.row_width_penalty = config.row_width_weight * metrics.row_width_overflow / std::max(config.row_width, 1.0);
+}
+
 double compute_phi_cost(Metrics& metrics, const Metrics& base, const SolverConfig& config) {
     metrics.normalized_area = metrics.area / std::max(base.area, 1.0);
     metrics.normalized_wirelength = metrics.wirelength / std::max(base.wirelength, 1.0);
@@ -530,21 +594,13 @@ double compute_phi_cost(Metrics& metrics, const Metrics& base, const SolverConfi
                        config.wirelength_weight * metrics.normalized_wirelength +
                        config.bend_weight * metrics.normalized_bend +
                        config.via_weight * metrics.normalized_via +
+                       metrics.row_width_penalty +
                        metrics.penalty;
     return metrics.phi_cost;
 }
 
 // 评价一棵增强 B*-tree 对应的候选状态。
 // 判断当前候选是否已经得到可直接输出的合法 detailed routing。
-bool has_clean_detailed_solution(const RoutingFeedback& feedback) {
-    const auto& metrics = feedback.metrics;
-    return !feedback.routes.empty() &&
-           metrics.penalty <= 1e-9 &&
-           metrics.design_rule_violations == 0 &&
-           metrics.routing_failures == 0 &&
-           metrics.traceback_failures == 0;
-}
-
 bool feedback_expands_space(
     const RoutingEvaluationRequest& request,
     const RoutingFeedback& feedback,
@@ -577,6 +633,7 @@ CandidateState evaluate_candidate_with_feedback_loop(
     for (int iteration = 0; iteration < max_iterations; ++iteration) {
         state.request = pack_enhanced_tree(circuit, state.tree, config);
         state.feedback = evaluate_with_routing_adapter(circuit, state.request);
+        apply_row_width_metrics(circuit, state.request, state.feedback.metrics, config);
         const bool expands_space =
             feedback_expands_space(state.request, state.feedback, config.routing_feedback_tolerance);
         apply_routing_feedback(state.tree, state.feedback);
@@ -818,11 +875,22 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     }
 
     auto initial_tree = make_enhanced_tree(circuit);
+    initialize_tree_lcps(circuit, initial_tree, config);
+    if (config.debug_search) {
+        std::cerr << "[search] init ordinary_right_child=" << (has_ordinary_right_child(initial_tree) ? "true" : "false")
+                  << " tree_lcps=" << count_tree_lcps(initial_tree) << '\n';
+    }
     auto current = evaluate_candidate_with_feedback_loop(circuit, std::move(initial_tree), config, nullptr);
     const Metrics base_metrics = current.feedback.metrics;
     current.cost = compute_phi_cost(current.feedback.metrics, base_metrics, config);
     CandidateState best = current;
-    if (has_clean_detailed_solution(best.feedback)) {
+    if (config.debug_search) {
+        std::cerr << "[search] initial cost=" << current.cost
+                  << " penalty=" << current.feedback.metrics.penalty
+                  << " row_overflow=" << current.feedback.metrics.row_width_overflow
+                  << " tree_lcps=" << count_tree_lcps(current.tree) << '\n';
+    }
+    if (config.sa_iterations <= 0) {
         return make_solution(best);
     }
 
@@ -831,14 +899,26 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     double temperature = config.initial_temperature;
     for (int iteration = 0; iteration < config.sa_iterations; ++iteration) {
         auto next_tree = current.tree;
-        perturb_placement_tree(next_tree, rng);
+        const auto perturbation = perturb_placement_tree(next_tree, rng);
         auto next = evaluate_candidate(circuit, std::move(next_tree), config, base_metrics);
         const double delta = next.cost - current.cost;
         const bool accept = delta <= 0.0 || probability(rng) < std::exp(-delta / std::max(temperature, 1e-9));
         if (accept) current = std::move(next);
         if (current.cost < best.cost) best = current;
-        if (has_clean_detailed_solution(best.feedback)) {
-            break;
+        if (config.debug_search) {
+            std::cerr << "[search] iter=" << iteration
+                      << " move=" << perturbation.move
+                      << " changed=" << (perturbation.changed ? "true" : "false")
+                      << " lcp_move=" << (perturbation.used_lcp_move ? "true" : "false")
+                      << " lcp_before=" << perturbation.lcp_before
+                      << " lcp_after=" << perturbation.lcp_after
+                      << " accept=" << (accept ? "true" : "false")
+                      << " next_cost=" << next.cost
+                      << " current_cost=" << current.cost
+                      << " best_cost=" << best.cost
+                      << " penalty=" << current.feedback.metrics.penalty
+                      << " row_overflow=" << current.feedback.metrics.row_width_overflow
+                      << '\n';
         }
         temperature *= config.cooling_rate;
     }

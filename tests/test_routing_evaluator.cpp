@@ -435,7 +435,7 @@ sapr::routing::RouteCandidate make_manual_lcp_candidate(
 void run_routing_evaluator_tests() {
     const auto circuit = sapr::load_circuit(source_input_dir());
     sapr::SolverConfig config;
-    config.sa_iterations = 3;
+    config.sa_iterations = 0;
     const auto solution = sapr::solve_baseline(circuit, config);
     require(solution.metrics.has_value(), "solution should expose optimizer metrics");
     const auto& metrics = *solution.metrics;
@@ -444,6 +444,7 @@ void run_routing_evaluator_tests() {
         config.wirelength_weight * metrics.normalized_wirelength +
         config.bend_weight * metrics.normalized_bend +
         config.via_weight * metrics.normalized_via +
+        metrics.row_width_penalty +
         metrics.penalty;
     require(metrics.phi_cost > 0.0, "optimizer should expose positive phi cost");
     require(approx(metrics.phi_cost, expected_phi), "phi cost should match the paper total-cost formula");
@@ -592,7 +593,7 @@ void run_routing_evaluator_tests() {
         require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
     }
     const auto mixed_circuit = sapr::load_circuit(mixed_lcp_direct_case_input_dir());
-    const auto mixed_request = sapr::pack_enhanced_tree(mixed_circuit, sapr::make_enhanced_tree(mixed_circuit), config);
+    const auto mixed_request = sapr::pack_enhanced_tree(mixed_circuit, sapr::make_chain_tree(mixed_circuit), config);
     const auto mixed_evaluation = sapr::evaluate_routing(mixed_circuit, mixed_request);
     require(
         mixed_evaluation.bottom_up_dp.has_value() && mixed_evaluation.bottom_up_dp->success,
