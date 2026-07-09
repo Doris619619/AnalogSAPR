@@ -17,6 +17,7 @@
 #include "sapr/geometry.hpp"
 #include "sapr/lcp_generator.hpp"
 #include "sapr/router.hpp"
+#include "sapr/routing/routing_context.hpp"
 #include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
 #include "sapr/tree.hpp"
@@ -1037,6 +1038,52 @@ int count_current_density_violations(const Circuit& circuit, const std::vector<R
     return violations;
 }
 
+double maximum_routing_width(const Circuit& circuit) {
+    double width = 1.0;
+    for (const auto& [_, rule] : circuit.constraints.wire_widths) {
+        width = std::max(width, rule.max_width);
+    }
+    return width;
+}
+
+double resolve_boundary_margin(
+    const Circuit& circuit,
+    const SolverConfig& config,
+    double layout_width,
+    double layout_height) {
+    if (config.boundary_clearance < 0.0) {
+        throw std::runtime_error("boundary clearance must be non-negative");
+    }
+    if (config.boundary_margin >= 0.0) return config.boundary_margin;
+    if (config.boundary_margin < -1.0) {
+        throw std::runtime_error("boundary margin must be -1 for auto mode or non-negative");
+    }
+
+    const routing::GridConfig effective =
+        routing::effective_grid_config_for_layout(circuit, routing::GridConfig{}, layout_width, layout_height);
+    const double pin_access_escape = 2.0 * effective.step;
+    return maximum_routing_width(circuit) / 2.0 + config.boundary_clearance + pin_access_escape;
+}
+
+void translate_packing_request(RoutingEvaluationRequest& request, double offset) {
+    if (offset == 0.0) return;
+    for (auto& [_, placement] : request.placements) {
+        placement.x += offset;
+        placement.y += offset;
+    }
+    for (auto& step : request.packing_trace.steps) {
+        step.x += offset;
+        step.y += offset;
+        step.desired_x += offset;
+        step.desired_y += offset;
+        step.contour_y += offset;
+        step.occupied_bbox.x1 += offset;
+        step.occupied_bbox.y1 += offset;
+        step.occupied_bbox.x2 += offset;
+        step.occupied_bbox.y2 += offset;
+    }
+}
+
 }  // namespace
 
 // 按增强 B*-tree 和 ASF 对称组生成当前候选布局。
@@ -1095,6 +1142,15 @@ RoutingEvaluationRequest pack_enhanced_tree(
     };
 
     place_node(*tree.root, 0.0, 0.0);
+    double layout_width = 0.0;
+    double layout_height = 0.0;
+    for (const auto& rect : packed) {
+        layout_width = std::max(layout_width, rect.x2);
+        layout_height = std::max(layout_height, rect.y2);
+    }
+    translate_packing_request(
+        request,
+        resolve_boundary_margin(circuit, config, layout_width, layout_height));
     request.placement_order = ordered_placements(circuit, request);
     request.space_nodes = collect_space_nodes(tree);
     request.tree = make_routing_tree_snapshot(tree);
