@@ -198,6 +198,7 @@ struct Solution {
     std::optional<bool> packing_time_dp_used;
     std::optional<bool> dp_used;
     std::optional<std::string> btree_trace_json;
+    std::optional<std::string> routing_debug_json;
     std::vector<std::string> routing_warnings;
 };
 
@@ -389,6 +390,7 @@ struct RoutingFeedback {
     std::unordered_map<std::string, double> coupling_space_by_node;
     double routing_cost{};
     std::size_t routing_candidate_count{};
+    std::optional<std::string> routing_debug_json;
 };
 
 // 表示 detailed routing 回溯中的一个拓扑节点。

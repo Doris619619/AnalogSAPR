@@ -117,8 +117,10 @@ OK
 
 - `output/placement.txt`：器件放置位置、角度和朝向。
 - `output/routing.txt`：线网、金属层、中心线坐标和线宽。
+- `output/*_layout.png`：布局和布线可视化图，默认每次运行都会生成。
+- `output/routing_debug.json`：routing/LCP/DP/detailed routing 诊断快照，默认每次运行都会生成。
 - 标准输出：面积、线长、bend、via 和 penalty 指标。
-- `--dump-routing-eval` 输出：phi cost、routing cost、DP 状态数、packing trace 步数、packing-time DP segment 数、space feedback 节点数和 routing feedback 收敛信息。
+- `--dump-routing-eval` 仅额外在标准输出打印：phi cost、routing cost、DP 状态数、packing trace 步数、packing-time DP segment 数、space feedback 节点数和 routing feedback 收敛信息。
 
 ## 不使用 CMake 的临时编译方式
 
@@ -153,7 +155,9 @@ IO/
 │   └── constraints.txt    # 对称、电流流向、线宽约束
 └── output/
     ├── placement.txt      # 器件放置位置 + 角度 + orient
-    └── routing.txt        # 走线中心线段 + 金属层 + 线宽
+    ├── routing.txt        # 走线中心线段 + 金属层 + 线宽
+    ├── *_layout.png       # 每次 run 自动生成的布局布线图
+    └── routing_debug.json # 每次 run 自动生成的 routing 诊断快照
 ```
 
 ---

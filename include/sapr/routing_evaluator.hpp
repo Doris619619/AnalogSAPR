@@ -22,6 +22,7 @@ struct RoutingEvaluation {
     double routing_cost{};
     int failed_nets{};
     bool used_bottom_up_dp{};
+    std::vector<routing::RouteCandidate> debug_candidates;
 };
 
 // 根据当前 placement 构建布线环境、生成 A* 候选路径并执行 DP 全局布线。

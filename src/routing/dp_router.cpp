@@ -39,6 +39,14 @@ struct PackingTraceIndex {
     std::unordered_map<std::string, int> index_by_node;
 };
 
+// 表示 candidate 尝试加入 DP state 后的结果和诊断原因。
+struct AppendCandidateResult {
+    bool accepted{};
+    bool has_short{};
+    std::string reason;
+    std::string state_lcp_candidate_id;
+};
+
 // 返回 terminal 所属模块，LCP 或无法识别时返回空字符串。
 std::string module_for_terminal(const std::string& terminal) {
     const auto dot = terminal.find('.');
@@ -87,6 +95,42 @@ void add_candidate_metrics(RoutingDpState& state, const RouteCandidate& candidat
     state.metrics.via_count += candidate.path.metrics.via_count;
     state.penalty += candidate.flow_penalty + candidate.current_density_penalty + candidate.coupling_cost;
     recompute_state_cost(state);
+}
+
+// 返回当前 state 中同一 LCP 已绑定的候选位置，未绑定时返回空字符串。
+std::string existing_lcp_binding(const RoutingDpState& state, const RouteCandidate& candidate) {
+    const auto lookup = [&](const std::string& lcp_id) -> std::string {
+        if (lcp_id.empty()) return {};
+        const auto found = state.lcp_location_by_id.find(lcp_id);
+        return found == state.lcp_location_by_id.end() ? std::string{} : found->second;
+    };
+    std::string bound = lookup(candidate.lcp_id);
+    if (!bound.empty()) return bound;
+    bound = lookup(candidate.source_lcp_id);
+    if (!bound.empty()) return bound;
+    return lookup(candidate.target_lcp_id);
+}
+
+// 写入一次 DP candidate 尝试事件，供 routing_debug.json 解释 DP 拒绝原因。
+void append_candidate_event(
+    std::vector<RoutingDpCandidateEvent>& events,
+    const CandidateGroup& group,
+    const RoutingDpState& state,
+    const RouteCandidate& candidate,
+    const AppendCandidateResult& result) {
+    RoutingDpCandidateEvent event;
+    event.group_key = group.key;
+    event.net = candidate.net;
+    event.from_terminal = candidate.from_terminal;
+    event.to_terminal = candidate.to_terminal;
+    event.segment_id = candidate.segment_id;
+    event.lcp_candidate_id = candidate.lcp_candidate_id;
+    event.state_lcp_candidate_id = result.state_lcp_candidate_id.empty()
+                                       ? existing_lcp_binding(state, candidate)
+                                       : result.state_lcp_candidate_id;
+    event.reason = result.reason;
+    event.selected = result.accepted;
+    events.push_back(std::move(event));
 }
 
 // 追加不重复字符串，避免 traceback 列表出现重复项。
@@ -143,27 +187,43 @@ bool merge_child_state(RoutingDpState& target, const RoutingDpState& child, bool
 }
 
 // 尝试把 candidate 加入 state，并维护 LCP 位置一致性。
-bool append_candidate_if_consistent(
+AppendCandidateResult append_candidate_if_consistent(
     RoutingDpState& state,
     const RouteCandidate& candidate,
     const RoutingContext& context) {
-    if (!candidate.path.success) return false;
+    AppendCandidateResult result;
+    if (!candidate.path.success) {
+        result.reason = "path_fail";
+        return result;
+    }
     const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
     auto candidate_routes = candidate_to_route_segments(context.grid(), candidate, width);
     const bool has_short = routes_short_with_existing(candidate_routes, state.occupied_routes);
     if (!candidate.lcp_id.empty()) {
         const auto assigned = state.lcp_location_by_id.find(candidate.lcp_id);
-        if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.lcp_candidate_id) return false;
+        if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.lcp_candidate_id) {
+            result.reason = "lcp_binding_conflict";
+            result.state_lcp_candidate_id = assigned->second;
+            return result;
+        }
         if (assigned == state.lcp_location_by_id.end()) state.lcp_location_by_id[candidate.lcp_id] = candidate.lcp_candidate_id;
     }
     if (!candidate.source_lcp_id.empty()) {
         const auto assigned = state.lcp_location_by_id.find(candidate.source_lcp_id);
-        if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.source_lcp_candidate_id) return false;
+        if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.source_lcp_candidate_id) {
+            result.reason = "lcp_binding_conflict";
+            result.state_lcp_candidate_id = assigned->second;
+            return result;
+        }
         if (assigned == state.lcp_location_by_id.end()) state.lcp_location_by_id[candidate.source_lcp_id] = candidate.source_lcp_candidate_id;
     }
     if (!candidate.target_lcp_id.empty()) {
         const auto assigned = state.lcp_location_by_id.find(candidate.target_lcp_id);
-        if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.target_lcp_candidate_id) return false;
+        if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.target_lcp_candidate_id) {
+            result.reason = "lcp_binding_conflict";
+            result.state_lcp_candidate_id = assigned->second;
+            return result;
+        }
         if (assigned == state.lcp_location_by_id.end()) state.lcp_location_by_id[candidate.target_lcp_id] = candidate.target_lcp_candidate_id;
     }
     state.selected_candidates.push_back(candidate);
@@ -178,7 +238,10 @@ bool append_candidate_if_consistent(
     append_unique(state.covered_wire_segments, candidate_segment_key(candidate));
     append_unique(state.selected_transitions, candidate_segment_key(candidate));
     state.choice_message = candidate_segment_key(candidate);
-    return true;
+    result.accepted = true;
+    result.has_short = has_short;
+    result.reason = has_short ? "short_conflict_penalty" : "selected";
+    return result;
 }
 
 // 将候选路径对应的 LCP owner packing step 追加到 traceback 说明。
@@ -507,14 +570,17 @@ void apply_segment_transition(
     const std::unordered_map<std::string, std::string>& lcp_space_by_id,
     const PackingTraceIndex& trace_index,
     int max_states,
-    int& pruned_states) {
+    int& pruned_states,
+    std::vector<RoutingDpCandidateEvent>& candidate_events) {
     std::vector<RoutingDpState> next_states;
     for (const auto& state : states) {
         bool selected_any = false;
         for (const auto& candidate : group.candidates) {
             if (!candidate_matches_group(candidate, group)) continue;
             RoutingDpState next = state;
-            if (!append_candidate_if_consistent(next, candidate, context)) continue;
+            const auto append_result = append_candidate_if_consistent(next, candidate, context);
+            append_candidate_event(candidate_events, group, state, candidate, append_result);
+            if (!append_result.accepted) continue;
             append_candidate_packing_trace(next, candidate, lcp_owner_by_id, lcp_space_by_id, trace_index);
             selected_any = true;
             next_states.push_back(std::move(next));
@@ -554,7 +620,8 @@ std::vector<RoutingDpState> build_states_for_node(
     const std::vector<std::string>* packing_time_segments,
     bool use_packing_time_segments,
     int max_states,
-    int& pruned_states) {
+    int& pruned_states,
+    std::vector<RoutingDpCandidateEvent>& candidate_events) {
     auto states = merge_child_states_for_node(node, result_by_node, trace_index);
     if (states.empty()) return states;
 
@@ -581,7 +648,8 @@ std::vector<RoutingDpState> build_states_for_node(
             lcp_space_by_id,
             trace_index,
             max_states,
-            pruned_states);
+            pruned_states,
+            candidate_events);
     }
 
     prune_states(states, max_states, pruned_states);
@@ -662,7 +730,8 @@ RoutingDpResult run_bottom_up_routing_dp(
             packing_time_segments,
             result.packing_time_dp_used,
             max_states_per_node,
-            result.dp_pruned_states);
+            result.dp_pruned_states,
+            result.candidate_events);
         result.dp_nodes += 1;
         result.dp_states += static_cast<int>(node_result.states.size());
         result_by_node[node_id] = node_result;
