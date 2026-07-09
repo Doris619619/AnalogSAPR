@@ -186,6 +186,10 @@ struct SaBtreeIterationTrace {
     double current_cost_before{};
     double temperature{};
     std::string btree_trace_json;
+    // 保存本轮候选解的布局布线文本输出所需数据，用于逐轮渲染 layout。
+    std::unordered_map<std::string, Placement> placements;
+    std::vector<std::string> placement_order;
+    std::vector<RouteSegment> routes;
 };
 
 // 汇总布局和布线结果，并可保存求解时的路由评价快照。

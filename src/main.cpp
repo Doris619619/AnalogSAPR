@@ -234,8 +234,10 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     if (config.dump_sa_btree && !solution.sa_btree_iterations.empty()) {
         sapr::write_sa_btree_iterations(
             solution,
+            input,
             output,
             btree_renderer_script_path(),
+            renderer_script_path(executable_path),
             python_command(),
             render_dpi);
     }
