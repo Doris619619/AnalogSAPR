@@ -235,8 +235,49 @@ def draw_space_node(ax: Any, x: float, y: float, space: dict[str, Any], fallback
     draw_lcp_inside_space(ax, x, y, int(space.get("lcp_count", 0) or 0))
 
 
+# 根据 SA 轮次元数据生成结构图多行标题，突出扰动序号与操作。
+def sa_iteration_title(trace: dict[str, Any], name: str) -> str:
+    meta = trace.get("sa_iteration")
+    if not isinstance(meta, dict):
+        return (
+            f"{name} enhanced B*-tree structure\n"
+            "LS = left space node / right-side routing space, RS = right space node / top routing space"
+        )
+    index = meta.get("index", "?")
+    total = meta.get("total", "?")
+    move = meta.get("move", "none")
+    changed = "yes" if meta.get("changed") else "no"
+    accept = "ACCEPT" if meta.get("accept") else "REJECT"
+    next_cost = meta.get("next_cost")
+    before_cost = meta.get("current_cost_before")
+    temperature = meta.get("temperature")
+    delta = None
+    if isinstance(next_cost, (int, float)) and isinstance(before_cost, (int, float)):
+        delta = float(next_cost) - float(before_cost)
+    lines = [
+        f"perturbation #{index} / {total}   move={move}   changed={changed}   {accept}",
+    ]
+    detail_parts: list[str] = []
+    if isinstance(next_cost, (int, float)):
+        detail_parts.append(f"next_cost={float(next_cost):.4g}")
+    if delta is not None:
+        detail_parts.append(f"delta={delta:+.4g}")
+    if isinstance(temperature, (int, float)):
+        detail_parts.append(f"T={float(temperature):.4g}")
+    if detail_parts:
+        lines.append("   ".join(detail_parts))
+    lines.append("LS = left space node / right-side routing space, RS = right space node / top routing space")
+    return "\n".join(lines)
+
+
 # 绘制 enhanced B*-tree：module 通过对应 space node 再连接到 child module。
-def render_structure(trace: dict[str, Any], output_dir: Path, name: str, dpi: int) -> Path:
+def render_structure(
+    trace: dict[str, Any],
+    output_dir: Path,
+    name: str,
+    dpi: int,
+    output_basename: str | None = None,
+) -> Path:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -319,14 +360,13 @@ def render_structure(trace: dict[str, Any], output_dir: Path, name: str, dpi: in
             ]
         )
     ax.legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(1.02, 1.0), fontsize=8)
-    ax.set_title(
-        f"{name} enhanced B*-tree structure\n"
-        "LS = left space node / right-side routing space, RS = right space node / top routing space",
-        fontsize=12,
-        fontweight="bold",
-    )
+    title = sa_iteration_title(trace, name)
+    title_fontsize = 13 if "sa_iteration" in trace else 12
+    ax.set_title(title, fontsize=title_fontsize, fontweight="bold", pad=16, loc="left")
+    fig.subplots_adjust(top=0.82)
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / f"{name}_btree_structure.png"
+    file_stem = output_basename or f"{name}_btree_structure"
+    out_path = output_dir / f"{file_stem}.png"
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return out_path
@@ -455,21 +495,32 @@ def render_packing(trace: dict[str, Any], output_dir: Path, name: str, dpi: int)
     return out_path
 
 
-# 解析命令行参数并输出两张 enhanced B*-tree 调试图。
+# 解析命令行参数并输出 enhanced B*-tree 调试图。
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render SAPR enhanced B*-tree trace JSON as debug PNGs.")
     parser.add_argument("--trace", required=True, type=Path, help="Path to btree_trace.json")
     parser.add_argument("--output", required=True, type=Path, help="Directory for generated PNG files")
     parser.add_argument("--name", default=None, help="PNG basename prefix; defaults to trace filename")
     parser.add_argument("--dpi", type=int, default=200, help="Output PNG DPI")
+    parser.add_argument(
+        "--structure-only",
+        action="store_true",
+        help="Only render the structure PNG (skip packing contour figure)",
+    )
+    parser.add_argument(
+        "--output-basename",
+        default=None,
+        help="Exact structure PNG stem (without .png); defaults to <name>_btree_structure",
+    )
     args = parser.parse_args()
 
     trace = json.loads(args.trace.read_text(encoding="utf-8"))
     name = args.name or default_name(args.trace)
-    structure = render_structure(trace, args.output, name, args.dpi)
-    packing = render_packing(trace, args.output, name, args.dpi)
+    structure = render_structure(trace, args.output, name, args.dpi, args.output_basename)
     print(os.fspath(structure))
-    print(os.fspath(packing))
+    if not args.structure_only:
+        packing = render_packing(trace, args.output, name, args.dpi)
+        print(os.fspath(packing))
     return 0
 
 

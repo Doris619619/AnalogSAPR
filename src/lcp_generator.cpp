@@ -3,9 +3,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -21,8 +23,9 @@ namespace {
 constexpr double kDefaultWidth = 1.0;
 constexpr double kGridUnit = 1.0;
 constexpr int kMaxPinsPerLeafLcp = 3;
-constexpr std::size_t kMaxCandidatesPerLcp = 6;
+constexpr std::size_t kMaxCandidatesPerLcp = 16;
 constexpr std::size_t kMinCandidatesPerLcp = 3;
+constexpr std::size_t kRandomSpaceCandidatesPerLcp = 1;
 
 enum class NetDirection {
     Neutral,
@@ -50,6 +53,7 @@ struct WorkingLcp {
     double ideal_y{};
     Rect support_bbox{};
     NetDirection direction{NetDirection::Neutral};
+    unsigned int candidate_seed{};
 };
 
 struct SpaceBindingState {
@@ -380,6 +384,10 @@ std::pair<double, double> cluster_ideal(const std::vector<PinInfo>& pins, const 
 std::pair<double, double> space_anchor(
     const SpaceNode& space,
     const std::unordered_map<std::string, Rect>& module_boxes) {
+    if (space.physical_region.has_value()) {
+        const Rect region = *space.physical_region;
+        return {(region.x1 + region.x2) / 2.0, (region.y1 + region.y2) / 2.0};
+    }
     const auto found = module_boxes.find(space.owner);
     if (found == module_boxes.end()) return {0.0, 0.0};
     const Rect box = found->second;
@@ -443,6 +451,36 @@ std::string candidate_key(double x, double y, const std::string& validity) {
     return std::to_string(gx) + ":" + std::to_string(gy) + ":" + validity;
 }
 
+// 判断点是否落在矩形区域内。
+bool point_inside_rect(double x, double y, const Rect& rect) {
+    return x >= rect.x1 - 1e-9 && x <= rect.x2 + 1e-9 && y >= rect.y1 - 1e-9 && y <= rect.y2 + 1e-9;
+}
+
+// 返回两个矩形的交集；没有交集时返回空值。
+std::optional<Rect> intersect_rect(Rect lhs, Rect rhs) {
+    Rect result{std::max(lhs.x1, rhs.x1), std::max(lhs.y1, rhs.y1), std::min(lhs.x2, rhs.x2), std::min(lhs.y2, rhs.y2)};
+    if (result.x2 < result.x1 || result.y2 < result.y1) return std::nullopt;
+    return result;
+}
+
+// 将坐标限制到指定矩形中。
+std::pair<double, double> clamp_to_rect(double x, double y, Rect rect) {
+    return {std::clamp(x, rect.x1, rect.x2), std::clamp(y, rect.y1, rect.y2)};
+}
+
+// 按全局 seed、LCP id 和 space id 派生稳定随机种子。
+std::uint32_t stable_candidate_seed(const WorkingLcp& lcp) {
+    std::uint32_t seed = lcp.candidate_seed == 0 ? 1U : lcp.candidate_seed;
+    auto mix = [&](const std::string& value) {
+        for (unsigned char ch : value) {
+            seed ^= static_cast<std::uint32_t>(ch) + 0x9e3779b9U + (seed << 6U) + (seed >> 2U);
+        }
+    };
+    mix(lcp.point.id);
+    mix(lcp.point.space_node_id);
+    return seed;
+}
+
 // 加入一个候选点并按 grid key 去重。
 void add_candidate(
     std::vector<PhysicalLocationCandidate>& candidates,
@@ -453,10 +491,12 @@ void add_candidate(
     const std::string& validity,
     bool fallback,
     double penalty,
-    const std::string& reason) {
+    const std::string& reason,
+    const std::string& source,
+    bool inside_space_region) {
     const std::string key = candidate_key(x, y, validity);
     if (!seen.insert(key).second) return;
-    candidates.push_back({x, y, id, validity, fallback, penalty, reason});
+    candidates.push_back({x, y, id, validity, fallback, penalty, reason, source, inside_space_region});
 }
 
 // 判断候选点按所需线宽扩张后是否碰到 active blocker。
@@ -477,6 +517,7 @@ void add_classified_candidate(
     std::vector<PhysicalLocationCandidate>& candidates,
     std::unordered_set<std::string>& seen,
     const WorkingLcp& lcp,
+    const std::optional<Rect>& space_region,
     const std::vector<Rect>& blockers,
     double x,
     double y,
@@ -484,7 +525,24 @@ void add_classified_candidate(
     const std::string& validity,
     bool fallback,
     double penalty,
-    const std::string& reason) {
+    const std::string& reason,
+    const std::string& source) {
+    const bool inside_space = !space_region.has_value() || point_inside_rect(x, y, *space_region);
+    std::string final_validity = validity;
+    bool final_fallback = fallback;
+    double final_penalty = penalty;
+    std::string final_reason = reason;
+    if (!inside_space) {
+        final_penalty += 2000.0;
+        final_reason += "_outside_space";
+        if (validity == "strict") {
+            final_validity = "relaxed";
+        } else {
+            final_validity = "emergency";
+            final_fallback = true;
+            final_penalty += 8000.0;
+        }
+    }
     const bool blocked = candidate_hits_blocker(x, y, lcp.required_width, blockers);
     add_candidate(
         candidates,
@@ -492,13 +550,75 @@ void add_classified_candidate(
         x,
         y,
         id,
-        blocked ? "emergency" : validity,
-        fallback || blocked,
-        penalty + (blocked ? 10000.0 : 0.0),
-        blocked ? reason + "_active_blocker" : reason);
+        blocked ? "emergency" : final_validity,
+        final_fallback || blocked,
+        final_penalty + (blocked ? 10000.0 : 0.0),
+        blocked ? final_reason + "_active_blocker" : final_reason,
+        source,
+        inside_space);
 }
 
 // 为单个 LCP 生成 strict/relaxed/emergency 候选。
+// 在所属 space region 内生成优先候选和确定性随机采样点。
+void add_space_region_candidates(
+    std::vector<PhysicalLocationCandidate>& candidates,
+    std::unordered_set<std::string>& seen,
+    const WorkingLcp& lcp,
+    const std::optional<Rect>& space_region,
+    const std::vector<Rect>& blockers) {
+    if (!space_region.has_value()) return;
+    const Rect region = *space_region;
+    const Rect expanded_support{
+        lcp.support_bbox.x1 - kGridUnit,
+        lcp.support_bbox.y1 - kGridUnit,
+        lcp.support_bbox.x2 + kGridUnit,
+        lcp.support_bbox.y2 + kGridUnit,
+    };
+    const Rect sample = intersect_rect(region, expanded_support).value_or(region);
+    const auto [ideal_x, ideal_y] = clamp_to_rect(lcp.ideal_x, lcp.ideal_y, region);
+    const std::vector<std::pair<std::string, std::pair<double, double>>> anchors{
+        {"space_clamped_ideal", {ideal_x, ideal_y}},
+        {"space_center", {(region.x1 + region.x2) / 2.0, (region.y1 + region.y2) / 2.0}},
+        {"space_sample_center", {(sample.x1 + sample.x2) / 2.0, (sample.y1 + sample.y2) / 2.0}},
+    };
+    for (const auto& [name, point] : anchors) {
+        add_classified_candidate(
+            candidates,
+            seen,
+            lcp,
+            space_region,
+            blockers,
+            point.first,
+            point.second,
+            lcp.point.id + ":" + name,
+            "strict",
+            false,
+            0.0,
+            name,
+            "space_grid");
+    }
+
+    std::mt19937 rng(stable_candidate_seed(lcp));
+    std::uniform_real_distribution<double> x_dist(sample.x1, sample.x2);
+    std::uniform_real_distribution<double> y_dist(sample.y1, sample.y2);
+    for (std::size_t index = 0; index < kRandomSpaceCandidatesPerLcp; ++index) {
+        add_classified_candidate(
+            candidates,
+            seen,
+            lcp,
+            space_region,
+            blockers,
+            x_dist(rng),
+            y_dist(rng),
+            lcp.point.id + ":space_random:" + std::to_string(index),
+            "strict",
+            false,
+            5.0 + static_cast<double>(index) * 0.1,
+            "space_random",
+            "space_random");
+    }
+}
+
 void generate_candidates_for_lcp(
     WorkingLcp& lcp,
     const std::vector<SpaceNode>& spaces,
@@ -513,15 +633,17 @@ void generate_candidates_for_lcp(
     const auto space_it = std::find_if(spaces.begin(), spaces.end(), [&](const SpaceNode& space) {
         return space.id == lcp.point.space_node_id;
     });
+    const std::optional<Rect> space_region = space_it == spaces.end() ? std::nullopt : space_it->physical_region;
     std::pair<double, double> anchor{lcp.ideal_x, lcp.ideal_y};
     if (space_it != spaces.end()) anchor = space_anchor(*space_it, module_boxes);
 
-    add_classified_candidate(candidates, seen, lcp, blockers, lcp.ideal_x, lcp.ideal_y, lcp.point.id + ":median", "strict", false, 0.0, "median");
-    add_classified_candidate(candidates, seen, lcp, blockers, cx, cy, lcp.point.id + ":bbox_center", "strict", false, 0.0, "bbox_center");
-    add_classified_candidate(candidates, seen, lcp, blockers, anchor.first, anchor.second, lcp.point.id + ":space_projection", "strict", false, 0.0, "space_projection");
-    add_classified_candidate(candidates, seen, lcp, blockers, lcp.ideal_x, cy, lcp.point.id + ":aligned_x", "relaxed", false, 10.0, "aligned_x");
-    add_classified_candidate(candidates, seen, lcp, blockers, cx, lcp.ideal_y, lcp.point.id + ":aligned_y", "relaxed", false, 10.0, "aligned_y");
-    add_classified_candidate(candidates, seen, lcp, blockers, box.x2 + offset, cy, lcp.point.id + ":width_offset", "relaxed", false, 20.0, "width_offset");
+    add_space_region_candidates(candidates, seen, lcp, space_region, blockers);
+    add_classified_candidate(candidates, seen, lcp, space_region, blockers, lcp.ideal_x, lcp.ideal_y, lcp.point.id + ":median", "strict", false, 0.0, "median", "median");
+    add_classified_candidate(candidates, seen, lcp, space_region, blockers, cx, cy, lcp.point.id + ":bbox_center", "strict", false, 0.0, "bbox_center", "bbox_center");
+    add_classified_candidate(candidates, seen, lcp, space_region, blockers, anchor.first, anchor.second, lcp.point.id + ":space_projection", "strict", false, 0.0, "space_projection", "space_projection");
+    add_classified_candidate(candidates, seen, lcp, space_region, blockers, lcp.ideal_x, cy, lcp.point.id + ":aligned_x", "relaxed", false, 10.0, "aligned_x", "aligned");
+    add_classified_candidate(candidates, seen, lcp, space_region, blockers, cx, lcp.ideal_y, lcp.point.id + ":aligned_y", "relaxed", false, 10.0, "aligned_y", "aligned");
+    add_classified_candidate(candidates, seen, lcp, space_region, blockers, box.x2 + offset, cy, lcp.point.id + ":width_offset", "relaxed", false, 20.0, "width_offset", "width_offset");
 
     const std::vector<std::pair<double, double>> emergency_offsets{
         {kGridUnit, 0.0},
@@ -543,7 +665,9 @@ void generate_candidates_for_lcp(
             "emergency",
             true,
             10000.0,
-            "emergency_offset");
+            "emergency_offset",
+            "emergency",
+            false);
     }
     std::sort(candidates.begin(), candidates.end(), [&](const auto& lhs, const auto& rhs) {
         const auto cost = [&](const PhysicalLocationCandidate& candidate) {
@@ -627,6 +751,7 @@ void append_net_lcps(
         lcp.net = net.name;
         lcp.required_width = min_width;
         lcp.direction = direction;
+        lcp.candidate_seed = request.lcp_candidate_seed;
         lcp.point.id = leaf_id;
         lcp.support_bbox = support_bbox_for_pins(circuit, request, pins, cluster.pins);
         const auto ideal = cluster_ideal(pins, cluster.pins);
@@ -652,6 +777,7 @@ void append_net_lcps(
     root.net = net.name;
     root.required_width = min_width;
     root.direction = direction;
+    root.candidate_seed = request.lcp_candidate_seed;
     root.point.id = net.name + ":root";
     root.support_bbox = root_box;
     std::vector<double> weighted_xs;
@@ -698,10 +824,12 @@ WorkingLcp working_lcp_from_existing(
     const LinkingControlPoint& point,
     const SpaceNode& space,
     const std::unordered_map<std::string, PinInfo>& pins,
-    const std::unordered_map<std::string, Rect>& module_boxes) {
+    const std::unordered_map<std::string, Rect>& module_boxes,
+    unsigned int candidate_seed) {
     WorkingLcp lcp;
     lcp.point = point;
     lcp.point.location_candidates.clear();
+    lcp.candidate_seed = candidate_seed;
     if (!point.segments.empty()) {
         lcp.net = point.segments.front().net;
         for (const auto& segment : point.segments) {
@@ -782,7 +910,7 @@ void refresh_lcp_location_candidates(const Circuit& circuit, RoutingEvaluationRe
         space.location_candidates.clear();
         for (auto& point : space.linking_points) {
             point.space_node_id = space.id;
-            auto lcp = working_lcp_from_existing(point, space, pins, module_boxes);
+            auto lcp = working_lcp_from_existing(point, space, pins, module_boxes, request.lcp_candidate_seed);
             generate_candidates_for_lcp(lcp, request.space_nodes, module_boxes, request.active_region_blockers);
             point = std::move(lcp.point);
             request.linking_points.push_back(point);
