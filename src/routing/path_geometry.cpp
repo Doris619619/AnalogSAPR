@@ -1,7 +1,10 @@
 // 文件职责：实现候选路径压缩、金属矩形短路检查和简单换层合法化工具。
 #include "sapr/routing/path_geometry.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <string>
+#include <utility>
 
 #include "sapr/routing/geometry.hpp"
 #include "sapr/routing/layer.hpp"
@@ -9,9 +12,73 @@
 namespace sapr::routing {
 namespace {
 
+// 表示 route segment 可参与输出合并的几何方向。
+enum class RouteOrientation { Horizontal, Vertical, Other };
+
+// 表示同一条中心线上的一维覆盖区间。
+struct MergeInterval {
+    double begin{};
+    double end{};
+};
+
+// 收集同网同层同宽且共线的 route segment，用于批量区间合并。
+struct MergeGroup {
+    std::size_t first_index{};
+    RouteSegment sample;
+    RouteOrientation orientation{RouteOrientation::Other};
+    double fixed{};
+    std::vector<MergeInterval> intervals;
+};
+
 // 判断两个连续坐标是否可视为相同，避免浮点误差影响线段合并。
 bool same_coord(double lhs, double rhs) {
     return std::abs(lhs - rhs) <= 1e-9;
+}
+
+// 判断输出线段的方向，只有水平和垂直线段参与区间合并。
+RouteOrientation route_orientation(const RouteSegment& route) {
+    if (same_coord(route.y1, route.y2) && !same_coord(route.x1, route.x2)) return RouteOrientation::Horizontal;
+    if (same_coord(route.x1, route.x2) && !same_coord(route.y1, route.y2)) return RouteOrientation::Vertical;
+    return RouteOrientation::Other;
+}
+
+// 返回共线分组使用的固定坐标，水平线取 y，垂直线取 x。
+double fixed_coord_for_route(const RouteSegment& route, RouteOrientation orientation) {
+    return orientation == RouteOrientation::Horizontal ? route.y1 : route.x1;
+}
+
+// 返回可合并方向上的区间端点，统一为 min/max 方便排序合并。
+MergeInterval interval_for_route(const RouteSegment& route, RouteOrientation orientation) {
+    if (orientation == RouteOrientation::Horizontal) {
+        return {std::min(route.x1, route.x2), std::max(route.x1, route.x2)};
+    }
+    return {std::min(route.y1, route.y2), std::max(route.y1, route.y2)};
+}
+
+// 判断线段是否属于同一个同网同层同宽共线合并组。
+bool route_matches_group(const RouteSegment& route, RouteOrientation orientation, double fixed, const MergeGroup& group) {
+    return group.orientation == orientation &&
+           group.sample.net == route.net &&
+           group.sample.layer == route.layer &&
+           same_coord(group.sample.width, route.width) &&
+           same_coord(group.fixed, fixed);
+}
+
+// 将合并后的区间转换回标准方向的 route segment。
+RouteSegment route_from_interval(const MergeGroup& group, const MergeInterval& interval) {
+    RouteSegment route = group.sample;
+    if (group.orientation == RouteOrientation::Horizontal) {
+        route.x1 = interval.begin;
+        route.y1 = group.fixed;
+        route.x2 = interval.end;
+        route.y2 = group.fixed;
+    } else {
+        route.x1 = group.fixed;
+        route.y1 = interval.begin;
+        route.x2 = group.fixed;
+        route.y2 = interval.end;
+    }
+    return route;
 }
 
 // 移除 A-B-A 型即时回折，减少后续短路检查中的重复线段。
@@ -176,6 +243,68 @@ bool routes_short_with_existing(
         }
     }
     return false;
+}
+
+// 合并同网同层同宽的共线输出段，去掉重复、包含、重叠和首尾相接区间。
+std::vector<RouteSegment> merge_collinear_same_net_routes(
+    const std::vector<RouteSegment>& routes) {
+    std::vector<MergeGroup> groups;
+    std::vector<RouteSegment> passthrough;
+    passthrough.reserve(routes.size());
+
+    for (std::size_t index = 0; index < routes.size(); ++index) {
+        const auto& route = routes[index];
+        const auto orientation = route_orientation(route);
+        if (orientation == RouteOrientation::Other) {
+            passthrough.push_back(route);
+            continue;
+        }
+        const double fixed = fixed_coord_for_route(route, orientation);
+        const auto interval = interval_for_route(route, orientation);
+        if (same_coord(interval.begin, interval.end)) continue;
+
+        auto group = std::find_if(groups.begin(), groups.end(), [&](const MergeGroup& candidate) {
+            return route_matches_group(route, orientation, fixed, candidate);
+        });
+        if (group == groups.end()) {
+            MergeGroup next;
+            next.first_index = index;
+            next.sample = route;
+            next.orientation = orientation;
+            next.fixed = fixed;
+            next.intervals.push_back(interval);
+            groups.push_back(std::move(next));
+        } else {
+            group->intervals.push_back(interval);
+        }
+    }
+
+    std::sort(groups.begin(), groups.end(), [](const MergeGroup& lhs, const MergeGroup& rhs) {
+        return lhs.first_index < rhs.first_index;
+    });
+
+    std::vector<RouteSegment> merged;
+    merged.reserve(routes.size());
+    for (auto& group : groups) {
+        std::sort(group.intervals.begin(), group.intervals.end(), [](const auto& lhs, const auto& rhs) {
+            if (!same_coord(lhs.begin, rhs.begin)) return lhs.begin < rhs.begin;
+            return lhs.end < rhs.end;
+        });
+
+        std::vector<MergeInterval> normalized;
+        for (const auto& interval : group.intervals) {
+            if (normalized.empty() || interval.begin > normalized.back().end + 1e-9) {
+                normalized.push_back(interval);
+            } else {
+                normalized.back().end = std::max(normalized.back().end, interval.end);
+            }
+        }
+        for (const auto& interval : normalized) {
+            merged.push_back(route_from_interval(group, interval));
+        }
+    }
+    merged.insert(merged.end(), passthrough.begin(), passthrough.end());
+    return merged;
 }
 
 std::vector<RouteSegment> reassign_routes_to_layer(std::vector<RouteSegment> routes, int layer_index) {
