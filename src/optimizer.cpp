@@ -77,6 +77,88 @@ void write_json_string_array(std::ostringstream& out, const std::vector<std::str
     out << ']';
 }
 
+// 将紧凑 JSON 格式化为缩进文本，提升 routing_debug.json 可读性。
+std::string pretty_print_json(const std::string& compact) {
+    std::ostringstream out;
+    int indent = 0;
+    bool in_string = false;
+    bool escape = false;
+    const auto write_indent = [&]() {
+        for (int i = 0; i < indent; ++i) out << "  ";
+    };
+
+    for (std::size_t index = 0; index < compact.size(); ++index) {
+        const char ch = compact[index];
+        if (in_string) {
+            out << ch;
+            if (escape) {
+                escape = false;
+            } else if (ch == '\\') {
+                escape = true;
+            } else if (ch == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        switch (ch) {
+            case '"':
+                in_string = true;
+                out << ch;
+                break;
+            case '{':
+            case '[':
+                out << ch;
+                if (index + 1 < compact.size() && compact[index + 1] != '}' && compact[index + 1] != ']') {
+                    out << '\n';
+                    ++indent;
+                    write_indent();
+                }
+                break;
+            case '}':
+            case ']': {
+                // 空容器保持 [] / {}，避免拆成多行。
+                const char open = ch == '}' ? '{' : '[';
+                std::size_t prev = index;
+                while (prev > 0) {
+                    --prev;
+                    const char prior = compact[prev];
+                    if (prior == ' ' || prior == '\n' || prior == '\r' || prior == '\t') continue;
+                    break;
+                }
+                if (prev < index && compact[prev] == open) {
+                    out << ch;
+                } else {
+                    out << '\n';
+                    --indent;
+                    write_indent();
+                    out << ch;
+                }
+                break;
+            }
+            case ',':
+                out << ch << '\n';
+                write_indent();
+                while (index + 1 < compact.size() && compact[index + 1] == ' ') ++index;
+                break;
+            case ':':
+                out << ": ";
+                while (index + 1 < compact.size() && compact[index + 1] == ' ') ++index;
+                break;
+            case ' ':
+            case '\n':
+            case '\r':
+            case '\t':
+                break;
+            default:
+                out << ch;
+                break;
+        }
+    }
+    out << '\n';
+    return out.str();
+}
+
 // 收集 space node 内的 LCP 标识，供 enhanced B*-tree 调试图展示空间节点结构。
 // 将电流方向写成稳定字符串，供 B* 树可视化解释 LCP 拓扑。
 std::string current_direction_name(CurrentDirection direction) {
@@ -147,6 +229,242 @@ void write_routing_topologies_json(std::ostringstream& out, const RoutingEvaluat
         out << "]}";
     }
     out << "\n  ],\n";
+}
+
+// 写出一个 LCP 物理候选点，帮助排查 LCP 是否贴到 terminal pin 或 fallback 位置。
+void write_location_candidate_json(std::ostringstream& out, const PhysicalLocationCandidate& candidate) {
+    out << "{\"id\": ";
+    write_json_string(out, candidate.id);
+    out << ", \"x\": " << candidate.x
+        << ", \"y\": " << candidate.y
+        << ", \"validity_level\": ";
+    write_json_string(out, candidate.validity_level);
+    out << ", \"is_fallback\": " << (candidate.is_fallback ? "true" : "false")
+        << ", \"penalty\": " << candidate.penalty
+        << ", \"reason\": ";
+    write_json_string(out, candidate.reason);
+    out << '}';
+}
+
+// 写出带候选坐标的 LCP 拓扑，供 routing debug 对照 DP 和 detailed 选择。
+void write_debug_topologies_json(std::ostringstream& out, const RoutingEvaluationRequest& request) {
+    out << "  \"lcp_topologies\": [\n";
+    for (std::size_t topology_index = 0; topology_index < request.net_topologies.size(); ++topology_index) {
+        const auto& topology = request.net_topologies[topology_index];
+        if (topology_index != 0) out << ",\n";
+        out << "    {\"net\": ";
+        write_json_string(out, topology.net);
+        out << ", \"pins\": ";
+        write_json_string_array(out, topology.pins);
+        out << ", \"linking_points\": [";
+        for (std::size_t point_index = 0; point_index < topology.linking_points.size(); ++point_index) {
+            if (point_index != 0) out << ',';
+            const auto& point = topology.linking_points[point_index];
+            out << "{\"id\": ";
+            write_json_string(out, point.id);
+            out << ", \"space_node_id\": ";
+            write_json_string(out, point.space_node_id);
+            out << ", \"location_candidates\": [";
+            for (std::size_t candidate_index = 0; candidate_index < point.location_candidates.size(); ++candidate_index) {
+                if (candidate_index != 0) out << ',';
+                write_location_candidate_json(out, point.location_candidates[candidate_index]);
+            }
+            out << "]}";
+        }
+        out << "], \"segments\": [";
+        for (std::size_t segment_index = 0; segment_index < topology.segments.size(); ++segment_index) {
+            if (segment_index != 0) out << ',';
+            write_wire_segment_json(out, topology.segments[segment_index]);
+        }
+        out << "]}";
+    }
+    out << "\n  ]";
+}
+
+// 写出 routing.txt 语义的一段最终金属线，便于和 PNG 上的异常线段互相定位。
+void write_route_segment_json(std::ostringstream& out, const RouteSegment& route) {
+    out << "{\"net\": ";
+    write_json_string(out, route.net);
+    out << ", \"layer\": ";
+    write_json_string(out, route.layer);
+    out << ", \"x1\": " << route.x1
+        << ", \"y1\": " << route.y1
+        << ", \"x2\": " << route.x2
+        << ", \"y2\": " << route.y2
+        << ", \"width\": " << route.width
+        << '}';
+}
+
+// 写出 A*/DP 候选摘要，用于比较 DP traceback 和 detailed legalize 后的实际选择。
+void write_route_candidate_json(std::ostringstream& out, const routing::RouteCandidate& candidate) {
+    out << "{\"net\": ";
+    write_json_string(out, candidate.net);
+    out << ", \"from\": ";
+    write_json_string(out, candidate.from_terminal);
+    out << ", \"to\": ";
+    write_json_string(out, candidate.to_terminal);
+    out << ", \"segment_id\": ";
+    write_json_string(out, candidate.segment_id);
+    out << ", \"lcp_candidate_id\": ";
+    write_json_string(out, candidate.lcp_candidate_id);
+    out << ", \"source_lcp_candidate_id\": ";
+    write_json_string(out, candidate.source_lcp_candidate_id);
+    out << ", \"target_lcp_candidate_id\": ";
+    write_json_string(out, candidate.target_lcp_candidate_id);
+    out << ", \"path_success\": " << (candidate.path.success ? "true" : "false")
+        << ", \"path_message\": ";
+    write_json_string(out, candidate.path.message);
+    out << ", \"wirelength\": " << candidate.path.metrics.wirelength
+        << ", \"bend_count\": " << candidate.path.metrics.bend_count
+        << ", \"via_count\": " << candidate.path.metrics.via_count
+        << '}';
+}
+
+// 写出 DP 对候选的选择或拒绝事件，解释 path fail、LCP 绑定冲突和短路 penalty。
+void write_dp_candidate_event_json(std::ostringstream& out, const routing::RoutingDpCandidateEvent& event) {
+    out << "{\"group_key\": ";
+    write_json_string(out, event.group_key);
+    out << ", \"net\": ";
+    write_json_string(out, event.net);
+    out << ", \"from\": ";
+    write_json_string(out, event.from_terminal);
+    out << ", \"to\": ";
+    write_json_string(out, event.to_terminal);
+    out << ", \"segment_id\": ";
+    write_json_string(out, event.segment_id);
+    out << ", \"lcp_candidate_id\": ";
+    write_json_string(out, event.lcp_candidate_id);
+    out << ", \"state_lcp_candidate_id\": ";
+    write_json_string(out, event.state_lcp_candidate_id);
+    out << ", \"reason\": ";
+    write_json_string(out, event.reason);
+    out << ", \"selected\": " << (event.selected ? "true" : "false")
+        << '}';
+}
+
+// 写出 detailed traceback 中出现的 pin/LCP 节点。
+void write_detailed_node_json(std::ostringstream& out, const DetailedRouteNode& node) {
+    out << "{\"id\": ";
+    write_json_string(out, node.id);
+    out << ", \"kind\": ";
+    write_json_string(out, node.kind);
+    out << ", \"space_node_id\": ";
+    write_json_string(out, node.space_node_id);
+    out << ", \"x\": " << node.x
+        << ", \"y\": " << node.y
+        << ", \"layer\": ";
+    write_json_string(out, node.layer);
+    out << '}';
+}
+
+// 写出 detailed route segment 到 LCP/space-node/DP state 的映射。
+void write_detailed_segment_json(std::ostringstream& out, const DetailedRouteSegment& segment) {
+    out << "{\"route_index\": " << segment.route_index
+        << ", \"dp_state_id\": " << segment.dp_state_id
+        << ", \"net\": ";
+    write_json_string(out, segment.net);
+    out << ", \"from\": ";
+    write_json_string(out, segment.from_terminal);
+    out << ", \"to\": ";
+    write_json_string(out, segment.to_terminal);
+    out << ", \"tree_node\": ";
+    write_json_string(out, segment.tree_node);
+    out << ", \"segment_id\": ";
+    write_json_string(out, segment.segment_id);
+    out << ", \"lcp_id\": ";
+    write_json_string(out, segment.lcp_id);
+    out << ", \"lcp_candidate_id\": ";
+    write_json_string(out, segment.lcp_candidate_id);
+    out << ", \"space_node_id\": ";
+    write_json_string(out, segment.space_node_id);
+    out << '}';
+}
+
+// 写出单个 net 的 detailed traceback 摘要和警告。
+void write_detailed_trace_json(std::ostringstream& out, const DetailedRouteTrace& trace) {
+    out << "{\"net\": ";
+    write_json_string(out, trace.net);
+    out << ", \"nodes\": [";
+    for (std::size_t index = 0; index < trace.nodes.size(); ++index) {
+        if (index != 0) out << ',';
+        write_detailed_node_json(out, trace.nodes[index]);
+    }
+    out << "], \"segments\": [";
+    for (std::size_t index = 0; index < trace.segments.size(); ++index) {
+        if (index != 0) out << ',';
+        write_detailed_segment_json(out, trace.segments[index]);
+    }
+    out << "], \"warnings\": ";
+    write_json_string_array(out, trace.warnings);
+    out << '}';
+}
+
+// 汇总一次 routing evaluation 和 detailed routing 的诊断信息。
+std::string make_routing_debug_json(
+    const RoutingEvaluationRequest& request,
+    const RoutingEvaluation& evaluation,
+    const DetailedRoutingResult& detailed,
+    const Metrics& metrics) {
+    std::ostringstream out;
+    out << "{\n";
+    out << "  \"summary\": {"
+        << "\"routing_cost\": " << evaluation.routing_cost
+        << ", \"candidate_count\": " << evaluation.candidates.size()
+        << ", \"dp_used\": " << (evaluation.used_bottom_up_dp ? "true" : "false")
+        << ", \"failed_nets\": " << evaluation.failed_nets
+        << ", \"detailed_routes\": " << detailed.routes.size()
+        << ", \"space_nodes_with_routes\": " << detailed.space_nodes_with_routes
+        << ", \"traceback_failures\": " << detailed.traceback_failures
+        << ", \"design_rule_violations\": " << detailed.design_rule_violations
+        << ", \"flow_violations\": " << detailed.flow_violations
+        << ", \"current_density_violations\": " << detailed.current_density_violations
+        << ", \"detailed_cost\": " << detailed.detailed_cost
+        << ", \"phi_cost\": " << metrics.phi_cost
+        << "},\n";
+    write_debug_topologies_json(out, request);
+    out << ",\n  \"final_candidates\": [";
+    for (std::size_t index = 0; index < evaluation.candidates.size(); ++index) {
+        if (index != 0) out << ',';
+        write_route_candidate_json(out, evaluation.candidates[index]);
+    }
+    out << "],\n  \"all_candidates\": [";
+    for (std::size_t index = 0; index < evaluation.debug_candidates.size(); ++index) {
+        if (index != 0) out << ',';
+        write_route_candidate_json(out, evaluation.debug_candidates[index]);
+    }
+    out << "]";
+    out << ",\n  \"dp_traceback_candidates\": [";
+    if (evaluation.bottom_up_dp.has_value()) {
+        for (std::size_t index = 0; index < evaluation.bottom_up_dp->traceback_candidates.size(); ++index) {
+            if (index != 0) out << ',';
+            write_route_candidate_json(out, evaluation.bottom_up_dp->traceback_candidates[index]);
+        }
+    }
+    out << "],\n  \"dp_candidate_events\": [";
+    if (evaluation.bottom_up_dp.has_value()) {
+        for (std::size_t index = 0; index < evaluation.bottom_up_dp->candidate_events.size(); ++index) {
+            if (index != 0) out << ',';
+            write_dp_candidate_event_json(out, evaluation.bottom_up_dp->candidate_events[index]);
+        }
+    }
+    out << "],\n  \"final_routes\": [";
+    for (std::size_t index = 0; index < detailed.routes.size(); ++index) {
+        if (index != 0) out << ',';
+        write_route_segment_json(out, detailed.routes[index]);
+    }
+    out << "],\n  \"detailed_traces\": [";
+    for (std::size_t index = 0; index < detailed.report.traces.size(); ++index) {
+        if (index != 0) out << ',';
+        write_detailed_trace_json(out, detailed.report.traces[index]);
+    }
+    out << "],\n  \"warnings\": ";
+    write_json_string_array(out, detailed.report.warnings);
+    out << ",\n  \"design_rule_segments\": ";
+    write_json_string_array(out, detailed.report.design_rule_segments);
+    out << ",\n  \"coupling_pairs\": ";
+    write_json_string_array(out, detailed.report.coupling_pairs);
+    out << "\n}\n";
+    return pretty_print_json(out.str());
 }
 
 std::vector<std::string> lcp_ids_for_json(const SpaceNode& space) {
@@ -681,6 +999,7 @@ Solution make_solution(const CandidateState& state) {
     solution.packing_time_dp_used = state.feedback.metrics.packing_time_dp_used;
     solution.dp_used = state.feedback.metrics.dp_used;
     solution.btree_trace_json = make_btree_trace_json(state);
+    solution.routing_debug_json = state.feedback.routing_debug_json;
     solution.routing_warnings = state.feedback.metrics.routing_warnings;
     return solution;
 }
@@ -862,6 +1181,7 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
         if (has_required_feedback || has_coupling_feedback) ++space_feedback_nodes;
     }
     feedback.metrics.space_feedback_nodes = space_feedback_nodes;
+    feedback.routing_debug_json = make_routing_debug_json(request, routing_evaluation, detailed, feedback.metrics);
     return feedback;
 }
 

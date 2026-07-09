@@ -71,7 +71,7 @@ void print_usage() {
               << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
               << "           [--cooling-rate 0.96] [--dump-routing-eval]\n"
               << "           [--debug-search]\n"
-              << "           [--no-render] [--render-dpi 200] [--render-name name]\n"
+              << "           [--render-dpi 200] [--render-name name]\n"
               << "           [--dump-btree] [--render-btree-name name]\n";
 }
 
@@ -129,7 +129,7 @@ int render_solution_png(const std::filesystem::path& input, const std::filesyste
     if (!render_name.empty()) command << " --name " << shell_quote(render_name);
     const int status = std::system(command.str().c_str());
     if (status != 0) {
-        std::cerr << "layout rendering failed. Ensure Python and matplotlib are available, or rerun with --no-render.\n";
+        std::cerr << "layout rendering failed. Ensure Python and matplotlib are available.\n";
     }
     return status;
 }
@@ -159,6 +159,17 @@ std::filesystem::path write_btree_trace_json(const sapr::Solution& solution, con
     return trace_path;
 }
 
+// 写出每次求解的 routing 诊断快照，和 PNG/routing.txt 放在同一输出目录。
+std::filesystem::path write_routing_debug_json(const sapr::Solution& solution, const std::filesystem::path& output) {
+    if (!solution.routing_debug_json.has_value()) throw std::runtime_error("routing debug report is not available");
+    std::filesystem::create_directories(output);
+    const auto debug_path = output / "routing_debug.json";
+    std::ofstream debug(debug_path);
+    if (!debug) throw std::runtime_error("failed to write " + debug_path.string());
+    debug << *solution.routing_debug_json;
+    return debug_path;
+}
+
 // 执行输入校验命令。
 int run_validate(const std::vector<std::string>& args) {
     const auto circuit = sapr::load_circuit(option_value(args, "--input", "input"));
@@ -185,7 +196,6 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     config.cooling_rate = option_double(args, "--cooling-rate", config.cooling_rate);
     config.debug_search = has_option(args, "--debug-search");
     const bool dump_routing_eval = has_option(args, "--dump-routing-eval");
-    const bool render_png = !has_option(args, "--no-render");
     const int render_dpi = option_int(args, "--render-dpi", 200);
     if (render_dpi <= 0) throw std::runtime_error("invalid value for --render-dpi: must be positive");
     const std::string render_name = option_value(args, "--render-name", "");
@@ -201,10 +211,11 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
         return 1;
     }
     sapr::write_solution(solution, output);
-    if (render_png) {
-        const int render_status = render_solution_png(input, output, renderer_script_path(executable_path), render_dpi, render_name);
-        if (render_status != 0) return 1;
+    if (solution.routing_debug_json.has_value()) {
+        write_routing_debug_json(solution, output);
     }
+    const int render_status = render_solution_png(input, output, renderer_script_path(executable_path), render_dpi, render_name);
+    if (render_status != 0) return 1;
     if (dump_btree) {
         const auto trace_path = write_btree_trace_json(solution, output);
         const int render_status =

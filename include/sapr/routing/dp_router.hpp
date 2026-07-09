@@ -37,6 +37,19 @@ struct RoutingDpState {
     std::string choice_message;
 };
 
+// 记录 DP transition 尝试某条候选路径时的选择或拒绝原因。
+struct RoutingDpCandidateEvent {
+    std::string group_key;
+    std::string net;
+    std::string from_terminal;
+    std::string to_terminal;
+    std::string segment_id;
+    std::string lcp_candidate_id;
+    std::string state_lcp_candidate_id;
+    std::string reason;
+    bool selected{};
+};
+
 // 表示一个 B*-tree node 对应的 DP 状态集合。
 struct NodeRoutingDpResult {
     std::string tree_node;
@@ -54,6 +67,7 @@ struct RoutingDpResult {
     int dp_pruned_states{};
     int packing_time_dp_segments{};
     bool packing_time_dp_used{};
+    std::vector<RoutingDpCandidateEvent> candidate_events;
 };
 
 // 按 B*-tree post-order 运行 routing DP，并从 A* candidates 中选择一致的 traceback 路径。

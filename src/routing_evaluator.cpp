@@ -52,12 +52,14 @@ RoutingEvaluation make_evaluation(
     routing::RoutingContext context,
     std::vector<routing::RouteCandidate> candidates,
     const Circuit& circuit,
-    std::optional<routing::RoutingDpResult> bottom_up_dp = std::nullopt) {
+    std::optional<routing::RoutingDpResult> bottom_up_dp = std::nullopt,
+    std::vector<routing::RouteCandidate> debug_candidates = {}) {
     const bool use_dp = bottom_up_dp.has_value() && bottom_up_dp->success;
     const auto routing_candidates = use_dp
                                         ? merge_dp_traceback_with_uncovered_nets(candidates, bottom_up_dp->traceback_candidates)
                                         : candidates;
     auto global_routing = routing::run_global_routing(circuit, context, routing_candidates);
+    if (debug_candidates.empty()) debug_candidates = candidates;
     RoutingEvaluation evaluation{
         std::move(context),
         std::move(candidates),
@@ -66,6 +68,7 @@ RoutingEvaluation make_evaluation(
         0.0,
         0,
         use_dp,
+        std::move(debug_candidates),
     };
     evaluation.routing_cost = evaluation.global_routing.total_metrics.cost;
     evaluation.failed_nets = evaluation.global_routing.failed_nets;
@@ -189,6 +192,85 @@ void annotate_candidate(
     candidate.current_density_penalty = candidate.current_density_ok ? 0.0 : current_density_penalty;
 }
 
+// 返回候选绑定到指定 LCP 的物理候选 id，普通 pin 返回空字符串。
+std::string candidate_location_for_lcp(const routing::RouteCandidate& candidate, const std::string& lcp_id) {
+    if (!candidate.lcp_id.empty() && candidate.lcp_id == lcp_id) return candidate.lcp_candidate_id;
+    if (!candidate.source_lcp_id.empty() && candidate.source_lcp_id == lcp_id) return candidate.source_lcp_candidate_id;
+    if (!candidate.target_lcp_id.empty() && candidate.target_lcp_id == lcp_id) return candidate.target_lcp_candidate_id;
+    return {};
+}
+
+// 生成 LCP id 和物理候选 id 的联合 key，用于统计同一 hub 候选是否覆盖全部 incident segment。
+std::string lcp_location_key(const std::string& lcp_id, const std::string& candidate_id) {
+    return lcp_id + "|" + candidate_id;
+}
+
+// 将局部可达但无法覆盖全部 incident segment 的 LCP 候选标记为不可用。
+void filter_multi_terminal_unreachable_lcp_candidates(
+    const RoutingEvaluationRequest& request,
+    std::vector<routing::RouteCandidate>& candidates) {
+    std::unordered_map<std::string, std::unordered_set<std::string>> required_segments_by_location;
+    std::unordered_map<std::string, std::unordered_set<std::string>> reachable_segments_by_location;
+
+    for (const auto& topology : request.net_topologies) {
+        for (const auto& point : topology.linking_points) {
+            for (const auto& location : point.location_candidates) {
+                const std::string key = lcp_location_key(point.id, location.id);
+                for (const auto& segment : point.segments) {
+                    const std::string segment_id =
+                        segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
+                    required_segments_by_location[key].insert(segment_id);
+                }
+            }
+        }
+    }
+
+    for (const auto& candidate : candidates) {
+        if (!candidate.path.success) continue;
+        const auto add_reachable = [&](const std::string& lcp_id) {
+            const std::string candidate_id = candidate_location_for_lcp(candidate, lcp_id);
+            if (candidate_id.empty()) return;
+            reachable_segments_by_location[lcp_location_key(lcp_id, candidate_id)].insert(candidate.segment_id);
+        };
+        add_reachable(candidate.lcp_id);
+        add_reachable(candidate.source_lcp_id);
+        add_reachable(candidate.target_lcp_id);
+    }
+
+    for (auto& candidate : candidates) {
+        if (!candidate.path.success) continue;
+        std::vector<std::string> missing_messages;
+        std::unordered_set<std::string> checked_lcps;
+        std::unordered_set<std::string> emitted_missing;
+        const auto check_lcp = [&](const std::string& lcp_id) {
+            if (lcp_id.empty() || !checked_lcps.insert(lcp_id).second) return;
+            const std::string candidate_id = candidate_location_for_lcp(candidate, lcp_id);
+            if (candidate_id.empty()) return;
+            const std::string key = lcp_location_key(lcp_id, candidate_id);
+            const auto required = required_segments_by_location.find(key);
+            if (required == required_segments_by_location.end()) return;
+            const auto reachable = reachable_segments_by_location.find(key);
+            for (const auto& segment_id : required->second) {
+                if (reachable == reachable_segments_by_location.end() || !reachable->second.contains(segment_id)) {
+                    const std::string message = lcp_id + "@" + candidate_id + " missing " + segment_id;
+                    if (emitted_missing.insert(message).second) missing_messages.push_back(message);
+                }
+            }
+        };
+        check_lcp(candidate.lcp_id);
+        check_lcp(candidate.source_lcp_id);
+        check_lcp(candidate.target_lcp_id);
+        if (missing_messages.empty()) continue;
+        candidate.path.success = false;
+        candidate.path.points.clear();
+        candidate.path.metrics = routing::PathMetrics{};
+        candidate.path.message = "LCP candidate is not multi-terminal reachable";
+        for (const auto& message : missing_messages) candidate.path.message += "; " + message;
+        candidate.current_density_ok = false;
+        candidate.current_density_penalty = 50000.0;
+    }
+}
+
 // 为 LCP 拓扑中的每条逻辑 segment 生成 A* 候选路径。
 std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
     const routing::RoutingContext& context,
@@ -299,6 +381,7 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
             candidates.push_back(std::move(candidate));
         }
     }
+    filter_multi_terminal_unreachable_lcp_candidates(request, candidates);
     return candidates;
 }
 [[maybe_unused]] std::vector<routing::GridPoint> prune_backtracks(std::vector<routing::GridPoint> points) {
@@ -1160,7 +1243,12 @@ RoutingEvaluation evaluate_routing(
     }
     auto bottom_up_dp = routing::run_bottom_up_routing_dp(circuit, request, context, candidates);
     if (!bottom_up_dp.success) {
-        return make_evaluation(std::move(context), std::move(direct_candidates), circuit, std::move(bottom_up_dp));
+        return make_evaluation(
+            std::move(context),
+            std::move(direct_candidates),
+            circuit,
+            std::move(bottom_up_dp),
+            std::move(candidates));
     }
     return make_evaluation(std::move(context), std::move(candidates), circuit, std::move(bottom_up_dp));
 }
