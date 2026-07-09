@@ -61,7 +61,6 @@ struct SpaceBindingState {
     int used_lcp_count{};
 };
 
-// 返回 net 的线宽范围；非法 min/max 约束按 max_width 截断，避免生成超过规则的候选。
 // 查找 net 对应的 FLOW 约束，供自动 LCP 拓扑保持电流方向。
 std::optional<FlowConstraint> flow_constraint_for_net(const Circuit& circuit, const std::string& net) {
     for (const auto& flow : circuit.constraints.flows) {
@@ -70,15 +69,17 @@ std::optional<FlowConstraint> flow_constraint_for_net(const Circuit& circuit, co
     return std::nullopt;
 }
 
+// 返回 net 的线宽范围；有 WIRE_WIDTH 时直接用约束 min/max，不再用 kDefaultWidth 抬高 min。
+// 否则 LCP A* 会按 1um 膨胀 active，而 pin access corridor 仍按细网格短 escape，导致 pin 出不去。
 std::pair<double, double> width_range_for_net(const Circuit& circuit, const std::string& net) {
     const auto found = circuit.constraints.wire_widths.find(net);
     if (found == circuit.constraints.wire_widths.end()) return {kDefaultWidth, kDefaultWidth};
     double min_width = found->second.min_width;
     double max_width = found->second.max_width;
+    if (min_width <= 0.0) min_width = kDefaultWidth;
     if (max_width > 0.0 && min_width > max_width) min_width = max_width;
-    const double required = max_width > 0.0 ? std::min(std::max(min_width, kDefaultWidth), max_width)
-                                           : std::max(min_width, kDefaultWidth);
-    return {required, max_width > 0.0 ? max_width : required};
+    if (max_width <= 0.0) max_width = min_width;
+    return {min_width, max_width};
 }
 
 // 返回 FLOW 约束的文本方向，供后续 routing 检查沿用。
@@ -832,9 +833,12 @@ WorkingLcp working_lcp_from_existing(
     lcp.candidate_seed = candidate_seed;
     if (!point.segments.empty()) {
         lcp.net = point.segments.front().net;
+        // 从 0 起只取 segment.min_width，避免默认 1um 或 max_width 抬高障碍膨胀。
+        lcp.required_width = 0.0;
         for (const auto& segment : point.segments) {
-            lcp.required_width = std::max(lcp.required_width, std::max(segment.min_width, segment.max_width));
+            lcp.required_width = std::max(lcp.required_width, segment.min_width);
         }
+        if (lcp.required_width <= 0.0) lcp.required_width = kDefaultWidth;
     }
 
     Rect box{};
