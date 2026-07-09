@@ -123,6 +123,17 @@ void run_router_tests() {
         no_symmetry_request.placement_order.end(),
         [&](const std::string& id) { return !approx(no_symmetry_request.placements.at(id).y, first_y); });
     require(has_second_row, "enhanced B*-tree packing should place ordinary modules in more than one row");
+    // LCP segment 线宽必须跟 WIRE_WIDTH.min 一致，不能被默认 1um 抬高，否则 A* 膨胀会困死 pin access。
+    require(!no_symmetry_request.linking_points.empty(), "4ring case should generate LCP topology");
+    for (const auto& point : no_symmetry_request.linking_points) {
+        for (const auto& segment : point.segments) {
+            const auto width = no_symmetry_circuit.constraints.wire_widths.find(segment.net);
+            require(width != no_symmetry_circuit.constraints.wire_widths.end(), "LCP segment net should have WIRE_WIDTH");
+            require(approx(segment.min_width, width->second.min_width), "LCP segment min_width should match WIRE_WIDTH.min");
+            require(approx(segment.max_width, width->second.max_width), "LCP segment max_width should match WIRE_WIDTH.max");
+            require(segment.min_width + 1e-9 < 1.0, "LCP segment min_width must not be lifted to default 1um");
+        }
+    }
 
     auto tree = sapr::make_enhanced_tree(circuit);
     require(sapr::is_valid_tree(tree), "enhanced tree should be valid");
