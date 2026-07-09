@@ -250,6 +250,8 @@ struct PhysicalLocationCandidate {
     bool is_fallback{};
     double penalty{};
     std::string reason;
+    std::string source;
+    bool inside_space_region{};
 };
 
 // 表示增强 B*-tree 中的拓扑控制点。
@@ -272,6 +274,7 @@ struct SpaceNode {
     double allocated_space{};
     std::vector<PhysicalLocationCandidate> location_candidates;
     double coupling_extra_space{};
+    std::optional<Rect> physical_region;
 
     // 按论文公式计算该空间节点需要预留的宽度。
     [[nodiscard]] double required_space() const;
@@ -380,6 +383,7 @@ struct RoutingEvaluationRequest {
     std::vector<Rect> active_region_blockers;
     RoutingTreeSnapshot tree;
     PackingContourTrace packing_trace;
+    unsigned int lcp_candidate_seed{};
 };
 
 // 表示路由 adapter 返回给 placement/SA 的反馈。

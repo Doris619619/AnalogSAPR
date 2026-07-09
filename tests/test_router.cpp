@@ -144,7 +144,8 @@ void run_router_tests() {
                             {}}},
                           0.0,
                           {},
-                          0.0};
+                          0.0,
+                          {}};
     require(approx(space.required_space(), 4.0), "space formula should match paper equation");
     space.allocated_space = 9.0;
     require(approx(space.required_space(), 9.0), "feedback allocation should override smaller formula result");
@@ -160,9 +161,32 @@ void run_router_tests() {
     require(!request.active_region_blockers.empty(), "routing request should expose blockers");
     require(!request.linking_points.empty(), "routing request should expose LCPs");
     require(!request.net_topologies.empty(), "routing request should expose net topology records");
+    const auto find_space = [&](const std::string& id) -> const sapr::SpaceNode* {
+        for (const auto& candidate : request.space_nodes) {
+            if (candidate.id == id) return &candidate;
+        }
+        return nullptr;
+    };
+    const auto* right_space = find_space("M1:right");
+    const auto* top_space = find_space("M1:top");
+    require(right_space != nullptr && right_space->physical_region.has_value(), "right space should expose a physical region");
+    require(top_space != nullptr && top_space->physical_region.has_value(), "top space should expose a physical region");
+    const auto m1_box = placement_box(circuit, request.placements.at("M1"));
+    require(approx(right_space->physical_region->x1, m1_box.x2), "right space region should start at module right edge");
+    require(approx(top_space->physical_region->y1, m1_box.y2), "top space region should start at module top edge");
     for (const auto& point : request.linking_points) {
         require(point.segments.size() >= 2, "each LCP should connect at least two segments");
         require(point.location_candidates.size() >= 3, "each LCP should expose multiple physical candidates");
+        require(
+            std::any_of(point.location_candidates.begin(), point.location_candidates.end(), [](const auto& candidate) {
+                return candidate.source == "space_grid" || candidate.source == "space_random";
+            }),
+            "each LCP should include space-node generated candidates");
+        require(
+            std::all_of(point.location_candidates.begin(), point.location_candidates.end(), [](const auto& candidate) {
+                return candidate.validity_level != "strict" || candidate.inside_space_region;
+            }),
+            "strict LCP candidates should stay inside the assigned space region");
     }
 
     std::vector<sapr::Rect> boxes;
@@ -177,6 +201,13 @@ void run_router_tests() {
     sapr::apply_routing_feedback(feedback_tree, feedback);
     const auto expanded = sapr::pack_enhanced_tree(circuit, feedback_tree, config);
     require(expanded.placements.at("M3").x > request.placements.at("M3").x, "routing feedback should affect next packing");
+    const auto expanded_right_space = std::find_if(expanded.space_nodes.begin(), expanded.space_nodes.end(), [](const auto& space_node) {
+        return space_node.id == "M1:right";
+    });
+    require(expanded_right_space != expanded.space_nodes.end(), "expanded request should keep M1 right space");
+    require(
+        expanded_right_space->physical_region->x2 - expanded_right_space->physical_region->x1 >= 25.0,
+        "space physical region width should grow with required space feedback");
 
     auto perturbed = tree;
     std::mt19937 rng(3);
@@ -243,7 +274,7 @@ void run_router_tests() {
     for (const auto& point : blocked_lcp_request.linking_points) {
         for (const auto& candidate : point.location_candidates) {
             require(
-                candidate.validity_level != "strict",
+                candidate.reason.find("active_blocker") == std::string::npos || candidate.validity_level != "strict",
                 "active-blocked LCP candidates should not be classified as strict");
         }
     }

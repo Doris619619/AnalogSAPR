@@ -7,6 +7,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -184,6 +185,27 @@ std::string trace_priority_name(const std::string& net) {
 }
 
 // 写出一条 LCP wire segment，保留端点和电流方向，供结构图绘制 routing arc。
+// 写出可选矩形区域，供 debug JSON 标注 space node 物理通道。
+void write_optional_rect_json(std::ostringstream& out, const std::optional<Rect>& rect) {
+    if (!rect.has_value()) {
+        out << "null";
+        return;
+    }
+    out << "{\"x1\": " << rect->x1
+        << ", \"y1\": " << rect->y1
+        << ", \"x2\": " << rect->x2
+        << ", \"y2\": " << rect->y2
+        << '}';
+}
+
+// 查找 LCP 所属 space node，供 debug JSON 输出物理通道。
+const SpaceNode* find_space_for_lcp(const RoutingEvaluationRequest& request, const std::string& space_node_id) {
+    for (const auto& space : request.space_nodes) {
+        if (space.id == space_node_id) return &space;
+    }
+    return nullptr;
+}
+
 void write_wire_segment_json(std::ostringstream& out, const WireSegmentRef& segment) {
     out << "{\"id\": ";
     write_json_string(out, segment.id);
@@ -243,6 +265,9 @@ void write_location_candidate_json(std::ostringstream& out, const PhysicalLocati
         << ", \"penalty\": " << candidate.penalty
         << ", \"reason\": ";
     write_json_string(out, candidate.reason);
+    out << ", \"candidate_source\": ";
+    write_json_string(out, candidate.source);
+    out << ", \"inside_space_region\": " << (candidate.inside_space_region ? "true" : "false");
     out << '}';
 }
 
@@ -264,6 +289,9 @@ void write_debug_topologies_json(std::ostringstream& out, const RoutingEvaluatio
             write_json_string(out, point.id);
             out << ", \"space_node_id\": ";
             write_json_string(out, point.space_node_id);
+            out << ", \"physical_region\": ";
+            const auto* space = find_space_for_lcp(request, point.space_node_id);
+            write_optional_rect_json(out, space == nullptr ? std::optional<Rect>{} : space->physical_region);
             out << ", \"location_candidates\": [";
             for (std::size_t candidate_index = 0; candidate_index < point.location_candidates.size(); ++candidate_index) {
                 if (candidate_index != 0) out << ',';
@@ -296,6 +324,22 @@ void write_route_segment_json(std::ostringstream& out, const RouteSegment& route
 }
 
 // 写出 A*/DP 候选摘要，用于比较 DP traceback 和 detailed legalize 后的实际选择。
+// 将 A*/DP 的文本消息归一成稳定失败类别。
+std::string route_candidate_failure_reason(const routing::RouteCandidate& candidate) {
+    if (candidate.path.success) return "";
+    if (candidate.path.message.find("multi_terminal_missing") != std::string::npos ||
+        candidate.path.message.find("multi-terminal") != std::string::npos) {
+        return "multi_terminal_missing";
+    }
+    if (candidate.path.message.find("active_blocker") != std::string::npos) return "active_blocker";
+    if (candidate.path.message.find("outside_space") != std::string::npos) return "outside_space";
+    if (candidate.path.message.find("exceeded max expanded nodes") != std::string::npos ||
+        candidate.path.message.find("could not find a feasible path") != std::string::npos) {
+        return "path_fail";
+    }
+    return "path_fail";
+}
+
 void write_route_candidate_json(std::ostringstream& out, const routing::RouteCandidate& candidate) {
     out << "{\"net\": ";
     write_json_string(out, candidate.net);
@@ -314,6 +358,8 @@ void write_route_candidate_json(std::ostringstream& out, const routing::RouteCan
     out << ", \"path_success\": " << (candidate.path.success ? "true" : "false")
         << ", \"path_message\": ";
     write_json_string(out, candidate.path.message);
+    out << ", \"failure_reason\": ";
+    write_json_string(out, route_candidate_failure_reason(candidate));
     out << ", \"wirelength\": " << candidate.path.metrics.wirelength
         << ", \"bend_count\": " << candidate.path.metrics.bend_count
         << ", \"via_count\": " << candidate.path.metrics.via_count
@@ -400,6 +446,53 @@ void write_detailed_trace_json(std::ostringstream& out, const DetailedRouteTrace
 }
 
 // 汇总一次 routing evaluation 和 detailed routing 的诊断信息。
+// 统计 request 中所有 LCP 物理候选数量。
+std::size_t count_lcp_location_candidates(const RoutingEvaluationRequest& request) {
+    std::size_t total = 0;
+    for (const auto& point : request.linking_points) total += point.location_candidates.size();
+    return total;
+}
+
+// 统计已通过 A* 与 multi-terminal 过滤的唯一 LCP 物理候选数量。
+std::size_t count_reachable_lcp_locations(const RoutingEvaluation& evaluation) {
+    std::unordered_set<std::string> reachable;
+    const auto& candidates = evaluation.debug_candidates.empty() ? evaluation.candidates : evaluation.debug_candidates;
+    for (const auto& candidate : candidates) {
+        if (!candidate.path.success) continue;
+        if (!candidate.lcp_id.empty() && !candidate.lcp_candidate_id.empty()) {
+            reachable.insert(candidate.lcp_id + "@" + candidate.lcp_candidate_id);
+        }
+        if (!candidate.source_lcp_id.empty() && !candidate.source_lcp_candidate_id.empty()) {
+            reachable.insert(candidate.source_lcp_id + "@" + candidate.source_lcp_candidate_id);
+        }
+        if (!candidate.target_lcp_id.empty() && !candidate.target_lcp_candidate_id.empty()) {
+            reachable.insert(candidate.target_lcp_id + "@" + candidate.target_lcp_candidate_id);
+        }
+    }
+    return reachable.size();
+}
+
+// 判断本次评价是否因为 LCP traceback 失败而退回 direct routing。
+bool used_lcp_direct_fallback(const RoutingEvaluationRequest& request, const RoutingEvaluation& evaluation) {
+    return !request.linking_points.empty() && evaluation.bottom_up_dp.has_value() && !evaluation.bottom_up_dp->success;
+}
+
+// 按 net 统计没有任何成功 LCP candidate 的拓扑数量。
+std::size_t count_lcp_fallback_nets(const RoutingEvaluationRequest& request, const RoutingEvaluation& evaluation) {
+    const auto& candidates = evaluation.debug_candidates.empty() ? evaluation.candidates : evaluation.debug_candidates;
+    std::unordered_set<std::string> nets_with_successful_lcp;
+    for (const auto& candidate : candidates) {
+        if (!candidate.path.success) continue;
+        if (candidate.lcp_id.empty() && candidate.source_lcp_id.empty() && candidate.target_lcp_id.empty()) continue;
+        nets_with_successful_lcp.insert(candidate.net);
+    }
+    std::size_t failed = 0;
+    for (const auto& topology : request.net_topologies) {
+        if (!topology.linking_points.empty() && !nets_with_successful_lcp.contains(topology.net)) ++failed;
+    }
+    return failed;
+}
+
 std::string make_routing_debug_json(
     const RoutingEvaluationRequest& request,
     const RoutingEvaluation& evaluation,
@@ -420,6 +513,12 @@ std::string make_routing_debug_json(
         << ", \"current_density_violations\": " << detailed.current_density_violations
         << ", \"detailed_cost\": " << detailed.detailed_cost
         << ", \"phi_cost\": " << metrics.phi_cost
+        << ", \"lcp_candidates_total\": " << count_lcp_location_candidates(request)
+        << ", \"lcp_candidates_reachable\": " << count_reachable_lcp_locations(evaluation)
+        << ", \"lcp_nets_fallback_count\": " << count_lcp_fallback_nets(request, evaluation)
+        << ", \"fallback_reason\": ";
+    write_json_string(out, used_lcp_direct_fallback(request, evaluation) ? "no_multi_terminal_reachable_lcp_candidate" : "");
+    out
         << "},\n";
     write_debug_topologies_json(out, request);
     out << ",\n  \"final_candidates\": [";
@@ -798,6 +897,38 @@ Rect placed_active_rect(const Module& module, const Placement& placement) {
     return routing::transform_active_to_global(module, placement);
 }
 
+// 返回当前 placement 下模块的外接矩形。
+Rect placed_module_rect(const Circuit& circuit, const std::unordered_map<std::string, Placement>& placements, const std::string& module) {
+    const auto placement = placements.find(module);
+    if (placement == placements.end() || !circuit.modules.contains(module)) return {0.0, 0.0, 0.0, 0.0};
+    const auto size = placed_size(circuit.modules.at(module), placement->second);
+    return {placement->second.x, placement->second.y, placement->second.x + size.first, placement->second.y + size.second};
+}
+
+// 为每个 space node 生成当前 placement 下可采样的物理通道区域。
+void assign_space_physical_regions(
+    const Circuit& circuit,
+    RoutingEvaluationRequest& request,
+    const SolverConfig& config) {
+    constexpr double kMinRegionWidth = 1.0;
+    for (auto& space : request.space_nodes) {
+        if (space.owner.empty() || !request.placements.contains(space.owner) || !circuit.modules.contains(space.owner)) {
+            space.physical_region = Rect{0.0, 0.0, kMinRegionWidth, kMinRegionWidth};
+            continue;
+        }
+        const Rect owner = placed_module_rect(circuit, request.placements, space.owner);
+        const double reserved_width = std::max({space.required_space(), config.spacing, kMinRegionWidth});
+        if (space.kind == SpaceNodeKind::Right) {
+            space.physical_region = Rect{owner.x2, owner.y1, owner.x2 + reserved_width, owner.y2};
+        } else if (space.kind == SpaceNodeKind::Top) {
+            space.physical_region = Rect{owner.x1, owner.y2, owner.x2, owner.y2 + reserved_width};
+        } else {
+            space.physical_region =
+                Rect{owner.x1 - reserved_width, owner.y1 - reserved_width, owner.x2 + reserved_width, owner.y2 + reserved_width};
+        }
+    }
+}
+
 // 填充 routing request 中面向 DP/A* 的全局 pin、blocker 和 LCP 候选位置。
 void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& request) {
     for (const auto& module_id : request.placement_order) {
@@ -1037,6 +1168,13 @@ int count_current_density_violations(const Circuit& circuit, const std::vector<R
     return violations;
 }
 
+// 计算 space node 内 LCP 所需的最大线宽，用于 fallback 后扩大预留空间。
+double max_lcp_width_for_space(const SpaceNode& space) {
+    double width = 1.0;
+    for (const auto& point : space.linking_points) width = std::max(width, point.required_width());
+    return width;
+}
+
 }  // namespace
 
 // 按增强 B*-tree 和 ASF 对称组生成当前候选布局。
@@ -1097,6 +1235,8 @@ RoutingEvaluationRequest pack_enhanced_tree(
     place_node(*tree.root, 0.0, 0.0);
     request.placement_order = ordered_placements(circuit, request);
     request.space_nodes = collect_space_nodes(tree);
+    request.lcp_candidate_seed = config.seed;
+    assign_space_physical_regions(circuit, request, config);
     request.tree = make_routing_tree_snapshot(tree);
     populate_routing_context(circuit, request);
     annotate_packing_time_segments(tree, request);
@@ -1143,6 +1283,9 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
                 net_route.net + ": global routing failed: " + net_route.message);
         }
     }
+    if (!request.linking_points.empty() && routing_evaluation.bottom_up_dp.has_value() && !routing_evaluation.bottom_up_dp->success) {
+        feedback.metrics.routing_warnings.push_back("LCP fallback: no_multi_terminal_reachable_lcp_candidate");
+    }
     feedback.metrics.space_nodes_with_routes = detailed.space_nodes_with_routes;
     feedback.metrics.packing_trace_steps = static_cast<int>(request.packing_trace.steps.size());
     feedback.metrics.dp_used = routing_evaluation.used_bottom_up_dp;
@@ -1162,12 +1305,17 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     feedback.routing_candidate_count = routing_evaluation.candidates.size();
 
     int space_feedback_nodes = 0;
+    const bool lcp_direct_fallback =
+        !request.linking_points.empty() && routing_evaluation.bottom_up_dp.has_value() && !routing_evaluation.bottom_up_dp->success;
     for (const auto& space : request.space_nodes) {
         const auto detailed_space = detailed.required_space_by_node.find(space.id);
-        const double required_space =
+        double required_space =
             detailed_space == detailed.required_space_by_node.end()
                 ? space.required_space()
                 : std::max(space.required_space(), detailed_space->second);
+        if (lcp_direct_fallback && !space.linking_points.empty()) {
+            required_space = std::max(required_space, space.required_space() + max_lcp_width_for_space(space));
+        }
         feedback.required_space_by_node[space.id] = required_space;
         const auto detailed_coupling = detailed.coupling_space_by_node.find(space.id);
         const double coupling_space =
@@ -1176,7 +1324,7 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
                 : detailed_coupling->second;
         feedback.coupling_space_by_node[space.id] = coupling_space;
         const bool has_required_feedback =
-            detailed_space != detailed.required_space_by_node.end() && detailed_space->second > space.required_space() + 1e-9;
+            required_space > space.required_space() + 1e-9;
         const bool has_coupling_feedback = coupling_space > 1e-9;
         if (has_required_feedback || has_coupling_feedback) ++space_feedback_nodes;
     }
