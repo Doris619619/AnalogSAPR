@@ -83,11 +83,16 @@ Point pin_access_target(const Point& pin_location, const Rect& active, double es
         {bottom, Point{pin_location.x, rect.y1 - escape}},
         {top, Point{pin_location.x, rect.y2 + escape}},
     };
-    return std::min_element(
-               candidates.begin(),
-               candidates.end(),
-               [](const auto& lhs, const auto& rhs) { return lhs.distance < rhs.distance; })
-        ->target;
+    const auto legal = std::min_element(
+        candidates.begin(),
+        candidates.end(),
+        [](const auto& lhs, const auto& rhs) {
+            const bool lhs_legal = lhs.target.x >= 0.0 && lhs.target.y >= 0.0;
+            const bool rhs_legal = rhs.target.x >= 0.0 && rhs.target.y >= 0.0;
+            if (lhs_legal != rhs_legal) return lhs_legal;
+            return lhs.distance < rhs.distance;
+        });
+    return Point{std::max(0.0, legal->target.x), std::max(0.0, legal->target.y)};
 }
 
 // 为 pin 选择离 active region 最近的一侧，并放行一条到 active 外的短 access corridor。

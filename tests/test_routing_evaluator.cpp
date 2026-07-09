@@ -835,13 +835,18 @@ void run_routing_evaluator_tests() {
         {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
     };
     const sapr::routing::RoutingContext boundary_context(boundary_circuit, boundary_placements);
-    require(boundary_context.grid().min_y() < 0.0, "bottom pin access should expand routing grid below the layout");
+    require(boundary_context.grid().min_x() >= 0.0, "routing grid should not extend left of the chip boundary");
+    require(boundary_context.grid().min_y() >= 0.0, "routing grid should not extend below the chip boundary");
     const auto boundary_eval = sapr::evaluate_routing(boundary_circuit, boundary_placements);
     const auto boundary_segments = sapr::selected_candidates_to_segments(boundary_eval);
     require(!boundary_segments.empty(), "boundary pin access should still find a routed path");
     const auto boundary_active_rect =
         sapr::routing::transform_active_to_global(boundary_circuit.modules.at("M"), boundary_placements.at("M"));
     for (const auto& segment : boundary_segments) {
+        require(
+            std::min(segment.x1, segment.x2) >= -1e-9 &&
+                std::min(segment.y1, segment.y2) >= -1e-9,
+            "route centerline should remain inside the non-negative chip boundary");
         require(
             !route_crosses_active_core(segment, boundary_active_rect),
             "boundary pin access should not become a long route through active core");
