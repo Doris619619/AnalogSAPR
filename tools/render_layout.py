@@ -7,8 +7,20 @@ import argparse
 import math
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+# 允许从仓库根或 tools/ 目录直接运行本脚本时找到同目录色板模块。
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+from net_colors import net_color_map
+
+# 短边小于该阈值（μm）的器件视为小器件：外置模块名、缩小 pin 标记、不写 pin 名。
+SMALL_MODULE_EDGE_UM = 2.0
 
 
 @dataclass
@@ -63,17 +75,6 @@ DEV_COLORS = {
     "resistor": "#FF9800",
     "unknown": "#999999",
 }
-
-LAYER_COLORS = {
-    "M1": "#2196F3",
-    "M2": "#F44336",
-    "M3": "#4CAF50",
-    "M4": "#FF9800",
-    "M5": "#9C27B0",
-    "M6": "#00BCD4",
-    "M7": "#795548",
-}
-
 
 # 拆分一行数据和尾部注释，空白字段用于后续格式校验。
 def strip_line(raw: str) -> tuple[list[str], str]:
@@ -245,6 +246,50 @@ def default_render_name(output_dir: Path) -> str:
     return name if name else "layout"
 
 
+# 判断器件是否过小，需要外置标签并缩小 pin 标记。
+def is_small_module(module: Module) -> bool:
+    return min(module.width, module.height) < SMALL_MODULE_EDGE_UM
+
+
+# 小器件 pin 标记尺寸：随器件短边缩放，避免叉号叠成一团。
+def pin_marker_style(module: Module) -> tuple[str, float, float]:
+    if is_small_module(module):
+        size = max(1.8, min(3.0, 2.2 * min(module.width, module.height)))
+        return "o", size, 0.6
+    return "x", 4.0, 1.5
+
+
+# 在器件中心或框外绘制模块名；小器件外置并画短引线。
+def draw_module_label(
+    ax: Any,
+    module: Module,
+    corners: list[tuple[float, float]],
+) -> None:
+    xs = [x for x, _y in corners]
+    ys = [y for _x, y in corners]
+    cx = sum(xs) / len(xs)
+    cy = sum(ys) / len(ys)
+    if not is_small_module(module):
+        ax.text(cx, cy, module.module_id, ha="center", va="center", fontsize=5, fontweight="bold", color="#111111", zorder=10)
+        return
+    # 小器件：名字放到右上外侧，避免被 pin 与走线遮挡。
+    label_x = max(xs) + 0.35
+    label_y = max(ys) + 0.35
+    ax.plot([cx, label_x], [cy, label_y], color="#616161", linewidth=0.6, linestyle=":", zorder=9)
+    ax.text(
+        label_x,
+        label_y,
+        module.module_id,
+        ha="left",
+        va="bottom",
+        fontsize=5,
+        fontweight="bold",
+        color="#111111",
+        zorder=10,
+        bbox={"boxstyle": "round,pad=0.15", "facecolor": "white", "edgecolor": "#BDBDBD", "linewidth": 0.5, "alpha": 0.9},
+    )
+
+
 # 渲染完整布局 PNG，并返回生成的文件路径。
 def render_layout(
     input_dir: Path,
@@ -264,6 +309,7 @@ def render_layout(
     pins = load_pins(input_dir)
     placements = load_placements(output_dir)
     routes = load_routes(output_dir)
+    colors_by_net = net_color_map([route.net for route in routes])
 
     pin_by_module: dict[str, list[Pin]] = {}
     for pin in pins:
@@ -295,6 +341,11 @@ def render_layout(
     margin = max(span_x, span_y, 1.0) * 0.08
     xlim = (min(all_x) - margin, max(all_x) + margin)
     ylim = (min(all_y) - margin, max(all_y) + margin)
+    # 小器件外置标签需要额外边距，避免被裁切。
+    if any(is_small_module(module) for module, _placement, _corners in placed_modules):
+        margin_extra = max(span_x, span_y, 1.0) * 0.04
+        xlim = (xlim[0], xlim[1] + margin_extra)
+        ylim = (ylim[0], ylim[1] + margin_extra)
     fig_w = max(8.0, min(24.0, (xlim[1] - xlim[0]) / 20.0))
     fig_h = max(8.0, min(24.0, (ylim[1] - ylim[0]) / 20.0))
 
@@ -306,7 +357,7 @@ def render_layout(
 
     sorted_routes = sorted(routes, key=lambda route: -max(abs(route.x2 - route.x1), abs(route.y2 - route.y1)))
     for route in sorted_routes[:5000]:
-        color = LAYER_COLORS.get(route.layer, "#999999")
+        color = colors_by_net.get(route.net, "#999999")
         patch = mpatches.Polygon(route_polygon(route), closed=True, facecolor=color, edgecolor="none", alpha=0.55, zorder=1)
         ax.add_patch(patch)
 
@@ -314,23 +365,32 @@ def render_layout(
         color = DEV_COLORS.get(module.device_type, DEV_COLORS["unknown"])
         patch = mpatches.Polygon(corners, closed=True, facecolor=color, edgecolor=color, linewidth=1.0, alpha=0.35, zorder=3)
         ax.add_patch(patch)
-        cx = sum(x for x, _y in corners) / len(corners)
-        cy = sum(y for _x, y in corners) / len(corners)
-        ax.text(cx, cy, module.module_id, ha="center", va="center", fontsize=5, fontweight="bold", color="#111111", zorder=10)
+        draw_module_label(ax, module, corners)
         if show_pins:
+            marker, markersize, markeredgewidth = pin_marker_style(module)
+            label_pins = show_labels and not is_small_module(module)
             for pin in pin_by_module.get(module.module_id, []):
                 gx, gy = transform_point(pin.x, pin.y, module, placement)
-                pin_color = LAYER_COLORS.get(pin.layer, "#333333")
-                ax.plot(gx, gy, marker="x", color=pin_color, markersize=4, markeredgewidth=1.5, zorder=11)
-                if show_labels:
+                pin_color = "#333333"
+                ax.plot(
+                    gx,
+                    gy,
+                    marker=marker,
+                    color=pin_color,
+                    markersize=markersize,
+                    markeredgewidth=markeredgewidth,
+                    markerfacecolor=pin_color if marker == "o" else "none",
+                    zorder=11,
+                )
+                if label_pins:
                     ax.annotate(pin.name, (gx, gy), textcoords="offset points", xytext=(3, 3), fontsize=4, color=pin_color, zorder=12)
 
     legend: list[mpatches.Patch] = []
     for device_type in sorted({module.device_type for module, _placement, _corners in placed_modules}):
         color = DEV_COLORS.get(device_type, DEV_COLORS["unknown"])
         legend.append(mpatches.Patch(facecolor=color, edgecolor=color, alpha=0.35, label=device_type))
-    for layer in sorted({route.layer for route in routes}):
-        legend.append(mpatches.Patch(color=LAYER_COLORS.get(layer, "#999999"), label=f"{layer} routing"))
+    for net in colors_by_net:
+        legend.append(mpatches.Patch(color=colors_by_net[net], label=f"net {net}"))
     if legend:
         ax.legend(handles=legend, loc="upper right", fontsize=7, framealpha=0.8)
 

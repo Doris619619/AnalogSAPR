@@ -1258,11 +1258,15 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
             meta.next_cost = next.cost;
             meta.current_cost_before = current.cost;
             meta.temperature = temperature;
-            sa_btree_iterations.push_back(make_sa_btree_iteration_trace(
+            auto trace = make_sa_btree_iteration_trace(
                 next.tree,
                 next.request,
                 next.feedback.metrics,
-                meta));
+                meta);
+            trace.placements = next.request.placements;
+            trace.placement_order = next.request.placement_order;
+            trace.routes = next.feedback.routes;
+            sa_btree_iterations.push_back(std::move(trace));
         }
         const double logged_next_cost = next.cost;
         if (accept) current = std::move(next);
