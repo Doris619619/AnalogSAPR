@@ -184,10 +184,8 @@ def load_routes(output_dir: Path) -> list[Route]:
     return routes
 
 
-# 将器件 BB 左下角局部坐标转换为全局坐标，语义对齐 src/geometry.cpp。
+# 将 BB 左下角局部坐标转换为全局坐标；ox/oy 仅作为 GDS 元数据保留。
 def transform_point(x: float, y: float, module: Module, placement: Placement) -> tuple[float, float]:
-    x += module.ox
-    y += module.oy
     orient = placement.orient
     if orient == "MY":
         x = -x
