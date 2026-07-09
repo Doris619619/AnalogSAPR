@@ -30,6 +30,10 @@ bool routes_short_with_existing(
     const std::vector<RouteSegment>& routes,
     const std::vector<RouteSegment>& existing);
 
+// 合并同网同层同宽的共线重叠或相接线段，用于输出前清理重复金属段。
+std::vector<RouteSegment> merge_collinear_same_net_routes(
+    const std::vector<RouteSegment>& routes);
+
 // 将线段整体映射到指定金属层，用于 detailed routing 的最小换层合法化。
 std::vector<RouteSegment> reassign_routes_to_layer(
     std::vector<RouteSegment> routes,
