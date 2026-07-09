@@ -264,7 +264,7 @@ void filter_multi_terminal_unreachable_lcp_candidates(
         candidate.path.success = false;
         candidate.path.points.clear();
         candidate.path.metrics = routing::PathMetrics{};
-        candidate.path.message = "LCP candidate is not multi-terminal reachable";
+        candidate.path.message = "multi_terminal_missing: LCP candidate is not multi-terminal reachable";
         for (const auto& message : missing_messages) candidate.path.message += "; " + message;
         candidate.current_density_ok = false;
         candidate.current_density_penalty = 50000.0;

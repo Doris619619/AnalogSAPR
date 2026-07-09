@@ -14,6 +14,7 @@
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
 #include "sapr/router.hpp"
+#include "sapr/sa_btree_dump.hpp"
 
 namespace {
 
@@ -72,7 +73,8 @@ void print_usage() {
               << "           [--cooling-rate 0.96] [--dump-routing-eval]\n"
               << "           [--debug-search]\n"
               << "           [--render-dpi 200] [--render-name name]\n"
-              << "           [--dump-btree] [--render-btree-name name]\n";
+              << "           [--dump-btree] [--render-btree-name name]\n"
+              << "           [--no-dump-sa-btree]\n";
 }
 
 std::string shell_quote(const std::string& value) {
@@ -195,6 +197,7 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     config.initial_temperature = option_double(args, "--initial-temperature", config.initial_temperature);
     config.cooling_rate = option_double(args, "--cooling-rate", config.cooling_rate);
     config.debug_search = has_option(args, "--debug-search");
+    config.dump_sa_btree = !has_option(args, "--no-dump-sa-btree");
     const bool dump_routing_eval = has_option(args, "--dump-routing-eval");
     const int render_dpi = option_int(args, "--render-dpi", 200);
     if (render_dpi <= 0) throw std::runtime_error("invalid value for --render-dpi: must be positive");
@@ -216,6 +219,14 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     }
     const int render_status = render_solution_png(input, output, renderer_script_path(executable_path), render_dpi, render_name);
     if (render_status != 0) return 1;
+    if (config.dump_sa_btree && !solution.sa_btree_iterations.empty()) {
+        sapr::write_sa_btree_iterations(
+            solution,
+            output,
+            btree_renderer_script_path(),
+            python_command(),
+            render_dpi);
+    }
     if (dump_btree) {
         const auto trace_path = write_btree_trace_json(solution, output);
         const int render_status =

@@ -175,6 +175,19 @@ struct Metrics {
     std::vector<std::string> routing_warnings;
 };
 
+// 记录 SA 单轮候选树可视化所需的扰动与接受信息。
+struct SaBtreeIterationTrace {
+    int iteration{};
+    int sa_iterations{};
+    std::string move;
+    bool changed{};
+    bool accept{};
+    double next_cost{};
+    double current_cost_before{};
+    double temperature{};
+    std::string btree_trace_json;
+};
+
 // 汇总布局和布线结果，并可保存求解时的路由评价快照。
 struct Solution {
     std::unordered_map<std::string, Placement> placements;
@@ -200,6 +213,7 @@ struct Solution {
     std::optional<std::string> btree_trace_json;
     std::optional<std::string> routing_debug_json;
     std::vector<std::string> routing_warnings;
+    std::vector<SaBtreeIterationTrace> sa_btree_iterations;
 };
 
 // 配置求解器的确定性参数和论文代价函数权重。
@@ -218,6 +232,7 @@ struct SolverConfig {
     int routing_feedback_iterations{2};
     double routing_feedback_tolerance{1e-6};
     bool debug_search{};
+    bool dump_sa_btree{true};
 };
 
 // 表示一次 SA 扰动的调试摘要，供命令行诊断搜索状态是否真实变化。
@@ -250,6 +265,8 @@ struct PhysicalLocationCandidate {
     bool is_fallback{};
     double penalty{};
     std::string reason;
+    std::string source;
+    bool inside_space_region{};
 };
 
 // 表示增强 B*-tree 中的拓扑控制点。
@@ -272,6 +289,7 @@ struct SpaceNode {
     double allocated_space{};
     std::vector<PhysicalLocationCandidate> location_candidates;
     double coupling_extra_space{};
+    std::optional<Rect> physical_region;
 
     // 按论文公式计算该空间节点需要预留的宽度。
     [[nodiscard]] double required_space() const;
@@ -380,6 +398,7 @@ struct RoutingEvaluationRequest {
     std::vector<Rect> active_region_blockers;
     RoutingTreeSnapshot tree;
     PackingContourTrace packing_trace;
+    unsigned int lcp_candidate_seed{};
 };
 
 // 表示路由 adapter 返回给 placement/SA 的反馈。

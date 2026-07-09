@@ -11,21 +11,21 @@ namespace {
 
 // 创建一个带稳定候选容器的 space node。
 SpaceNode make_space_node(const std::string& id, const std::string& owner, SpaceNodeKind kind) {
-    return {id, owner, kind, {}, 0.0, {}, 0.0};
+    return {id, owner, kind, {}, 0.0, {}, 0.0, {}};
 }
 
 // 为对称组构造论文 Fig. 5 中的 mirrored space node group。
 SpaceNodeBundle make_space_group_bundle(const std::string& group_name, const std::string& owner) {
-    return {{{group_name + ":group:right_left", owner, SpaceNodeKind::Group, {}, 0.0, {}, 0.0},
-             {group_name + ":group:top_pair", owner, SpaceNodeKind::Group, {}, 0.0, {}, 0.0}}};
+    return {{{group_name + ":group:right_left", owner, SpaceNodeKind::Group, {}, 0.0, {}, 0.0, {}},
+             {group_name + ":group:top_pair", owner, SpaceNodeKind::Group, {}, 0.0, {}, 0.0, {}}}};
 }
 
 // 为对称组构造论文 Fig. 5 中的四空间 cluster。
 SpaceNodeBundle make_space_cluster_bundle(const std::string& group_name, const std::string& owner) {
-    return {{{group_name + ":cluster:left_right", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0},
-             {group_name + ":cluster:left_top", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0},
-             {group_name + ":cluster:right_right", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0},
-             {group_name + ":cluster:right_top", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0}}};
+    return {{{group_name + ":cluster:left_right", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0, {}},
+             {group_name + ":cluster:left_top", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0, {}},
+             {group_name + ":cluster:right_right", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0, {}},
+             {group_name + ":cluster:right_top", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0, {}}}};
 }
 
 // 为模块创建论文中的右侧和上侧 space node，并初始化触碰线网的 LCP 容器。
