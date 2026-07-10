@@ -89,7 +89,7 @@ Solution make_iteration_solution(const SaBtreeIterationTrace& iteration) {
 
 }  // namespace
 
-// 写出 SA 每轮 JSON/layout 文本，并调用渲染脚本生成逐轮调试图。
+// 写出 SA 每轮 JSON/layout 文本；可选跳过 PNG，便于长 SA 只留文本诊断。
 std::size_t write_sa_btree_iterations(
     const Solution& solution,
     const std::filesystem::path& input_dir,
@@ -97,9 +97,10 @@ std::size_t write_sa_btree_iterations(
     const std::filesystem::path& btree_renderer_script,
     const std::filesystem::path& layout_renderer_script,
     const std::string& python_command,
-    int dpi) {
+    int dpi,
+    bool render_pngs) {
     if (solution.sa_btree_iterations.empty()) return 0;
-    if (dpi <= 0) throw std::runtime_error("invalid dpi for SA btree dump");
+    if (render_pngs && dpi <= 0) throw std::runtime_error("invalid dpi for SA btree dump");
 
     const auto btree_dir = output_dir / "btree";
     std::filesystem::create_directories(btree_dir);
@@ -117,6 +118,8 @@ std::size_t write_sa_btree_iterations(
         out.close();
 
         write_solution(make_iteration_solution(iteration), iteration_dir);
+
+        if (!render_pngs) continue;
 
         render_structure_png(
             json_path,

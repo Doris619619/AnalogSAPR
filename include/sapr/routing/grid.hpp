@@ -8,10 +8,11 @@
 namespace sapr::routing {
 
 // 表示规则网格的构建参数。
+// layer_count 默认 1：只允许 M1，避免高层逃逸掩盖 placement/拓扑问题；可用 CLI --routing-layers 放开到 3/7。
 struct GridConfig {
     double step{1.0};
     double margin{5.0};
-    int layer_count{7};
+    int layer_count{1};
 };
 
 // 表示三维布线网格点，layer 是金属层编号。

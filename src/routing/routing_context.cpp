@@ -114,6 +114,19 @@ void add_pin_access(
 
 }  // namespace
 
+// 根据允许的金属层数构造 GridConfig；非法层数直接抛错，避免静默截断。
+GridConfig make_grid_config_for_routing_layers(int routing_layers) {
+    const int max_layers = static_cast<int>(supported_layers().size());
+    if (routing_layers < 1 || routing_layers > max_layers) {
+        throw std::runtime_error(
+            "routing_layers must be in [1, " + std::to_string(max_layers) + "], got " +
+            std::to_string(routing_layers));
+    }
+    GridConfig config;
+    config.layer_count = routing_layers;
+    return config;
+}
+
 GridConfig effective_grid_config_for_layout(
     const Circuit& circuit,
     const GridConfig& config,
@@ -204,6 +217,15 @@ RoutingContext::RoutingContext(
     const GridConfig effective_config =
         effective_grid_config_for_layout(circuit_, config, max_x - min_x, max_y - min_y);
     grid_ = std::make_unique<Grid>(effective_config, min_x, min_y, max_x, max_y);
+
+    for (auto& [key, global_pin] : global_pins_) {
+        if (global_pin.layer < 0 || global_pin.layer >= grid_->layer_count()) {
+            warnings_.push_back(
+                "pin layer exceeds routing_layers for " + key + "; clamping to " +
+                index_to_layer(grid_->layer_count() - 1));
+            global_pin.layer = grid_->layer_count() - 1;
+        }
+    }
 
     for (const auto& [owner, active] : active_regions) {
         for (int layer = 0; layer < grid_->layer_count(); ++layer) {

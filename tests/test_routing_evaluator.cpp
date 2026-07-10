@@ -1,11 +1,13 @@
 // 文件职责：验证 routing evaluator 可以在样例输入上完成 A*/DP 布线评估。
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <numeric>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "sapr/io.hpp"
 #include "sapr/optimizer.hpp"
@@ -14,8 +16,10 @@
 #include "sapr/routing/global_router.hpp"
 #include "sapr/routing/grid.hpp"
 #include "sapr/routing/path_geometry.hpp"
+#include "sapr/routing/routing_context.hpp"
 #include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
+#include "sapr/router.hpp"
 #include "sapr/tree.hpp"
 #include "test_support.hpp"
 
@@ -86,6 +90,49 @@ bool route_crosses_active_core(const sapr::RouteSegment& route, const sapr::Rect
 }
 
 // 构造一条水平 selected candidate，让 detailed routing 只测试 DRC 统计逻辑。
+// 判断 detailed 输出中是否存在异网同层金属短路。
+bool has_cross_net_same_layer_short(const std::vector<sapr::RouteSegment>& routes) {
+    for (std::size_t left = 0; left < routes.size(); ++left) {
+        for (std::size_t right = left + 1; right < routes.size(); ++right) {
+            if (sapr::routing::same_layer_short(routes[left], routes[right])) return true;
+        }
+    }
+    return false;
+}
+
+// 判断指定 net 的输出线段是否按 routing.txt 语义首尾连续。
+bool net_routes_are_contiguous(const std::vector<sapr::RouteSegment>& routes, const std::string& net) {
+    std::vector<const sapr::RouteSegment*> net_routes;
+    for (const auto& route : routes) {
+        if (route.net == net) net_routes.push_back(&route);
+    }
+    if (net_routes.empty()) return false;
+    for (std::size_t index = 1; index < net_routes.size(); ++index) {
+        const auto& previous = *net_routes[index - 1];
+        const auto& current = *net_routes[index];
+        if (!approx(previous.x2, current.x1, 1e-6) || !approx(previous.y2, current.y1, 1e-6)) return false;
+    }
+    return true;
+}
+
+// 判断指定 net 是否至少包含一个同点异层连接，对应 routing.txt 的隐式 via。
+bool net_has_implicit_via(const std::vector<sapr::RouteSegment>& routes, const std::string& net) {
+    std::vector<const sapr::RouteSegment*> net_routes;
+    for (const auto& route : routes) {
+        if (route.net == net) net_routes.push_back(&route);
+    }
+    for (std::size_t index = 1; index < net_routes.size(); ++index) {
+        const auto& previous = *net_routes[index - 1];
+        const auto& current = *net_routes[index];
+        if (approx(previous.x2, current.x1, 1e-6) &&
+            approx(previous.y2, current.y1, 1e-6) &&
+            previous.layer != current.layer) {
+            return true;
+        }
+    }
+    return false;
+}
+
 sapr::RoutingEvaluation make_line_evaluation(
     const sapr::Circuit& circuit,
     const std::unordered_map<std::string, sapr::Placement>& placements,
@@ -287,6 +334,7 @@ sapr::RoutingEvaluation make_lcp_evaluation(
     first.from_terminal = "M.A";
     first.to_terminal = "LCP1";
     first.segment_id = "N:left";
+    first.lcp_id = "LCP1";
     first.lcp_candidate_id = "LCP1:first";
     first.wire_width = 2.0;
     first.path.success = true;
@@ -300,6 +348,8 @@ sapr::RoutingEvaluation make_lcp_evaluation(
     second.from_terminal = "LCP1";
     second.to_terminal = "M.B";
     second.segment_id = "N:right";
+    second.lcp_id = "LCP1";
+    second.lcp_candidate_id = "LCP1:first";
     second.path.points = {
         context.grid().snap_to_grid(sapr::routing::Point{4.0, 1.0}, 0),
         context.grid().snap_to_grid(sapr::routing::Point{9.0, 1.0}, 0),
@@ -427,6 +477,127 @@ sapr::routing::RouteCandidate make_manual_lcp_candidate(
     };
     candidate.path.metrics.wirelength = wirelength;
     return candidate;
+}
+
+// 构造三端星形 LCP net：preferred location A 的一支会与障碍短路，location B 全通。
+// 用于验证 detailed 必须整网换到同一 lcp_candidate_id，禁止各支路拆绑。
+sapr::RoutingEvaluation make_star_lcp_consistency_evaluation(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::routing::RoutingContext context(circuit, placements);
+
+    auto make_branch = [&](const std::string& from,
+                           const std::string& to,
+                           const std::string& segment_id,
+                           const std::string& location_id,
+                           double x1,
+                           double y1,
+                           double x2,
+                           double y2) {
+        sapr::routing::RouteCandidate candidate;
+        candidate.net = "STAR";
+        candidate.from_terminal = from;
+        candidate.to_terminal = to;
+        candidate.segment_id = segment_id;
+        candidate.lcp_id = "LCP_STAR";
+        candidate.lcp_candidate_id = location_id;
+        candidate.wire_width = 1.0;
+        candidate.path.success = true;
+        candidate.path.points = {
+            context.grid().snap_to_grid(sapr::routing::Point{x1, y1}, 0),
+            context.grid().snap_to_grid(sapr::routing::Point{x2, y2}, 0),
+        };
+        candidate.path.metrics.wirelength = std::abs(x2 - x1) + std::abs(y2 - y1);
+        return candidate;
+    };
+
+    // DP 选中 location A：其中 M.C->LCP 走 y=2，会与下方障碍 net 短路。
+    auto a_ab = make_branch("M.A", "LCP_STAR", "STAR:A", "LCP_STAR:a", 0.0, 1.0, 4.0, 1.0);
+    auto a_cb = make_branch("M.C", "LCP_STAR", "STAR:C", "LCP_STAR:a", 0.0, 2.0, 4.0, 2.0);
+    auto a_db = make_branch("M.D", "LCP_STAR", "STAR:D", "LCP_STAR:a", 9.0, 1.0, 4.0, 1.0);
+
+    // location B：三条支路都走 y=4，避开障碍。
+    auto b_ab = make_branch("M.A", "LCP_STAR", "STAR:A", "LCP_STAR:b", 0.0, 4.0, 4.0, 4.0);
+    auto b_cb = make_branch("M.C", "LCP_STAR", "STAR:C", "LCP_STAR:b", 0.0, 4.0, 4.0, 4.0);
+    auto b_db = make_branch("M.D", "LCP_STAR", "STAR:D", "LCP_STAR:b", 9.0, 4.0, 4.0, 4.0);
+
+    sapr::routing::NetRouteChoice star_choice;
+    star_choice.net = "STAR";
+    star_choice.success = true;
+    star_choice.selected_candidates = {a_ab, a_cb, a_db};
+    star_choice.metrics.wirelength = 17.0;
+
+    // 障碍网占用 y=2 通道，迫使 location A 的 C 支路失败。
+    sapr::routing::RouteCandidate blocker;
+    blocker.net = "BLOCK";
+    blocker.from_terminal = "M.A";
+    blocker.to_terminal = "M.B";
+    blocker.segment_id = "BLOCK:main";
+    blocker.wire_width = 1.0;
+    blocker.path.success = true;
+    blocker.path.points = {
+        context.grid().snap_to_grid(sapr::routing::Point{0.0, 2.0}, 0),
+        context.grid().snap_to_grid(sapr::routing::Point{9.0, 2.0}, 0),
+    };
+    blocker.path.metrics.wirelength = 9.0;
+
+    sapr::routing::NetRouteChoice block_choice;
+    block_choice.net = "BLOCK";
+    block_choice.success = true;
+    block_choice.selected_candidates = {blocker};
+    block_choice.metrics.wirelength = 9.0;
+
+    sapr::routing::GlobalRoutingResult global;
+    global.net_routes.push_back(block_choice);
+    global.net_routes.push_back(star_choice);
+    global.total_metrics.wirelength = 26.0;
+
+    return sapr::RoutingEvaluation{
+        std::move(context),
+        {a_ab, a_cb, a_db, b_ab, b_cb, b_db, blocker},
+        std::move(global),
+        std::nullopt,
+        26.0,
+        0,
+        false,
+    };
+}
+
+sapr::Circuit make_star_lcp_test_circuit() {
+    sapr::Circuit circuit = make_conflict_test_circuit();
+    circuit.nets.emplace("STAR", sapr::Net{"STAR", sapr::Priority::Normal, {"M.A", "M.C", "M.D"}});
+    circuit.nets.emplace("BLOCK", sapr::Net{"BLOCK", sapr::Priority::Critical, {"M.A", "M.B"}});
+    circuit.net_order = {"BLOCK", "STAR"};
+    return circuit;
+}
+
+sapr::RoutingEvaluationRequest make_star_lcp_request(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::RoutingEvaluationRequest request;
+    request.placements = placements;
+    request.placement_order = {"M"};
+    request.active_region_blockers.push_back(
+        sapr::routing::transform_active_to_global(circuit.modules.at("M"), placements.at("M")));
+
+    sapr::LinkingControlPoint lcp;
+    lcp.id = "LCP_STAR";
+    lcp.space_node_id = "S_STAR";
+    lcp.location_candidates.push_back({4.0, 1.0, "LCP_STAR:a", "strict", false, 0.0, "test"});
+    lcp.location_candidates.push_back({4.0, 4.0, "LCP_STAR:b", "strict", false, 0.0, "test"});
+    lcp.segments.push_back({"STAR", "M.A", "LCP_STAR", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "STAR:A"});
+    lcp.segments.push_back({"STAR", "M.C", "LCP_STAR", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "STAR:C"});
+    lcp.segments.push_back({"STAR", "M.D", "LCP_STAR", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "STAR:D"});
+
+    sapr::SpaceNode space;
+    space.id = "S_STAR";
+    space.owner = "M";
+    space.kind = sapr::SpaceNodeKind::Right;
+    space.linking_points.push_back(lcp);
+    request.space_nodes.push_back(space);
+    request.linking_points.push_back(lcp);
+    request.net_topologies.push_back({"STAR", {"M.A", "M.C", "M.D"}, {lcp}, lcp.segments});
+    return request;
 }
 
 }  // namespace
@@ -704,6 +875,22 @@ void run_routing_evaluator_tests() {
     auto feedback_tree = sapr::make_enhanced_tree(circuit);
     const auto first_feedback_request = sapr::pack_enhanced_tree(circuit, feedback_tree, config);
     const auto first_feedback = sapr::evaluate_with_routing_adapter(circuit, first_feedback_request);
+    if (!first_feedback.routes.empty()) {
+        sapr::Solution feedback_solution;
+        feedback_solution.placements = first_feedback_request.placements;
+        feedback_solution.placement_order = first_feedback_request.placement_order;
+        feedback_solution.routes = first_feedback.routes;
+        const auto route_metrics = sapr::measure(circuit, feedback_solution);
+        require(
+            approx(first_feedback.metrics.wirelength, route_metrics.wirelength),
+            "routing feedback should use final detailed route wirelength when routes exist");
+        require(
+            first_feedback.metrics.bend_count == route_metrics.bend_count,
+            "routing feedback should use final detailed route bends when routes exist");
+        require(
+            first_feedback.metrics.via_count == route_metrics.via_count,
+            "routing feedback should use final detailed route vias when routes exist");
+    }
     sapr::apply_routing_feedback(feedback_tree, first_feedback);
     const auto second_feedback_request = sapr::pack_enhanced_tree(circuit, feedback_tree, config);
     require(
@@ -789,7 +976,9 @@ void run_routing_evaluator_tests() {
     const std::unordered_map<std::string, sapr::Placement> conflict_placements{
         {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
     };
-    sapr::routing::RoutingContext conflict_context(conflict_circuit, conflict_placements);
+    // via / detailed reroute 单测需要至少 M1+M2；生产默认仍是 --routing-layers 1。
+    const sapr::routing::GridConfig multi_layer_config = sapr::routing::make_grid_config_for_routing_layers(2);
+    sapr::routing::RoutingContext conflict_context(conflict_circuit, conflict_placements, multi_layer_config);
     const auto shared_path = std::vector<sapr::routing::GridPoint>{
         conflict_context.grid().snap_to_grid(sapr::routing::Point{0.0, 1.0}, 0),
         conflict_context.grid().snap_to_grid(sapr::routing::Point{9.0, 1.0}, 0),
@@ -822,7 +1011,9 @@ void run_routing_evaluator_tests() {
 
     const auto preferred_first = make_horizontal_candidate(conflict_context, "N1", "M.A", "M.B", 1.0);
     const auto short_second = make_horizontal_candidate(conflict_context, "N2", "M.C", "M.D", 2.0);
-    const auto legal_second = make_horizontal_candidate(conflict_context, "N2", "M.C", "M.D", 4.0);
+    auto legal_second = make_horizontal_candidate(conflict_context, "N2", "M.C", "M.D", 4.0);
+    legal_second.lcp_candidate_id = "legal-track";
+    legal_second.path.metrics.via_count = 3;
     const auto short_aware_global = sapr::routing::run_global_routing(
         conflict_circuit,
         conflict_context,
@@ -844,7 +1035,7 @@ void run_routing_evaluator_tests() {
     second_choice.selected_candidates.push_back(short_second);
     detailed_global.net_routes.push_back(second_choice);
     sapr::RoutingEvaluation short_detail_eval{
-        sapr::routing::RoutingContext(conflict_circuit, conflict_placements),
+        sapr::routing::RoutingContext(conflict_circuit, conflict_placements, multi_layer_config),
         {preferred_first, short_second, legal_second},
         std::move(detailed_global),
         std::nullopt,
@@ -858,12 +1049,71 @@ void run_routing_evaluator_tests() {
     const auto legalized_detail = sapr::run_detailed_routing(conflict_circuit, short_detail_request, short_detail_eval);
     require(legalized_detail.design_rule_violations == 0, "detailed routing should legalize shorts with an alternative candidate");
     require(!legalized_detail.routes.empty(), "detailed routing should keep legalized routes instead of clearing all output");
+    require(
+        approx(legalized_detail.detailed_cost, 18.0),
+        "detailed routing cost should be recomputed from final routes instead of stale candidate via metrics");
+
+    auto long_no_via = make_horizontal_candidate(conflict_context, "N2", "M.C", "M.D", 3.0);
+    const auto compare_start = conflict_context.grid().snap_to_grid(sapr::routing::Point{0.0, 3.0}, 0);
+    const auto compare_goal = conflict_context.grid().snap_to_grid(sapr::routing::Point{9.0, 3.0}, 0);
+    const sapr::routing::GridPoint long_mid_left{compare_start.ix, compare_start.iy + 8, 0};
+    const sapr::routing::GridPoint long_mid_right{compare_goal.ix, compare_start.iy + 8, 0};
+    long_no_via.path.points = {
+        compare_start,
+        long_mid_left,
+        long_mid_right,
+        compare_goal,
+    };
+    long_no_via.path.metrics.wirelength = 43.0;
+    long_no_via.path.metrics.bend_count = 2;
+    auto short_with_vias = make_horizontal_candidate(conflict_context, "N2", "M.C", "M.D", 3.0);
+    short_with_vias.lcp_candidate_id = "via-track";
+    const sapr::routing::GridPoint via_left_m1{compare_start.ix, compare_start.iy + 2, 0};
+    const sapr::routing::GridPoint via_left_m2{compare_start.ix, compare_start.iy + 2, 1};
+    const sapr::routing::GridPoint via_right_m2{compare_goal.ix, compare_start.iy + 2, 1};
+    const sapr::routing::GridPoint via_right_m1{compare_goal.ix, compare_start.iy + 2, 0};
+    short_with_vias.path.points = {
+        compare_start,
+        via_left_m1,
+        via_left_m2,
+        via_right_m2,
+        via_right_m1,
+        compare_goal,
+    };
+    short_with_vias.path.metrics.wirelength = 15.0;
+    short_with_vias.path.metrics.via_count = 2;
+    sapr::routing::GlobalRoutingResult cost_compare_global;
+    sapr::routing::NetRouteChoice cost_compare_choice;
+    cost_compare_choice.net = "N2";
+    cost_compare_choice.selected_candidates.push_back(long_no_via);
+    cost_compare_global.net_routes.push_back(cost_compare_choice);
+    sapr::RoutingEvaluation cost_compare_eval{
+        sapr::routing::RoutingContext(conflict_circuit, conflict_placements, multi_layer_config),
+        {long_no_via, short_with_vias},
+        std::move(cost_compare_global),
+        std::nullopt,
+        43.0,
+        0,
+        false,
+    };
+    const auto cost_compare_detail = sapr::run_detailed_routing(conflict_circuit, short_detail_request, cost_compare_eval);
+    require(
+        cost_compare_detail.detailed_cost < 49.0,
+        "detailed legalization should compare LCP alternatives and via-bearing candidates by detailed cost");
+    require(
+        std::any_of(cost_compare_detail.routes.begin(), cost_compare_detail.routes.end(), [](const auto& route) {
+            return route.layer == "M2";
+        }),
+        "lower-cost via-bearing candidate should be selected over a longer no-via candidate");
+    require(!has_cross_net_same_layer_short(cost_compare_detail.routes), "cost-selected detailed route should not short");
+    require(net_routes_are_contiguous(cost_compare_detail.routes, "N2"), "cost-selected via route should stay connected");
+    require(net_has_implicit_via(cost_compare_detail.routes, "N2"), "cost-selected via route should expose implicit vias");
 
     sapr::routing::GlobalRoutingResult layer_global;
     layer_global.net_routes.push_back(first_choice);
     layer_global.net_routes.push_back(second_choice);
     sapr::RoutingEvaluation layer_detail_eval{
-        sapr::routing::RoutingContext(conflict_circuit, conflict_placements),
+        sapr::routing::RoutingContext(conflict_circuit, conflict_placements, multi_layer_config),
         {preferred_first, short_second},
         std::move(layer_global),
         std::nullopt,
@@ -872,12 +1122,19 @@ void run_routing_evaluator_tests() {
         false,
     };
     const auto layer_detail = sapr::run_detailed_routing(conflict_circuit, short_detail_request, layer_detail_eval);
-    require(layer_detail.design_rule_violations == 0, "detailed routing should legalize shorts by reassigning layer when no alternative path exists");
+    require(layer_detail.traceback_failures == 0, "detailed routing should use real A* reroute before reporting failure");
     require(
-        std::any_of(layer_detail.routes.begin(), layer_detail.routes.end(), [](const auto& route) {
-            return route.net == "N2" && route.layer != "M1";
+        std::any_of(layer_detail.report.warnings.begin(), layer_detail.report.warnings.end(), [](const auto& warning) {
+            return warning.find("detailed routing used A* reroute fallback") != std::string::npos;
         }),
-        "layer reassignment should move the conflicting net away from the original metal layer");
+        "detailed routing should report real A* reroute fallback");
+    require(
+        std::none_of(layer_detail.report.warnings.begin(), layer_detail.report.warnings.end(), [](const auto& warning) {
+            return warning.find("reassigned candidate layer") != std::string::npos;
+        }),
+        "detailed routing should not report free layer reassignment");
+    require(!has_cross_net_same_layer_short(layer_detail.routes), "A* reroute fallback should not create same-layer shorts");
+    require(net_routes_are_contiguous(layer_detail.routes, "N2"), "A* reroute fallback should keep the rerouted net connected");
 
     const auto drc_circuit = make_active_region_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> drc_placements{
@@ -1060,11 +1317,51 @@ void run_routing_evaluator_tests() {
     coupling_choice.selected_candidates.push_back(coupling_candidate);
     coupling_eval.global_routing.net_routes.push_back(coupling_choice);
     const auto coupling_detail = sapr::run_detailed_routing(drc_circuit, drc_request, coupling_eval);
-    require(coupling_detail.design_rule_violations == 0, "same-layer different-net overlap should be legalized before final DRC");
-    require(!coupling_detail.routes.empty(), "legalized detailed routing should keep route output");
+    require(coupling_detail.traceback_failures == 0, "same-layer different-net overlap should use real A* reroute when possible");
+    require(!coupling_detail.routes.empty(), "rerouted detailed routing should keep route output");
     require(
-        std::any_of(coupling_detail.routes.begin(), coupling_detail.routes.end(), [](const auto& route) {
-            return route.net == "P" && route.layer != "M1";
+        std::any_of(coupling_detail.report.warnings.begin(), coupling_detail.report.warnings.end(), [](const auto& warning) {
+            return warning.find("detailed routing used A* reroute fallback") != std::string::npos;
         }),
-        "overlapping same-layer route should be reassigned when no alternative candidate exists");
+        "same-layer overlap should report real A* reroute fallback");
+    require(
+        std::none_of(coupling_detail.report.warnings.begin(), coupling_detail.report.warnings.end(), [](const auto& warning) {
+            return warning.find("reassigned candidate layer") != std::string::npos;
+        }),
+        "same-layer overlap should not report free layer reassignment");
+    require(!has_cross_net_same_layer_short(coupling_detail.routes), "overlap reroute should not create same-layer shorts");
+    require(net_routes_are_contiguous(coupling_detail.routes, "P"), "overlap reroute should keep the rerouted net connected");
+
+    // detailed 不得按支路拆散 LCP：location A 短路时应整网切到同一 location B。
+    const auto star_circuit = make_star_lcp_test_circuit();
+    const std::unordered_map<std::string, sapr::Placement> star_placements{
+        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+    };
+    auto star_eval = make_star_lcp_consistency_evaluation(star_circuit, star_placements);
+    const auto star_request = make_star_lcp_request(star_circuit, star_placements);
+    const auto star_detail = sapr::run_detailed_routing(star_circuit, star_request, star_eval);
+    require(
+        std::any_of(star_detail.report.warnings.begin(), star_detail.report.warnings.end(), [](const auto& warning) {
+            return warning.find("switched whole-net LCP location to LCP_STAR:b") != std::string::npos;
+        }),
+        "detailed routing should switch the whole LCP net to a consistent alternate location");
+    const sapr::DetailedRouteTrace* star_trace = nullptr;
+    for (const auto& trace : star_detail.report.traces) {
+        if (trace.net == "STAR") {
+            star_trace = &trace;
+            break;
+        }
+    }
+    require(star_trace != nullptr && !star_trace->segments.empty(), "STAR detailed traceback should exist");
+    for (const auto& segment : star_trace->segments) {
+        require(
+            segment.lcp_candidate_id == "LCP_STAR:b",
+            "all detailed STAR segments must share the same switched LCP location");
+    }
+    require(
+        std::any_of(star_detail.routes.begin(), star_detail.routes.end(), [](const auto& route) {
+            return route.net == "STAR";
+        }),
+        "whole-net LCP switch should still emit STAR routes");
+    require(!has_cross_net_same_layer_short(star_detail.routes), "LCP-consistent detailed routes should not short");
 }
