@@ -6,9 +6,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
+# 允许从仓库根或 tools/ 目录直接运行本脚本时找到同目录色板模块。
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+from net_colors import net_color_map
 
 LEFT_COLOR = "#1E88E5"
 RIGHT_COLOR = "#FB8C00"
@@ -19,7 +26,6 @@ PACK_COLOR = "#4CAF50"
 OCCUPIED_COLOR = "#90CAF9"
 ROUTING_SPACE_COLOR = "#F9A825"
 SPACE_EDGE_COLOR = "#616161"
-ROUTING_ARC_COLORS = ["#D81B60", "#00897B", "#5E35B1", "#C0CA33", "#6D4C41", "#039BE5"]
 
 
 # 输出目录名为空时提供稳定的默认图片名前缀。
@@ -114,6 +120,21 @@ def endpoint_position(
     return module_positions.get(endpoint)
 
 
+# 将 module 端点标记移到圆节点边缘附近，避免盖住模块名；LCP 端点保留原位。
+def endpoint_marker_position(endpoint: str, point: tuple[float, float], other: tuple[float, float], lcp_positions: dict[str, tuple[float, float]]) -> tuple[float, float]:
+    if endpoint in lcp_positions:
+        return point
+    module = module_from_terminal(endpoint)
+    if module is None:
+        return point
+    dx = other[0] - point[0]
+    dy = other[1] - point[1]
+    length = (dx * dx + dy * dy) ** 0.5
+    if length <= 1e-9:
+        return point
+    return point[0] + dx / length * 0.30, point[1] + dy / length * 0.30
+
+
 # 为每个 LCP 选择结构图中的显示坐标；位置落在所属 space node 方块内部。
 def build_lcp_positions(trace: dict[str, Any], space_node_positions: dict[str, tuple[float, float]]) -> dict[str, tuple[float, float]]:
     lcp_positions: dict[str, tuple[float, float]] = {}
@@ -134,28 +155,38 @@ def build_lcp_positions(trace: dict[str, Any], space_node_positions: dict[str, t
     return lcp_positions
 
 
-# 绘制论文拓扑意义上的 module -> LCP -> module 布线弧线。
+# 绘制论文拓扑意义上的 module -> LCP -> module 布线弧线；一 net 一色。
+# 返回实际画出的 net -> color，供图例使用。
 def draw_routing_topology_arcs(
     ax: Any,
     trace: dict[str, Any],
     module_positions: dict[str, tuple[float, float]],
     lcp_positions: dict[str, tuple[float, float]],
-) -> bool:
+    net_filter: str | None = None,
+) -> dict[str, str]:
     topologies = trace.get("routing_topologies", [])
     if not topologies:
-        return False
-    drew_any = False
-    for topology_index, topology in enumerate(topologies):
-        color = ROUTING_ARC_COLORS[topology_index % len(ROUTING_ARC_COLORS)]
-        net = topology.get("net", "")
+        return {}
+    net_names = [str(topology.get("net", "")) for topology in topologies if topology.get("net")]
+    colors_by_net = net_color_map(net_names)
+    drawn_colors: dict[str, str] = {}
+    for topology in topologies:
+        net = str(topology.get("net", ""))
+        if net_filter and net != net_filter:
+            continue
+        color = colors_by_net.get(net, "#999999")
         priority = topology.get("priority", "normal")
-        linewidth = 2.0 if priority == "critical" else 1.35
+        linewidth = 1.55 if priority == "critical" else 1.10
+        drew_segments = False
         for segment_index, segment in enumerate(topology.get("segments", [])):
-            start = endpoint_position(segment.get("from", ""), module_positions, lcp_positions)
-            end = endpoint_position(segment.get("to", ""), module_positions, lcp_positions)
+            from_endpoint = segment.get("from", "")
+            to_endpoint = segment.get("to", "")
+            start = endpoint_position(from_endpoint, module_positions, lcp_positions)
+            end = endpoint_position(to_endpoint, module_positions, lcp_positions)
             if start is None or end is None:
                 continue
             rad = 0.22 if segment_index % 2 == 0 else -0.22
+            # 弧线只是端点连接提示，放在树节点后方，避免误解为经过中间节点。
             ax.annotate(
                 "",
                 xy=end,
@@ -165,20 +196,36 @@ def draw_routing_topology_arcs(
                     "color": color,
                     "linewidth": linewidth,
                     "connectionstyle": f"arc3,rad={rad}",
-                    "alpha": 0.86,
+                    "alpha": 0.42,
                 },
-                zorder=3,
+                zorder=0,
             )
-            drew_any = True
-        if topology.get("segments"):
+            # 只有真实端点画醒目标记；曲线视觉穿过处不代表拓扑经过。
+            start_marker = endpoint_marker_position(from_endpoint, start, end, lcp_positions)
+            end_marker = endpoint_marker_position(to_endpoint, end, start, lcp_positions)
+            ax.plot(
+                [start_marker[0], end_marker[0]],
+                [start_marker[1], end_marker[1]],
+                linestyle="None",
+                marker="o",
+                markersize=4.2,
+                markerfacecolor="white",
+                markeredgecolor=color,
+                markeredgewidth=1.2,
+                alpha=0.95,
+                zorder=8,
+            )
+            drew_segments = True
+        if drew_segments:
+            drawn_colors[net] = color
             label_pos = None
             for segment in topology.get("segments", []):
                 label_pos = endpoint_position(segment.get("to", ""), module_positions, lcp_positions)
                 if label_pos is not None:
                     break
             if label_pos is not None:
-                ax.text(label_pos[0] + 0.08, label_pos[1] + 0.08, str(net), fontsize=6, color=color, zorder=7)
-    return drew_any
+                ax.text(label_pos[0] + 0.08, label_pos[1] + 0.08, net, fontsize=6, color=color, zorder=9)
+    return drawn_colors
 
 
 # 返回 space node 的短标签，同时展示论文树侧命名和几何空间含义。
@@ -235,39 +282,101 @@ def draw_space_node(ax: Any, x: float, y: float, space: dict[str, Any], fallback
     draw_lcp_inside_space(ax, x, y, int(space.get("lcp_count", 0) or 0))
 
 
-# 根据 SA 轮次元数据生成结构图多行标题，突出扰动序号与操作。
+# 根据 SA 轮次元数据生成简短标题；详细 SA 信息放在右侧信息框。
 def sa_iteration_title(trace: dict[str, Any], name: str) -> str:
     meta = trace.get("sa_iteration")
     if not isinstance(meta, dict):
-        return (
-            f"{name} enhanced B*-tree structure\n"
-            "LS = left space node / right-side routing space, RS = right space node / top routing space"
-        )
+        return f"{name} enhanced B*-tree"
+    return "enhanced B*-tree"
+
+
+# 解析 SA 轮次元数据，供右侧信息框展示。
+def sa_iteration_panel_fields(trace: dict[str, Any]) -> list[tuple[str, str]] | None:
+    meta = trace.get("sa_iteration")
+    if not isinstance(meta, dict):
+        return None
     index = meta.get("index", "?")
     total = meta.get("total", "?")
     move = meta.get("move", "none")
-    changed = "yes" if meta.get("changed") else "no"
-    accept = "ACCEPT" if meta.get("accept") else "REJECT"
+    accept = "是" if meta.get("accept") else "否"
     next_cost = meta.get("next_cost")
     before_cost = meta.get("current_cost_before")
-    temperature = meta.get("temperature")
-    delta = None
+    better = "未知"
     if isinstance(next_cost, (int, float)) and isinstance(before_cost, (int, float)):
-        delta = float(next_cost) - float(before_cost)
-    lines = [
-        f"perturbation #{index} / {total}   move={move}   changed={changed}   {accept}",
+        better = "是" if float(next_cost) < float(before_cost) else "否"
+    return [
+        ("迭代次数", f"{index}/{total}"),
+        ("是否优于上一个解", better),
+        ("是否接受", accept),
+        ("操作", str(move)),
     ]
-    detail_parts: list[str] = []
-    if isinstance(next_cost, (int, float)):
-        detail_parts.append(f"next_cost={float(next_cost):.4g}")
-    if delta is not None:
-        detail_parts.append(f"delta={delta:+.4g}")
-    if isinstance(temperature, (int, float)):
-        detail_parts.append(f"T={float(temperature):.4g}")
-    if detail_parts:
-        lines.append("   ".join(detail_parts))
-    lines.append("LS = left space node / right-side routing space, RS = right space node / top routing space")
-    return "\n".join(lines)
+
+
+# 在图右侧绘制更大、更清晰的 SA 状态信息框。
+def draw_sa_iteration_panel(ax: Any, trace: dict[str, Any]) -> None:
+    import matplotlib.patches as mpatches
+
+    fields = sa_iteration_panel_fields(trace)
+    if not fields:
+        return
+    # 用 axes 坐标把信息框固定在 legend 下方，避免压住树结构。
+    x0, y0 = 1.02, 0.64
+    line_h = 0.088
+    box_h = 0.12 + line_h * len(fields)
+    box = mpatches.FancyBboxPatch(
+        (x0, y0 - box_h),
+        0.52,
+        box_h,
+        boxstyle="round,pad=0.014",
+        transform=ax.transAxes,
+        facecolor="#FAFAFA",
+        edgecolor="#424242",
+        linewidth=1.4,
+        alpha=0.98,
+        clip_on=False,
+        zorder=20,
+    )
+    ax.add_patch(box)
+    ax.text(
+        x0 + 0.025,
+        y0 - 0.04,
+        "SA 状态",
+        transform=ax.transAxes,
+        ha="left",
+        va="top",
+        fontsize=15,
+        fontweight="bold",
+        color="#212121",
+        clip_on=False,
+        zorder=21,
+    )
+    for index, (label, value) in enumerate(fields):
+        y = y0 - 0.115 - index * line_h
+        ax.text(
+            x0 + 0.025,
+            y,
+            f"{label}",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=12.5,
+            color="#616161",
+            clip_on=False,
+            zorder=21,
+        )
+        ax.text(
+            x0 + 0.495,
+            y,
+            value,
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=14,
+            fontweight="bold",
+            color="#111111",
+            clip_on=False,
+            zorder=21,
+        )
 
 
 # 绘制 enhanced B*-tree：module 通过对应 space node 再连接到 child module。
@@ -277,10 +386,14 @@ def render_structure(
     name: str,
     dpi: int,
     output_basename: str | None = None,
+    show_routing: bool = False,
+    net_filter: str | None = None,
 ) -> Path:
     import matplotlib
 
     matplotlib.use("Agg")
+    matplotlib.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "Arial Unicode MS", "DejaVu Sans"]
+    matplotlib.rcParams["axes.unicode_minus"] = False
     import matplotlib.pyplot as plt
     import matplotlib.lines as mlines
     import matplotlib.patches as mpatches
@@ -327,7 +440,15 @@ def render_structure(
                 zorder=2,
             )
 
-    drew_routing_arcs = draw_routing_topology_arcs(ax, trace, module_positions, lcp_positions)
+    drawn_net_colors: dict[str, str] = {}
+    if show_routing:
+        drawn_net_colors = draw_routing_topology_arcs(
+            ax,
+            trace,
+            module_positions,
+            lcp_positions,
+            net_filter=net_filter,
+        )
 
     for node_id, node in nodes.items():
         x, y = positions[node_id]
@@ -352,18 +473,40 @@ def render_structure(
         mlines.Line2D([], [], color=LEFT_COLOR, linewidth=2.0, label="left space node -> left child = placed right"),
         mlines.Line2D([], [], color=RIGHT_COLOR, linewidth=2.0, label="right space node -> right child = placed above"),
     ]
-    if drew_routing_arcs:
-        legend_handles.extend(
-            [
-                mlines.Line2D([], [], color=ROUTING_ARC_COLORS[0], linewidth=1.35, label="routing topology arc"),
-                mlines.Line2D([], [], color=ROUTING_ARC_COLORS[0], linewidth=2.0, label="critical routing topology"),
-            ]
+    for net, color in drawn_net_colors.items():
+        legend_handles.append(mlines.Line2D([], [], color=color, linewidth=1.6, label=f"net {net}"))
+    if drawn_net_colors:
+        first_color = next(iter(drawn_net_colors.values()))
+        legend_handles.append(
+            mlines.Line2D(
+                [],
+                [],
+                color=first_color,
+                marker="o",
+                markerfacecolor="white",
+                linestyle="None",
+                markersize=5,
+                label="true routing endpoint",
+            )
         )
     ax.legend(handles=legend_handles, loc="upper left", bbox_to_anchor=(1.02, 1.0), fontsize=8)
+    draw_sa_iteration_panel(ax, trace)
     title = sa_iteration_title(trace, name)
     title_fontsize = 13 if "sa_iteration" in trace else 12
     ax.set_title(title, fontsize=title_fontsize, fontweight="bold", pad=16, loc="left")
-    fig.subplots_adjust(top=0.82)
+    if drawn_net_colors:
+        ax.text(
+            0.0,
+            -0.05,
+            "Note: net arcs connect marked endpoints only; visual crossings do not mean traversal.",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            color="#616161",
+        )
+    # 右侧 legend + SA 信息框需要额外留白，避免被裁切。
+    fig.subplots_adjust(top=0.88, right=0.72)
     output_dir.mkdir(parents=True, exist_ok=True)
     file_stem = output_basename or f"{name}_btree_structure"
     out_path = output_dir / f"{file_stem}.png"
@@ -512,11 +655,32 @@ def main() -> int:
         default=None,
         help="Exact structure PNG stem (without .png); defaults to <name>_btree_structure",
     )
+    parser.add_argument(
+        "--show-routing",
+        action="store_true",
+        help="Draw routing topology arcs (default: off, tree structure only)",
+    )
+    parser.add_argument(
+        "--net",
+        default=None,
+        help="When used with --show-routing, only draw the given net name",
+    )
     args = parser.parse_args()
+
+    if args.net and not args.show_routing:
+        parser.error("--net requires --show-routing")
 
     trace = json.loads(args.trace.read_text(encoding="utf-8"))
     name = args.name or default_name(args.trace)
-    structure = render_structure(trace, args.output, name, args.dpi, args.output_basename)
+    structure = render_structure(
+        trace,
+        args.output,
+        name,
+        args.dpi,
+        args.output_basename,
+        show_routing=args.show_routing,
+        net_filter=args.net,
+    )
     print(os.fspath(structure))
     if not args.structure_only:
         packing = render_packing(trace, args.output, name, args.dpi)

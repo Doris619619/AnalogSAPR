@@ -12,6 +12,9 @@
 
 namespace sapr::routing {
 
+// 根据允许的金属层数构造 GridConfig；层数必须落在 1..supported_layers().size()。
+GridConfig make_grid_config_for_routing_layers(int routing_layers);
+
 // 根据布局尺寸和线宽约束返回 routing context 实际使用的网格配置。
 GridConfig effective_grid_config_for_layout(
     const Circuit& circuit,

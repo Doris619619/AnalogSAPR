@@ -20,6 +20,7 @@
 #include "sapr/geometry.hpp"
 #include "sapr/lcp_generator.hpp"
 #include "sapr/router.hpp"
+#include "sapr/routing/layer.hpp"
 #include "sapr/routing/routing_context.hpp"
 #include "sapr/routing/transform.hpp"
 #include "sapr/routing_evaluator.hpp"
@@ -309,7 +310,17 @@ void write_route_candidate_json(std::ostringstream& out, const routing::RouteCan
     out << ", \"wirelength\": " << candidate.path.metrics.wirelength
         << ", \"bend_count\": " << candidate.path.metrics.bend_count
         << ", \"via_count\": " << candidate.path.metrics.via_count
-        << '}';
+        << ", \"path_points\": [";
+    for (std::size_t index = 0; index < candidate.path.points.size(); ++index) {
+        if (index != 0) out << ',';
+        const auto& point = candidate.path.points[index];
+        out << "{\"ix\": " << point.ix
+            << ", \"iy\": " << point.iy
+            << ", \"layer\": ";
+        write_json_string(out, routing::index_to_layer(point.layer));
+        out << '}';
+    }
+    out << "]}";
 }
 
 // 写出 DP 对候选的选择或拒绝事件，解释 path fail、LCP 绑定冲突和短路 penalty。
@@ -446,8 +457,14 @@ std::string make_routing_debug_json(
     const Metrics& metrics) {
     std::ostringstream out;
     out << "{\n";
+    // summary 中 routing_cost/global_* 来自 global 阶段；final_penalty/detailed_cost 来自最终口径。
     out << "  \"summary\": {"
         << "\"routing_cost\": " << evaluation.routing_cost
+        << ", \"global_wirelength\": " << metrics.global_wirelength
+        << ", \"global_bends\": " << metrics.global_bend_count
+        << ", \"global_vias\": " << metrics.global_via_count
+        << ", \"global_penalty\": " << metrics.global_penalty
+        << ", \"final_penalty\": " << metrics.penalty
         << ", \"candidate_count\": " << evaluation.candidates.size()
         << ", \"dp_used\": " << (evaluation.used_bottom_up_dp ? "true" : "false")
         << ", \"failed_nets\": " << evaluation.failed_nets
@@ -1009,8 +1026,11 @@ double resolve_boundary_margin(
         throw std::runtime_error("boundary margin must be -1 for auto mode or non-negative");
     }
 
-    const routing::GridConfig effective =
-        routing::effective_grid_config_for_layout(circuit, routing::GridConfig{}, layout_width, layout_height);
+    const routing::GridConfig effective = routing::effective_grid_config_for_layout(
+        circuit,
+        routing::make_grid_config_for_routing_layers(config.routing_layers),
+        layout_width,
+        layout_height);
     const double pin_access_escape = 2.0 * effective.step;
     return maximum_routing_width(circuit) / 2.0 + config.boundary_clearance + pin_access_escape;
 }
@@ -1111,6 +1131,7 @@ RoutingEvaluationRequest pack_enhanced_tree(
     request.placement_order = ordered_placements(circuit, request);
     request.space_nodes = collect_space_nodes(tree);
     request.lcp_candidate_seed = config.seed;
+    request.routing_layers = config.routing_layers;
     assign_space_physical_regions(circuit, request, config);
     request.tree = make_routing_tree_snapshot(tree);
     populate_routing_context(circuit, request);
@@ -1129,9 +1150,20 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     solution.placement_order = request.placement_order;
     solution.routes = feedback.routes;
     feedback.metrics = measure(circuit, solution);
-    feedback.metrics.wirelength = routing_evaluation.global_routing.total_metrics.wirelength;
-    feedback.metrics.bend_count = routing_evaluation.global_routing.total_metrics.bend_count;
-    feedback.metrics.via_count = routing_evaluation.global_routing.total_metrics.via_count;
+    // 先固化 global 阶段快照；最终 wirelength/bend/via 可被 detailed 覆盖，二者不得混写。
+    feedback.metrics.global_wirelength = routing_evaluation.global_routing.total_metrics.wirelength;
+    feedback.metrics.global_bend_count = routing_evaluation.global_routing.total_metrics.bend_count;
+    feedback.metrics.global_via_count = routing_evaluation.global_routing.total_metrics.via_count;
+    feedback.metrics.global_penalty = routing_evaluation.global_routing.total_penalty;
+    if (!detailed.routes.empty()) {
+        feedback.metrics.wirelength = detailed.detailed_wirelength;
+        feedback.metrics.bend_count = detailed.detailed_bend_count;
+        feedback.metrics.via_count = detailed.detailed_via_count;
+    } else {
+        feedback.metrics.wirelength = feedback.metrics.global_wirelength;
+        feedback.metrics.bend_count = feedback.metrics.global_bend_count;
+        feedback.metrics.via_count = feedback.metrics.global_via_count;
+    }
     feedback.metrics.flow_violations = count_flow_violations(circuit, request, feedback.routes);
     feedback.metrics.current_density_violations = count_current_density_violations(circuit, feedback.routes);
     feedback.metrics.flow_violations += detailed.flow_violations;
@@ -1258,11 +1290,15 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
             meta.next_cost = next.cost;
             meta.current_cost_before = current.cost;
             meta.temperature = temperature;
-            sa_btree_iterations.push_back(make_sa_btree_iteration_trace(
+            auto trace = make_sa_btree_iteration_trace(
                 next.tree,
                 next.request,
                 next.feedback.metrics,
-                meta));
+                meta);
+            trace.placements = next.request.placements;
+            trace.placement_order = next.request.placement_order;
+            trace.routes = next.feedback.routes;
+            sa_btree_iterations.push_back(std::move(trace));
         }
         const double logged_next_cost = next.cost;
         if (accept) current = std::move(next);

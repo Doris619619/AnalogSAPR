@@ -133,6 +133,7 @@ struct RouteSegment {
 };
 
 // 表示当前解的基础评价指标和论文约束违例统计。
+// wirelength/bend/via/penalty 为最终口径（优先 detailed）；global_* 保留 global 阶段快照，避免与最终值混用。
 struct Metrics {
     double area{};
     double wirelength{};
@@ -144,6 +145,11 @@ struct Metrics {
     double normalized_bend{};
     double normalized_via{};
     double penalty{};
+    // global 阶段原始几何与惩罚（写入 metrics 前不被 detailed 覆盖）。
+    double global_wirelength{};
+    int global_bend_count{};
+    int global_via_count{};
+    double global_penalty{};
     double flow_penalty{};
     double current_density_penalty{};
     double coupling_penalty{};
@@ -186,6 +192,10 @@ struct SaBtreeIterationTrace {
     double current_cost_before{};
     double temperature{};
     std::string btree_trace_json;
+    // 保存本轮候选解的布局布线文本输出所需数据，用于逐轮渲染 layout。
+    std::unordered_map<std::string, Placement> placements;
+    std::vector<std::string> placement_order;
+    std::vector<RouteSegment> routes;
 };
 
 // 汇总布局和布线结果，并可保存求解时的路由评价快照。
@@ -235,6 +245,8 @@ struct SolverConfig {
     double boundary_margin{-1.0};
     double boundary_clearance{0.0};
     bool dump_sa_btree{true};
+    // 允许使用的金属层数（M1..Mn）；默认 1 层，便于论文复现与平面合法性实验。
+    int routing_layers{1};
 };
 
 // 表示一次 SA 扰动的调试摘要，供命令行诊断搜索状态是否真实变化。
@@ -401,6 +413,8 @@ struct RoutingEvaluationRequest {
     RoutingTreeSnapshot tree;
     PackingContourTrace packing_trace;
     unsigned int lcp_candidate_seed{};
+    // 传入 RoutingContext::GridConfig.layer_count，统一限制 A*/obstacle/detailed reroute。
+    int routing_layers{1};
 };
 
 // 表示路由 adapter 返回给 placement/SA 的反馈。
@@ -464,6 +478,9 @@ struct DetailedRoutingResult {
     DetailedRoutingReport report;
     std::unordered_map<std::string, double> required_space_by_node;
     std::unordered_map<std::string, double> coupling_space_by_node;
+    double detailed_wirelength{};
+    int detailed_bend_count{};
+    int detailed_via_count{};
     double detailed_cost{};
     double flow_penalty{};
     double current_density_penalty{};

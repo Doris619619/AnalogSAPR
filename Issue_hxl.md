@@ -62,7 +62,7 @@ optimizer / SA 只需要调用 routing evaluator，不直接操作 A*、DP 或 d
 |------|----------|
 | grid point | 离散网格点 `(ix, iy, layer)` |
 | physical point | 连续坐标 `(x, y)` |
-| layer | `M1 ~ M7`，当前全部允许水平和垂直走线 |
+| layer | 默认仅 `M1`（`GridConfig.layer_count=1`）；可用 `--routing-layers 3/7` 放开到 `M1~M3` / `M1~M7`，各层均允许水平和垂直走线 |
 | obstacle | active region 默认阻塞所有金属层 |
 | pin access | pin 所在点允许作为起点或终点 |
 
@@ -391,6 +391,8 @@ NetTopology::segments
 恢复顺序。
 
 这使 detailed routing 不再只是遍历扁平路径，而是尽量沿 LCP topology 做 top-down traceback。
+
+**LCP 一致性约束（与 DP/global 对齐）：** detailed 只做几何 refinement，不得拆散 DP 已锁定的 `lcp_candidate_id`。同一 LCP 的所有支路必须共享同一个 location；若某支路短路，先在同一 location 下 A* reroute，仍失败则**整网**换到另一个一致 location，禁止各支路各自换不同 LCP。
 
 ### 路径压缩
 

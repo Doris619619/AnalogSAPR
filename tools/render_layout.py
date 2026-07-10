@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""文件职责：将 SAPR 的 IO 文本输出渲染为布局 PNG。"""
+"""文件职责：将 SAPR 的 IO 文本输出渲染为布局 PNG（合图 + 按金属层分图）。"""
 
 from __future__ import annotations
 
@@ -7,8 +7,56 @@ import argparse
 import math
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+# 允许从仓库根或 tools/ 目录直接运行本脚本时找到同目录色板模块。
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+
+from net_colors import net_color_map
+
+# 短边小于该阈值（μm）的器件视为小器件：外置模块名、外置 pin 名、缩小 pin 标记。
+SMALL_MODULE_EDGE_UM = 2.0
+# 小器件 pin 间距小于该值时视为簇，统一做外置标注。
+PIN_CLUSTER_UM = 0.25
+# 未连线 / 已连线 pin 的标记颜色。
+PIN_COLOR_IDLE = "#EEEEEE"
+PIN_COLOR_CONNECTED = "#E53935"
+PIN_EDGE_IDLE = "#9E9E9E"
+PIN_EDGE_CONNECTED = "#B71C1C"
+# 实际线宽常为 0.05μm，大画布上几乎看不见；渲染时抬到该下限。
+MIN_VISUAL_WIRE_UM = 0.12
+# 判定同点换层（via）的坐标容差。
+VIA_MATCH_UM = 0.08
+VIA_COLOR = "#212121"
+
+# MOS 常用 pin 的优先方位：上/右/下/左。
+PIN_CARDINAL_PREFERENCE = {
+    "G": "N",
+    "GATE": "N",
+    "PLUS": "N",
+    "D": "E",
+    "DRAIN": "E",
+    "S": "W",
+    "SOURCE": "W",
+    "B": "S",
+    "BULK": "S",
+    "BODY": "S",
+    "MINUS": "S",
+}
+
+# 上下左右四个方位的单位向量与文本对齐。
+CARDINAL_LAYOUT = {
+    "N": (0.0, 1.0, "center", "bottom"),
+    "E": (1.0, 0.0, "left", "center"),
+    "S": (0.0, -1.0, "center", "top"),
+    "W": (-1.0, 0.0, "right", "center"),
+}
+CARDINAL_ORDER = ("N", "E", "S", "W")
 
 
 @dataclass
@@ -64,14 +112,15 @@ DEV_COLORS = {
     "unknown": "#999999",
 }
 
+# 金属层分图时的走线颜色（合图仍按 net 上色）。
 LAYER_COLORS = {
-    "M1": "#2196F3",
-    "M2": "#F44336",
-    "M3": "#4CAF50",
-    "M4": "#FF9800",
-    "M5": "#9C27B0",
-    "M6": "#00BCD4",
-    "M7": "#795548",
+    "M1": "#1565C0",
+    "M2": "#C62828",
+    "M3": "#2E7D32",
+    "M4": "#6A1B9A",
+    "M5": "#EF6C00",
+    "M6": "#00838F",
+    "M7": "#5D4037",
 }
 
 
@@ -153,6 +202,72 @@ def load_pins(input_dir: Path) -> list[Pin]:
     return pins
 
 
+# 从 nets.txt 读取 net -> 端子集合（module.pin）。
+def load_net_terminals(input_dir: Path) -> dict[str, set[str]]:
+    terminals: dict[str, set[str]] = {}
+    nets_path = input_dir / "nets.txt"
+    if not nets_path.exists():
+        return terminals
+    for fields, _comment in read_rows(nets_path):
+        if len(fields) < 3:
+            continue
+        net = fields[0]
+        pins = {terminal for terminal in fields[2:] if "." in terminal}
+        if pins:
+            terminals[net] = pins
+    return terminals
+
+
+# 点到线段的最短距离（μm）。
+def point_segment_distance(px: float, py: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    dx = x2 - x1
+    dy = y2 - y1
+    length2 = dx * dx + dy * dy
+    if length2 < 1e-18:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / length2))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+# 根据当前图中的走线几何，判断哪些 pin 在本层/本图被真正接到。
+def active_pins_for_routes(
+    routes: list[Route],
+    pins: list[Pin],
+    modules: dict[str, Module],
+    placements: dict[str, Placement],
+    net_terminals: dict[str, set[str]],
+    threshold_um: float = 0.8,
+) -> set[str]:
+    routes_by_net: dict[str, list[Route]] = {}
+    for route in routes:
+        routes_by_net.setdefault(route.net, []).append(route)
+
+    pin_to_nets: dict[str, list[str]] = {}
+    for net, terminals in net_terminals.items():
+        for terminal in terminals:
+            pin_to_nets.setdefault(terminal, []).append(net)
+
+    active: set[str] = set()
+    for pin in pins:
+        key = f"{pin.module_id}.{pin.name}"
+        nets = pin_to_nets.get(key)
+        if not nets:
+            continue
+        module = modules.get(pin.module_id)
+        placement = placements.get(pin.module_id)
+        if module is None or placement is None:
+            continue
+        gx, gy = transform_point(pin.x, pin.y, module, placement)
+        for net in nets:
+            for route in routes_by_net.get(net, []):
+                if point_segment_distance(gx, gy, route.x1, route.y1, route.x2, route.y2) <= threshold_um:
+                    active.add(key)
+                    break
+            if key in active:
+                break
+    return active
+
+
 # 加载器件放置结果，供器件和 pin 渲染复用。
 def load_placements(output_dir: Path) -> dict[str, Placement]:
     placements: dict[str, Placement] = {}
@@ -216,9 +331,9 @@ def module_corners(module: Module, placement: Placement) -> list[tuple[float, fl
     return [transform_point(x, y, module, placement) for x, y in local]
 
 
-# 将走线中心线段按实际线宽扩展为渲染多边形。
-def route_polygon(route: Route) -> list[tuple[float, float]]:
-    half_width = max(route.width, 0.001) / 2.0
+# 将走线中心线段按可视化线宽扩展为渲染多边形。
+def route_polygon(route: Route, visual_width: float | None = None) -> list[tuple[float, float]]:
+    half_width = max(visual_width if visual_width is not None else route.width, 0.001) / 2.0
     dx = route.x2 - route.x1
     dy = route.y2 - route.y1
     length = math.hypot(dx, dy)
@@ -239,66 +354,308 @@ def route_polygon(route: Route) -> list[tuple[float, float]]:
     ]
 
 
+# 找出换层 via 点：同 net 在不同层共享同一坐标的端点。
+def find_via_points(all_routes: list[Route], layer: str | None = None) -> list[tuple[float, float, str]]:
+    # key: (net, rounded_x, rounded_y) -> set(layers)
+    layered: dict[tuple[str, int, int], set[str]] = {}
+    scale = 1.0 / max(VIA_MATCH_UM, 1e-6)
+    for route in all_routes:
+        for x, y in ((route.x1, route.y1), (route.x2, route.y2)):
+            key = (route.net, int(round(x * scale)), int(round(y * scale)))
+            layered.setdefault(key, set()).add(route.layer)
+
+    vias: list[tuple[float, float, str]] = []
+    seen: set[tuple[str, int, int]] = set()
+    for route in all_routes:
+        if layer is not None and route.layer != layer:
+            continue
+        for x, y in ((route.x1, route.y1), (route.x2, route.y2)):
+            key = (route.net, int(round(x * scale)), int(round(y * scale)))
+            if key in seen:
+                continue
+            layers = layered.get(key, set())
+            if len(layers) >= 2 and (layer is None or layer in layers):
+                seen.add(key)
+                vias.append((x, y, route.net))
+    return vias
+
+
 # 输出目录名为空时提供稳定的默认 PNG 前缀。
 def default_render_name(output_dir: Path) -> str:
     name = output_dir.name.strip()
     return name if name else "layout"
 
 
-# 渲染完整布局 PNG，并返回生成的文件路径。
-def render_layout(
-    input_dir: Path,
-    output_dir: Path,
-    render_name: str,
-    dpi: int,
+# 判断器件是否过小，需要外置标签并缩小 pin 标记。
+def is_small_module(module: Module) -> bool:
+    return min(module.width, module.height) < SMALL_MODULE_EDGE_UM
+
+
+# 金属层排序：M1 < M2 < ...，未知层名排在后面按字典序。
+def sort_layers(layers: list[str]) -> list[str]:
+    def key(layer: str) -> tuple[int, str]:
+        match = re.fullmatch(r"M(\d+)", layer.upper())
+        if match:
+            return (0, f"{int(match.group(1)):02d}")
+        return (1, layer)
+
+    return sorted(dict.fromkeys(layers), key=key)
+
+
+# 小器件 pin 标记尺寸：略小一点，避免盖住器件本体。
+def pin_marker_style(module: Module) -> tuple[str, float, float]:
+    if is_small_module(module):
+        return "o", 1.8, 0.45
+    return "x", 2.8, 0.9
+
+
+# 在器件中心或框外绘制模块名；小器件外置并画短引线。
+def draw_module_label(
+    ax: Any,
+    module: Module,
+    corners: list[tuple[float, float]],
+) -> None:
+    xs = [x for x, _y in corners]
+    ys = [y for _x, y in corners]
+    cx = sum(xs) / len(xs)
+    cy = sum(ys) / len(ys)
+    if not is_small_module(module):
+        ax.text(cx, cy, module.module_id, ha="center", va="center", fontsize=5, fontweight="bold", color="#111111", zorder=10)
+        return
+    # 小器件：名字放到左上外侧，不画引线，避免和 pin 标注混淆。
+    label_x = min(xs) - 1.2
+    label_y = max(ys) + 1.2
+    ax.text(
+        label_x,
+        label_y,
+        module.module_id,
+        ha="right",
+        va="bottom",
+        fontsize=5,
+        fontweight="bold",
+        color="#111111",
+        zorder=10,
+        bbox={"boxstyle": "round,pad=0.15", "facecolor": "white", "edgecolor": "#BDBDBD", "linewidth": 0.5, "alpha": 0.9},
+    )
+
+
+# 判断该器件的 pin 是否需要外置标注（小器件或 pin 簇过密）。
+def needs_pin_callouts(module: Module, pin_points: list[tuple[float, float]]) -> bool:
+    if is_small_module(module):
+        return True
+    if len(pin_points) <= 1:
+        return False
+    for index, (x1, y1) in enumerate(pin_points):
+        for x2, y2 in pin_points[index + 1 :]:
+            if math.hypot(x1 - x2, y1 - y2) < PIN_CLUSTER_UM:
+                return True
+    return False
+
+
+# 按 pin 名偏好与相对位置，把标签分配到上/右/下/左。
+def assign_cardinal_sides(pins: list[Pin], pin_points: list[tuple[float, float]], center: tuple[float, float]) -> list[str]:
+    cx, cy = center
+    count = len(pins)
+    sides: list[str | None] = [None] * count
+    used: set[str] = set()
+
+    # 先按常用 pin 名占位（G 上、D 右、S 左、B 下）。
+    for index, pin in enumerate(pins):
+        preferred = PIN_CARDINAL_PREFERENCE.get(pin.name.upper())
+        if preferred is not None and preferred not in used:
+            sides[index] = preferred
+            used.add(preferred)
+
+    # 剩余 pin：按相对中心方位角就近落到空闲方位。
+    remaining = [index for index, side in enumerate(sides) if side is None]
+    free = [side for side in CARDINAL_ORDER if side not in used]
+    if remaining and free:
+        def angle_of(index: int) -> float:
+            gx, gy = pin_points[index]
+            return math.atan2(gy - cy, gx - cx)
+
+        side_angle = {"N": math.pi / 2, "E": 0.0, "S": -math.pi / 2, "W": math.pi}
+        for index in sorted(remaining, key=angle_of):
+            if not free:
+                # 方位用尽时按顺序循环复用，并在半径上错开。
+                free = list(CARDINAL_ORDER)
+            pin_angle = angle_of(index)
+
+            def angle_distance(side: str) -> float:
+                delta = abs(pin_angle - side_angle[side])
+                return min(delta, 2 * math.pi - delta)
+
+            chosen = min(free, key=angle_distance)
+            sides[index] = chosen
+            free.remove(chosen)
+
+    return [side if side is not None else "E" for side in sides]
+
+
+# 根据方位生成标签相对器件中心的偏移。
+def cardinal_label_offset(side: str, radius: float, slot_index: int = 0) -> tuple[float, float, str, str]:
+    dx, dy, ha, va = CARDINAL_LAYOUT[side]
+    # 同一方位多个 pin 时沿切向微移，避免文字重叠。
+    tangent_x, tangent_y = -dy, dx
+    shift = 0.55 * slot_index
+    return (radius * dx + shift * tangent_x, radius * dy + shift * tangent_y, ha, va)
+
+
+# 绘制单个器件的全部 pin：大器件就地标注，小器件/密 pin 上下左右写名字（无引线）；仅连线 pin 换色。
+def draw_module_pins(
+    ax: Any,
+    module: Module,
+    placement: Placement,
+    corners: list[tuple[float, float]],
+    pins: list[Pin],
     show_labels: bool,
-    show_pins: bool,
-) -> Path:
-    import matplotlib
+    connected_pins: set[str],
+) -> None:
+    if not pins:
+        return
+    pin_points = [transform_point(pin.x, pin.y, module, placement) for pin in pins]
+    marker, markersize, markeredgewidth = pin_marker_style(module)
+    use_callouts = show_labels and needs_pin_callouts(module, pin_points)
 
-    matplotlib.use("Agg")
-    import matplotlib.patches as mpatches
-    import matplotlib.pyplot as plt
+    xs = [x for x, _y in corners]
+    ys = [y for _x, y in corners]
+    cx = sum(xs) / len(xs)
+    cy = sum(ys) / len(ys)
+    bbox_diag = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    # 标签紧贴器件外侧；标记始终画在真实 pin 坐标，保证与走线端点对齐。
+    radius = max(0.85, bbox_diag * 1.15, 0.55 * len(pins))
 
-    modules = load_modules(input_dir)
-    pins = load_pins(input_dir)
-    placements = load_placements(output_dir)
-    routes = load_routes(output_dir)
+    sides = assign_cardinal_sides(pins, pin_points, (cx, cy)) if use_callouts else ["E"] * len(pins)
+    side_slots: dict[str, int] = {}
+    label_specs: list[tuple[float, float, str, str]] = []
+    for side in sides:
+        slot = side_slots.get(side, 0)
+        side_slots[side] = slot + 1
+        label_specs.append(cardinal_label_offset(side, radius, slot))
 
-    pin_by_module: dict[str, list[Pin]] = {}
-    for pin in pins:
-        pin_by_module.setdefault(pin.module_id, []).append(pin)
+    # 密 pin 真实坐标几乎重合（常 <0.1μm），大画布上会叠成一个点。
+    # 标记做十字微偏只为“数得清有几个”；走线仍接到真实坐标（用 active 时画在真点上）。
+    display_points = list(pin_points)
+    clustered = needs_pin_callouts(module, pin_points) and len(pins) > 1
+    if clustered:
+        jitter = max(0.22, min(module.width, module.height) * 0.35)
+        for index, (gx, gy) in enumerate(pin_points):
+            dx, dy, _ha, _va = CARDINAL_LAYOUT[sides[index]]
+            display_points[index] = (gx + jitter * dx, gy + jitter * dy)
 
+    for pin, (gx, gy), (dx, dy), (ox, oy, ha, va) in zip(pins, pin_points, display_points, label_specs):
+        pin_key = f"{pin.module_id}.{pin.name}"
+        connected = pin_key in connected_pins
+        if connected:
+            face = PIN_COLOR_CONNECTED
+            edge = PIN_EDGE_CONNECTED
+            size = markersize + 0.4
+            width = markeredgewidth + 0.2
+            order = 12
+            # 本图真正接到的 pin：画在真实坐标，保证和走线端点对齐。
+            mx, my = gx, gy
+        else:
+            face = PIN_COLOR_IDLE
+            edge = PIN_EDGE_IDLE
+            size = markersize
+            width = markeredgewidth
+            order = 11
+            # 未接到的密 pin：微偏显示，避免 4 个名字对应 1 个点。
+            mx, my = (dx, dy) if clustered else (gx, gy)
+        ax.plot(
+            mx,
+            my,
+            marker=marker,
+            color=edge,
+            markersize=size,
+            markeredgewidth=width,
+            markerfacecolor=face if marker == "o" else "none",
+            zorder=order,
+        )
+        if not show_labels:
+            continue
+        if use_callouts:
+            # 名字写在上下左右，标记仍在真实坐标。
+            label_x = cx + ox
+            label_y = cy + oy
+            ax.text(
+                label_x,
+                label_y,
+                pin.name,
+                ha=ha,
+                va=va,
+                fontsize=5.5,
+                fontweight="bold",
+                color=PIN_EDGE_CONNECTED if connected else "#616161",
+                zorder=12,
+                bbox={
+                    "boxstyle": "round,pad=0.12",
+                    "facecolor": "#FFEBEE" if connected else "white",
+                    "edgecolor": edge if connected else "#BDBDBD",
+                    "linewidth": 0.7 if connected else 0.35,
+                    "alpha": 0.95,
+                },
+            )
+        else:
+            ax.annotate(
+                pin.name,
+                (gx, gy),
+                textcoords="offset points",
+                xytext=(3, 3),
+                fontsize=4,
+                color=PIN_EDGE_CONNECTED if connected else "#757575",
+                zorder=12,
+            )
+
+
+# 计算合图/分图共用的坐标范围。
+def compute_bounds(
+    placed_modules: list[tuple[Module, Placement, list[tuple[float, float]]]],
+    routes: list[Route],
+) -> tuple[tuple[float, float], tuple[float, float]]:
     all_x: list[float] = []
     all_y: list[float] = []
-    placed_modules: list[tuple[Module, Placement, list[tuple[float, float]]]] = []
-    for module_id, module in modules.items():
-        placement = placements.get(module_id)
-        if placement is None:
-            continue
-        corners = module_corners(module, placement)
-        placed_modules.append((module, placement, corners))
+    for _module, _placement, corners in placed_modules:
         all_x.extend(x for x, _y in corners)
         all_y.extend(y for _x, y in corners)
-
     for route in routes:
         half_width = max(route.width, 0.001) / 2.0
         all_x.extend([route.x1 - half_width, route.x1 + half_width, route.x2 - half_width, route.x2 + half_width])
         all_y.extend([route.y1 - half_width, route.y1 + half_width, route.y2 - half_width, route.y2 + half_width])
-
     if not all_x:
         all_x = [0.0, 100.0]
         all_y = [0.0, 100.0]
-
     span_x = max(all_x) - min(all_x)
     span_y = max(all_y) - min(all_y)
     margin = max(span_x, span_y, 1.0) * 0.08
     xlim = (min(all_x) - margin, max(all_x) + margin)
     ylim = (min(all_y) - margin, max(all_y) + margin)
-    fig_w = max(8.0, min(24.0, (xlim[1] - xlim[0]) / 20.0))
-    fig_h = max(8.0, min(24.0, (ylim[1] - ylim[0]) / 20.0))
+    if any(is_small_module(module) for module, _placement, _corners in placed_modules):
+        # 小器件模块名 + 上下左右 pin 外置标注需要更大边距。
+        margin_extra = max(span_x, span_y, 1.0) * 0.16
+        xlim = (xlim[0] - margin_extra, xlim[1] + margin_extra)
+        ylim = (ylim[0] - margin_extra, ylim[1] + margin_extra)
+    return xlim, ylim
 
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+
+# 在给定 axes 上绘制一层或全部层的布局内容。
+def draw_layout_axes(
+    ax: Any,
+    mpatches: Any,
+    placed_modules: list[tuple[Module, Placement, list[tuple[float, float]]]],
+    pin_by_module: dict[str, list[Pin]],
+    routes: list[Route],
+    all_routes: list[Route],
+    colors_by_net: dict[str, str],
+    connected_pins: set[str],
+    xlim: tuple[float, float],
+    ylim: tuple[float, float],
+    title: str,
+    show_labels: bool,
+    show_pins: bool,
+    color_by_layer: bool,
+    focus_layer: str | None,
+) -> None:
     ax.set_aspect("equal")
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
@@ -306,50 +663,227 @@ def render_layout(
 
     sorted_routes = sorted(routes, key=lambda route: -max(abs(route.x2 - route.x1), abs(route.y2 - route.y1)))
     for route in sorted_routes[:5000]:
-        color = LAYER_COLORS.get(route.layer, "#999999")
-        patch = mpatches.Polygon(route_polygon(route), closed=True, facecolor=color, edgecolor="none", alpha=0.55, zorder=1)
+        if color_by_layer:
+            color = LAYER_COLORS.get(route.layer.upper(), colors_by_net.get(route.net, "#999999"))
+        else:
+            color = colors_by_net.get(route.net, "#999999")
+        visual_width = max(route.width, MIN_VISUAL_WIRE_UM)
+        patch = mpatches.Polygon(
+            route_polygon(route, visual_width=visual_width),
+            closed=True,
+            facecolor=color,
+            edgecolor="none",
+            alpha=0.7,
+            zorder=1,
+        )
         ax.add_patch(patch)
+
+    # 分图层时标出 via：本层线段在此换到其他层，避免被误认为断线或多余 pin。
+    if focus_layer is not None:
+        vias = find_via_points(all_routes, layer=focus_layer)
+        for x, y, _net in vias:
+            ax.plot(
+                x,
+                y,
+                marker="s",
+                markersize=5.0,
+                markerfacecolor="#FFF9C4",
+                markeredgecolor=VIA_COLOR,
+                markeredgewidth=1.1,
+                zorder=13,
+            )
+            ax.text(
+                x + 0.35,
+                y + 0.35,
+                "via",
+                fontsize=5,
+                color=VIA_COLOR,
+                ha="left",
+                va="bottom",
+                zorder=14,
+                bbox={"boxstyle": "round,pad=0.1", "facecolor": "#FFF9C4", "edgecolor": VIA_COLOR, "linewidth": 0.5, "alpha": 0.95},
+            )
 
     for module, placement, corners in placed_modules:
         color = DEV_COLORS.get(module.device_type, DEV_COLORS["unknown"])
         patch = mpatches.Polygon(corners, closed=True, facecolor=color, edgecolor=color, linewidth=1.0, alpha=0.35, zorder=3)
         ax.add_patch(patch)
-        cx = sum(x for x, _y in corners) / len(corners)
-        cy = sum(y for _x, y in corners) / len(corners)
-        ax.text(cx, cy, module.module_id, ha="center", va="center", fontsize=5, fontweight="bold", color="#111111", zorder=10)
+        draw_module_label(ax, module, corners)
         if show_pins:
-            for pin in pin_by_module.get(module.module_id, []):
-                gx, gy = transform_point(pin.x, pin.y, module, placement)
-                pin_color = LAYER_COLORS.get(pin.layer, "#333333")
-                ax.plot(gx, gy, marker="x", color=pin_color, markersize=4, markeredgewidth=1.5, zorder=11)
-                if show_labels:
-                    ax.annotate(pin.name, (gx, gy), textcoords="offset points", xytext=(3, 3), fontsize=4, color=pin_color, zorder=12)
+            draw_module_pins(
+                ax,
+                module,
+                placement,
+                corners,
+                pin_by_module.get(module.module_id, []),
+                show_labels,
+                connected_pins,
+            )
 
-    legend: list[mpatches.Patch] = []
+    legend: list[Any] = []
     for device_type in sorted({module.device_type for module, _placement, _corners in placed_modules}):
         color = DEV_COLORS.get(device_type, DEV_COLORS["unknown"])
         legend.append(mpatches.Patch(facecolor=color, edgecolor=color, alpha=0.35, label=device_type))
-    for layer in sorted({route.layer for route in routes}):
-        legend.append(mpatches.Patch(color=LAYER_COLORS.get(layer, "#999999"), label=f"{layer} routing"))
+    if color_by_layer:
+        for layer in sort_layers([route.layer for route in routes]):
+            color = LAYER_COLORS.get(layer.upper(), "#999999")
+            legend.append(mpatches.Patch(color=color, label=f"layer {layer}"))
+        if focus_layer is not None:
+            legend.append(mpatches.Patch(facecolor="white", edgecolor=VIA_COLOR, label="via (to other layer)"))
+    else:
+        for net in colors_by_net:
+            legend.append(mpatches.Patch(color=colors_by_net[net], label=f"net {net}"))
+    if show_pins:
+        legend.append(mpatches.Patch(facecolor=PIN_COLOR_CONNECTED, edgecolor=PIN_EDGE_CONNECTED, label="active pin (this view)"))
+        legend.append(mpatches.Patch(facecolor=PIN_COLOR_IDLE, edgecolor=PIN_EDGE_IDLE, label="other pin"))
     if legend:
         ax.legend(handles=legend, loc="upper right", fontsize=7, framealpha=0.8)
 
-    ax.set_title(f"{render_name} - {len(placed_modules)} modules", fontsize=10, fontweight="bold")
+    ax.set_title(title, fontsize=10, fontweight="bold")
     ax.set_xlabel("X (um)")
     ax.set_ylabel("Y (um)")
     ax.tick_params(labelsize=7)
-    fig.tight_layout()
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / f"{render_name}_layout.png"
+
+# 渲染一张布局图并保存。
+def save_layout_figure(
+    placed_modules: list[tuple[Module, Placement, list[tuple[float, float]]]],
+    pin_by_module: dict[str, list[Pin]],
+    routes: list[Route],
+    all_routes: list[Route],
+    colors_by_net: dict[str, str],
+    connected_pins: set[str],
+    xlim: tuple[float, float],
+    ylim: tuple[float, float],
+    out_path: Path,
+    title: str,
+    dpi: int,
+    show_labels: bool,
+    show_pins: bool,
+    color_by_layer: bool,
+    focus_layer: str | None,
+) -> Path:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
+
+    fig_w = max(8.0, min(24.0, (xlim[1] - xlim[0]) / 20.0))
+    fig_h = max(8.0, min(24.0, (ylim[1] - ylim[0]) / 20.0))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+    draw_layout_axes(
+        ax=ax,
+        mpatches=mpatches,
+        placed_modules=placed_modules,
+        pin_by_module=pin_by_module,
+        routes=routes,
+        all_routes=all_routes,
+        colors_by_net=colors_by_net,
+        connected_pins=connected_pins,
+        xlim=xlim,
+        ylim=ylim,
+        title=title,
+        show_labels=show_labels,
+        show_pins=show_pins,
+        color_by_layer=color_by_layer,
+        focus_layer=focus_layer,
+    )
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     return out_path
 
 
+# 渲染完整布局：始终生成合图；若存在多层走线，再为每层各生成一张。
+def render_layout(
+    input_dir: Path,
+    output_dir: Path,
+    render_name: str,
+    dpi: int,
+    show_labels: bool,
+    show_pins: bool,
+) -> list[Path]:
+    modules = load_modules(input_dir)
+    pins = load_pins(input_dir)
+    net_terminals = load_net_terminals(input_dir)
+    placements = load_placements(output_dir)
+    routes = load_routes(output_dir)
+    colors_by_net = net_color_map([route.net for route in routes])
+
+    pin_by_module: dict[str, list[Pin]] = {}
+    for pin in pins:
+        pin_by_module.setdefault(pin.module_id, []).append(pin)
+
+    placed_modules: list[tuple[Module, Placement, list[tuple[float, float]]]] = []
+    for module_id, module in modules.items():
+        placement = placements.get(module_id)
+        if placement is None:
+            continue
+        corners = module_corners(module, placement)
+        placed_modules.append((module, placement, corners))
+
+    xlim, ylim = compute_bounds(placed_modules, routes)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 合图：凡在任意层接到的 pin 都标红；分图层：只标本层端点附近的 pin。
+    active_all = active_pins_for_routes(routes, pins, modules, placements, net_terminals)
+
+    out_paths: list[Path] = []
+    combined_path = output_dir / f"{render_name}_layout.png"
+    save_layout_figure(
+        placed_modules=placed_modules,
+        pin_by_module=pin_by_module,
+        routes=routes,
+        all_routes=routes,
+        colors_by_net=colors_by_net,
+        connected_pins=active_all,
+        xlim=xlim,
+        ylim=ylim,
+        out_path=combined_path,
+        title=f"{render_name} - {len(placed_modules)} modules (all layers)",
+        dpi=dpi,
+        show_labels=show_labels,
+        show_pins=show_pins,
+        color_by_layer=False,
+        focus_layer=None,
+    )
+    out_paths.append(combined_path)
+
+    layers = sort_layers([route.layer for route in routes])
+    # 仅当实际出现多层时才额外导出分图层，避免单层结果重复出图。
+    if len(layers) >= 2:
+        for layer in layers:
+            layer_routes = [route for route in routes if route.layer == layer]
+            active_layer = active_pins_for_routes(layer_routes, pins, modules, placements, net_terminals)
+            via_count = len(find_via_points(routes, layer=layer))
+            layer_path = output_dir / f"{render_name}_layout_{layer}.png"
+            save_layout_figure(
+                placed_modules=placed_modules,
+                pin_by_module=pin_by_module,
+                routes=layer_routes,
+                all_routes=routes,
+                colors_by_net=colors_by_net,
+                connected_pins=active_layer,
+                xlim=xlim,
+                ylim=ylim,
+                out_path=layer_path,
+                title=f"{render_name} - layer {layer} ({len(layer_routes)} segs, {via_count} vias)",
+                dpi=dpi,
+                show_labels=show_labels,
+                show_pins=show_pins,
+                color_by_layer=True,
+                focus_layer=layer,
+            )
+            out_paths.append(layer_path)
+
+    return out_paths
+
+
 # 解析命令行参数并执行渲染。
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Render SAPR input/output text files as a layout PNG.")
+    parser = argparse.ArgumentParser(description="Render SAPR input/output text files as layout PNG(s).")
     parser.add_argument("--input", required=True, type=Path, help="Directory containing modules.txt and pins.txt")
     parser.add_argument("--output", required=True, type=Path, help="Directory containing placement.txt and routing.txt")
     parser.add_argument("--name", default=None, help="PNG basename prefix; defaults to output directory name")
@@ -359,7 +893,7 @@ def main() -> int:
     args = parser.parse_args()
 
     render_name = args.name or default_render_name(args.output)
-    out_path = render_layout(
+    out_paths = render_layout(
         input_dir=args.input,
         output_dir=args.output,
         render_name=render_name,
@@ -367,7 +901,8 @@ def main() -> int:
         show_labels=not args.no_labels,
         show_pins=not args.no_pins,
     )
-    print(os.fspath(out_path))
+    for out_path in out_paths:
+        print(os.fspath(out_path))
     return 0
 
 
