@@ -1,0 +1,8 @@
+# net          priority    terminals
+
+N_TOP_A        normal      XR7.PLUS XR8.MINUS XC6.PLUS
+N_TOP_B        normal      XR9.PLUS XR10.MINUS XC5.PLUS
+N_LOAD_A       normal      XR25.PLUS XR7.MINUS XC5.MINUS
+N_LOAD_B       normal      XR26.PLUS XR10.PLUS XC6.MINUS
+VDD            critical    XR25.MINUS XR26.MINUS
+GND            critical    XR8.PLUS XR9.MINUS
