@@ -1,0 +1,18 @@
+# module      pin      x        y        layer
+
+XC5          MINUS    5.380    0.055    M1
+XC5          PLUS     5.380    6.315    M1
+XC6          MINUS    5.380    0.055    M1
+XC6          PLUS     5.380    6.315    M1
+XR7          MINUS    3.462    0.055    M1
+XR7          PLUS     3.462    6.655    M1
+XR8          MINUS    3.462    0.055    M1
+XR8          PLUS     3.462    6.655    M1
+XR9          MINUS    3.462    0.055    M1
+XR9          PLUS     3.462    6.655    M1
+XR10         MINUS    3.462    0.055    M1
+XR10         PLUS     3.462    6.655    M1
+XR25         MINUS    10.070   0.055    M1
+XR25         PLUS     10.070   9.805    M1
+XR26         MINUS    10.070   0.055    M1
+XR26         PLUS     10.070   9.805    M1
