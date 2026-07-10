@@ -110,7 +110,12 @@ Metrics measure(const Circuit& circuit, const Solution& solution) {
     for (const auto& route : solution.routes) {
         wirelength += std::abs(route.x2 - route.x1) + std::abs(route.y2 - route.y1);
     }
-    return {max_x * max_y, wirelength, count_bends(solution.routes), count_vias(solution.routes), 0.0};
+    Metrics metrics;
+    metrics.area = max_x * max_y;
+    metrics.wirelength = wirelength;
+    metrics.bend_count = count_bends(solution.routes);
+    metrics.via_count = count_vias(solution.routes);
+    return metrics;
 }
 
 }  // namespace sapr

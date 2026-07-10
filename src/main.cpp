@@ -192,6 +192,7 @@ std::string json_escape(const std::string& value) {
 }
 
 // 将终端打印的基础指标与 routing_evaluation 摘要写入 output/metrics.json（与 png、btree 同级）。
+// routing_cost/global_* 固定为 global 阶段；顶层与 final_penalty/detailed_* 为最终口径。
 std::filesystem::path write_metrics_json(const sapr::Solution& solution, const sapr::Metrics& metrics,
                                         const std::filesystem::path& output) {
     std::filesystem::create_directories(output);
@@ -199,8 +200,9 @@ std::filesystem::path write_metrics_json(const sapr::Solution& solution, const s
     std::ofstream out(metrics_path);
     if (!out) throw std::runtime_error("failed to write " + metrics_path.string());
 
+    // routing_cost 仅表示 global 阶段代价；缺省时用 global_* 与 GlobalRouterConfig 默认 bend_weight=3 回退。
     const double routing_cost = solution.routing_cost.value_or(
-        metrics.wirelength + 0.2 * static_cast<double>(metrics.bend_count) + metrics.penalty);
+        metrics.global_wirelength + 3.0 * static_cast<double>(metrics.global_bend_count) + metrics.global_penalty);
     const auto& warnings =
         solution.routing_warnings.empty() ? metrics.routing_warnings : solution.routing_warnings;
 
@@ -246,10 +248,11 @@ std::filesystem::path write_metrics_json(const sapr::Solution& solution, const s
         << "    \"routing_feedback_converged\": "
         << (solution.routing_feedback_converged.value_or(metrics.routing_feedback_converged) ? "true" : "false")
         << ",\n"
-        << "    \"global_wirelength\": " << metrics.wirelength << ",\n"
-        << "    \"global_bends\": " << metrics.bend_count << ",\n"
-        << "    \"global_vias\": " << metrics.via_count << ",\n"
-        << "    \"global_penalty\": " << metrics.penalty << ",\n"
+        << "    \"global_wirelength\": " << metrics.global_wirelength << ",\n"
+        << "    \"global_bends\": " << metrics.global_bend_count << ",\n"
+        << "    \"global_vias\": " << metrics.global_via_count << ",\n"
+        << "    \"global_penalty\": " << metrics.global_penalty << ",\n"
+        << "    \"final_penalty\": " << metrics.penalty << ",\n"
         << "    \"flow_penalty\": " << metrics.flow_penalty << ",\n"
         << "    \"current_density_penalty\": " << metrics.current_density_penalty << ",\n"
         << "    \"coupling_penalty\": " << metrics.coupling_penalty << ",\n"
@@ -367,7 +370,8 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
               << "}\n";
     if (dump_routing_eval) {
         const double routing_cost = solution.routing_cost.value_or(
-            metrics.wirelength + 0.2 * static_cast<double>(metrics.bend_count) + metrics.penalty);
+            metrics.global_wirelength + 3.0 * static_cast<double>(metrics.global_bend_count) +
+            metrics.global_penalty);
         std::cout << std::fixed << std::setprecision(2)
                   << "routing_evaluation:\n"
                   << "  phi_cost: " << metrics.phi_cost << '\n'
@@ -396,10 +400,11 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
                   << solution.routing_feedback_iterations.value_or(metrics.routing_feedback_iterations) << '\n'
                   << "  routing_feedback_converged: "
                   << (solution.routing_feedback_converged.value_or(metrics.routing_feedback_converged) ? "true" : "false") << '\n'
-                  << "  global_wirelength: " << metrics.wirelength << '\n'
-                  << "  global_bends: " << metrics.bend_count << '\n'
-                  << "  global_vias: " << metrics.via_count << '\n'
-                  << "  global_penalty: " << metrics.penalty << '\n'
+                  << "  global_wirelength: " << metrics.global_wirelength << '\n'
+                  << "  global_bends: " << metrics.global_bend_count << '\n'
+                  << "  global_vias: " << metrics.global_via_count << '\n'
+                  << "  global_penalty: " << metrics.global_penalty << '\n'
+                  << "  final_penalty: " << metrics.penalty << '\n'
                   << "  flow_penalty: " << metrics.flow_penalty << '\n'
                   << "  current_density_penalty: " << metrics.current_density_penalty << '\n'
                   << "  coupling_penalty: " << metrics.coupling_penalty << '\n'
