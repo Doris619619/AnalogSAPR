@@ -940,9 +940,10 @@ CandidateState evaluate_candidate(
     return evaluate_candidate_with_feedback_loop(circuit, std::move(tree), config, &base_metrics);
 }
 
-// 将候选状态转换为最终 Solution；可选附带 SA 每轮 btree 可视化记录。
+// 将候选状态转换为最终 Solution；可选附带 SA 进度与每轮 btree 可视化记录。
 Solution make_solution(
     const CandidateState& state,
+    std::vector<SaProgressEntry> sa_progress = {},
     std::vector<SaBtreeIterationTrace> sa_btree_iterations = {}) {
     Solution solution;
     solution.placements = state.request.placements;
@@ -968,6 +969,7 @@ Solution make_solution(
     solution.btree_trace_json = make_btree_trace_json(state.tree, state.request, state.feedback.metrics);
     solution.routing_debug_json = state.feedback.routing_debug_json;
     solution.routing_warnings = state.feedback.metrics.routing_warnings;
+    solution.sa_progress = std::move(sa_progress);
     solution.sa_btree_iterations = std::move(sa_btree_iterations);
     return solution;
 }
@@ -1272,6 +1274,8 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     std::mt19937 rng(config.seed);
     std::uniform_real_distribution<double> probability(0.0, 1.0);
     double temperature = config.initial_temperature;
+    std::vector<SaProgressEntry> sa_progress;
+    sa_progress.reserve(static_cast<std::size_t>(config.sa_iterations));
     std::vector<SaBtreeIterationTrace> sa_btree_iterations;
     if (config.dump_sa_btree) sa_btree_iterations.reserve(static_cast<std::size_t>(config.sa_iterations));
     for (int iteration = 0; iteration < config.sa_iterations; ++iteration) {
@@ -1312,6 +1316,16 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
                   << " best_cost=" << best.cost
                   << '\n'
                   << std::flush;
+        SaProgressEntry progress;
+        progress.iteration = iteration + 1;
+        progress.sa_iterations = config.sa_iterations;
+        progress.move = perturbation.move;
+        progress.accept = accept;
+        progress.next_cost = logged_next_cost;
+        progress.current_cost = current.cost;
+        progress.best_cost = best.cost;
+        progress.temperature = temperature;
+        sa_progress.push_back(std::move(progress));
         if (config.debug_search) {
             std::cerr << "[search] iter=" << iteration
                       << " move=" << perturbation.move
@@ -1330,7 +1344,7 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
         temperature *= config.cooling_rate;
     }
 
-    return make_solution(best, std::move(sa_btree_iterations));
+    return make_solution(best, std::move(sa_progress), std::move(sa_btree_iterations));
 }
 
 // 保持历史 CLI/API 名称，当前默认指向论文 placement-aware 求解流程。

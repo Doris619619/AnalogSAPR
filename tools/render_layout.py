@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import re
@@ -23,16 +24,22 @@ from net_colors import net_color_map
 SMALL_MODULE_EDGE_UM = 2.0
 # 小器件 pin 间距小于该值时视为簇，统一做外置标注。
 PIN_CLUSTER_UM = 0.25
-# 未连线 / 已连线 pin 的标记颜色。
-PIN_COLOR_IDLE = "#EEEEEE"
-PIN_COLOR_CONNECTED = "#E53935"
-PIN_EDGE_IDLE = "#9E9E9E"
-PIN_EDGE_CONNECTED = "#B71C1C"
-# 实际线宽常为 0.05μm，大画布上几乎看不见；渲染时抬到该下限。
-MIN_VISUAL_WIRE_UM = 0.12
+# 未连线 / 已连线 pin 的标记颜色（偏浅，避免压过加粗走线）。
+PIN_COLOR_IDLE = "#F5F5F5"
+PIN_COLOR_CONNECTED = "#EF9A9A"
+PIN_EDGE_IDLE = "#BDBDBD"
+PIN_EDGE_CONNECTED = "#E57373"
+# 实际线宽常为 0.05μm，大画布上几乎看不见；渲染时抬到该下限（刻意加粗便于看路径）。
+MIN_VISUAL_WIRE_UM = 0.22
+# pin 标记整体透明度：越低越浅。
+PIN_MARKER_ALPHA = 0.35
+PIN_LABEL_ALPHA = 0.55
 # 判定同点换层（via）的坐标容差。
 VIA_MATCH_UM = 0.08
 VIA_COLOR = "#212121"
+# 最终选用 LCP 的标记颜色（与 btree 图中 LCP 点风格接近）。
+LCP_FACE_COLOR = "#EDE7F6"
+LCP_EDGE_COLOR = "#4527A0"
 
 # MOS 常用 pin 的优先方位：上/右/下/左。
 PIN_CARDINAL_PREFERENCE = {
@@ -104,23 +111,22 @@ class Route:
     width: float
 
 
+@dataclass
+# 表示最终选用的 LCP 物理位置，供 layout 图标注。
+class SelectedLcp:
+    net: str
+    lcp_id: str
+    candidate_id: str
+    x: float
+    y: float
+
+
 DEV_COLORS = {
     "nmos": "#2196F3",
     "pmos": "#F44336",
     "capacitor": "#4CAF50",
     "resistor": "#FF9800",
     "unknown": "#999999",
-}
-
-# 金属层分图时的走线颜色（合图仍按 net 上色）。
-LAYER_COLORS = {
-    "M1": "#1565C0",
-    "M2": "#C62828",
-    "M3": "#2E7D32",
-    "M4": "#6A1B9A",
-    "M5": "#EF6C00",
-    "M6": "#00838F",
-    "M7": "#5D4037",
 }
 
 
@@ -354,11 +360,26 @@ def route_polygon(route: Route, visual_width: float | None = None) -> list[tuple
     ]
 
 
-# 找出换层 via 点：同 net 在不同层共享同一坐标的端点。
+# 判断点是否落在线段中心线上（含端点），用于识别 T 接换层 via。
+def point_on_route_centerline(x: float, y: float, route: Route, tol: float = VIA_MATCH_UM) -> bool:
+    dx = route.x2 - route.x1
+    dy = route.y2 - route.y1
+    length = math.hypot(dx, dy)
+    if length < 1e-12:
+        return math.hypot(x - route.x1, y - route.y1) <= tol
+    t = ((x - route.x1) * dx + (y - route.y1) * dy) / (length * length)
+    if t < -1e-9 or t > 1.0 + 1e-9:
+        return False
+    t = min(1.0, max(0.0, t))
+    proj_x = route.x1 + t * dx
+    proj_y = route.y1 + t * dy
+    return math.hypot(x - proj_x, y - proj_y) <= tol
+
+
+# 找出换层 via 点：同网异层端点重合，或一端点落在另一层同网线段中段（T 接）。
 def find_via_points(all_routes: list[Route], layer: str | None = None) -> list[tuple[float, float, str]]:
-    # key: (net, rounded_x, rounded_y) -> set(layers)
-    layered: dict[tuple[str, int, int], set[str]] = {}
     scale = 1.0 / max(VIA_MATCH_UM, 1e-6)
+    layered: dict[tuple[str, int, int], set[str]] = {}
     for route in all_routes:
         for x, y in ((route.x1, route.y1), (route.x2, route.y2)):
             key = (route.net, int(round(x * scale)), int(round(y * scale)))
@@ -366,18 +387,99 @@ def find_via_points(all_routes: list[Route], layer: str | None = None) -> list[t
 
     vias: list[tuple[float, float, str]] = []
     seen: set[tuple[str, int, int]] = set()
-    for route in all_routes:
-        if layer is not None and route.layer != layer:
-            continue
+
+    def add_via(net: str, x: float, y: float) -> None:
+        key = (net, int(round(x * scale)), int(round(y * scale)))
+        if key in seen:
+            return
+        seen.add(key)
+        vias.append((x, y, net))
+
+    focus_routes = [route for route in all_routes if layer is None or route.layer == layer]
+    other_routes = [route for route in all_routes if layer is None or route.layer != layer]
+
+    for route in focus_routes:
         for x, y in ((route.x1, route.y1), (route.x2, route.y2)):
             key = (route.net, int(round(x * scale)), int(round(y * scale)))
-            if key in seen:
-                continue
             layers = layered.get(key, set())
-            if len(layers) >= 2 and (layer is None or layer in layers):
-                seen.add(key)
-                vias.append((x, y, route.net))
+            if len(layers) >= 2:
+                add_via(route.net, x, y)
+                continue
+            for other in other_routes:
+                if other.net != route.net:
+                    continue
+                if point_on_route_centerline(x, y, other):
+                    add_via(route.net, x, y)
+                    break
+
+    # 反向 T 接：其他层端点落在本层线段中段时，本层分图也要标 via。
+    if layer is not None:
+        for other in other_routes:
+            for x, y in ((other.x1, other.y1), (other.x2, other.y2)):
+                for route in focus_routes:
+                    if route.net != other.net:
+                        continue
+                    if point_on_route_centerline(x, y, route):
+                        add_via(other.net, x, y)
+                        break
     return vias
+
+
+# 从 routing_debug.json 读取最终选用的 LCP 物理坐标；文件缺失时返回空列表。
+def load_selected_lcps(output_dir: Path) -> list[SelectedLcp]:
+    debug_path = output_dir / "routing_debug.json"
+    if not debug_path.is_file():
+        return []
+    try:
+        data = json.loads(debug_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    location_by_id: dict[str, SelectedLcp] = {}
+    for topology in data.get("lcp_topologies", []):
+        net = str(topology.get("net", ""))
+        for point in topology.get("linking_points", []):
+            lcp_id = str(point.get("id", ""))
+            for candidate in point.get("location_candidates", []):
+                candidate_id = str(candidate.get("id", ""))
+                if not candidate_id:
+                    continue
+                try:
+                    x = float(candidate["x"])
+                    y = float(candidate["y"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                location_by_id[candidate_id] = SelectedLcp(
+                    net=net,
+                    lcp_id=lcp_id or candidate_id,
+                    candidate_id=candidate_id,
+                    x=x,
+                    y=y,
+                )
+
+    selected: dict[str, SelectedLcp] = {}
+
+    def remember(candidate_id: str) -> None:
+        marker = location_by_id.get(candidate_id)
+        if marker is not None:
+            selected[candidate_id] = marker
+
+    # 优先 detailed_traces：反映 detailed legalize / A* fallback 后的最终绑定。
+    for trace in data.get("detailed_traces", []):
+        for segment in trace.get("segments", []):
+            candidate_id = str(segment.get("lcp_candidate_id", "") or "")
+            if candidate_id:
+                remember(candidate_id)
+
+    # 回退到 DP traceback，兼容没有 detailed_traces 的旧输出。
+    if not selected:
+        for candidate in data.get("dp_traceback_candidates", []):
+            for key in ("lcp_candidate_id", "target_lcp_candidate_id", "source_lcp_candidate_id"):
+                candidate_id = str(candidate.get(key, "") or "")
+                if candidate_id:
+                    remember(candidate_id)
+
+    return sorted(selected.values(), key=lambda item: (item.net, item.lcp_id, item.candidate_id))
 
 
 # 输出目录名为空时提供稳定的默认 PNG 前缀。
@@ -402,10 +504,10 @@ def sort_layers(layers: list[str]) -> list[str]:
     return sorted(dict.fromkeys(layers), key=key)
 
 
-# 小器件 pin 标记尺寸：略小一点，避免盖住器件本体。
+# 小器件 pin 标记尺寸：尽量小，避免盖住走线端点。
 def pin_marker_style(module: Module) -> tuple[str, float, float]:
     if is_small_module(module):
-        return "o", 1.8, 0.45
+        return "o", 1.1, 0.35
     return "x", 2.8, 0.9
 
 
@@ -546,12 +648,14 @@ def draw_module_pins(
     for pin, (gx, gy), (dx, dy), (ox, oy, ha, va) in zip(pins, pin_points, display_points, label_specs):
         pin_key = f"{pin.module_id}.{pin.name}"
         connected = pin_key in connected_pins
+        small = is_small_module(module)
         if connected:
             face = PIN_COLOR_CONNECTED
             edge = PIN_EDGE_CONNECTED
-            size = markersize + 0.4
-            width = markeredgewidth + 0.2
-            order = 12
+            size = markersize + (0.15 if small else 0.4)
+            width = markeredgewidth + (0.1 if small else 0.2)
+            # 小器件 pin 标记压在走线之下，只靠外侧文字辨认，避免挡住 routing。
+            order = 2 if small else 12
             # 本图真正接到的 pin：画在真实坐标，保证和走线端点对齐。
             mx, my = gx, gy
         else:
@@ -559,7 +663,7 @@ def draw_module_pins(
             edge = PIN_EDGE_IDLE
             size = markersize
             width = markeredgewidth
-            order = 11
+            order = 2 if small else 11
             # 未接到的密 pin：微偏显示，避免 4 个名字对应 1 个点。
             mx, my = (dx, dy) if clustered else (gx, gy)
         ax.plot(
@@ -570,6 +674,7 @@ def draw_module_pins(
             markersize=size,
             markeredgewidth=width,
             markerfacecolor=face if marker == "o" else "none",
+            alpha=PIN_MARKER_ALPHA,
             zorder=order,
         )
         if not show_labels:
@@ -586,14 +691,15 @@ def draw_module_pins(
                 va=va,
                 fontsize=5.5,
                 fontweight="bold",
-                color=PIN_EDGE_CONNECTED if connected else "#616161",
+                color="#C62828" if connected else "#9E9E9E",
                 zorder=12,
+                alpha=PIN_LABEL_ALPHA,
                 bbox={
                     "boxstyle": "round,pad=0.12",
                     "facecolor": "#FFEBEE" if connected else "white",
-                    "edgecolor": edge if connected else "#BDBDBD",
-                    "linewidth": 0.7 if connected else 0.35,
-                    "alpha": 0.95,
+                    "edgecolor": edge if connected else "#E0E0E0",
+                    "linewidth": 0.5 if connected else 0.3,
+                    "alpha": 0.55,
                 },
             )
         else:
@@ -603,7 +709,8 @@ def draw_module_pins(
                 textcoords="offset points",
                 xytext=(3, 3),
                 fontsize=4,
-                color=PIN_EDGE_CONNECTED if connected else "#757575",
+                color="#C62828" if connected else "#BDBDBD",
+                alpha=PIN_LABEL_ALPHA,
                 zorder=12,
             )
 
@@ -612,6 +719,7 @@ def draw_module_pins(
 def compute_bounds(
     placed_modules: list[tuple[Module, Placement, list[tuple[float, float]]]],
     routes: list[Route],
+    lcps: list[SelectedLcp] | None = None,
 ) -> tuple[tuple[float, float], tuple[float, float]]:
     all_x: list[float] = []
     all_y: list[float] = []
@@ -622,6 +730,9 @@ def compute_bounds(
         half_width = max(route.width, 0.001) / 2.0
         all_x.extend([route.x1 - half_width, route.x1 + half_width, route.x2 - half_width, route.x2 + half_width])
         all_y.extend([route.y1 - half_width, route.y1 + half_width, route.y2 - half_width, route.y2 + half_width])
+    for lcp in lcps or []:
+        all_x.append(lcp.x)
+        all_y.append(lcp.y)
     if not all_x:
         all_x = [0.0, 100.0]
         all_y = [0.0, 100.0]
@@ -636,6 +747,26 @@ def compute_bounds(
         xlim = (xlim[0] - margin_extra, xlim[1] + margin_extra)
         ylim = (ylim[0] - margin_extra, ylim[1] + margin_extra)
     return xlim, ylim
+
+
+# 在布局图上标注最终选用的 LCP 物理位置（仅形状，不写文字）。
+def draw_selected_lcps(
+    ax: Any,
+    lcps: list[SelectedLcp],
+    colors_by_net: dict[str, str],
+) -> None:
+    for lcp in lcps:
+        edge = colors_by_net.get(lcp.net, LCP_EDGE_COLOR)
+        ax.plot(
+            lcp.x,
+            lcp.y,
+            marker="D",
+            markersize=3.8,
+            markerfacecolor=LCP_FACE_COLOR,
+            markeredgecolor=edge,
+            markeredgewidth=1.0,
+            zorder=6,
+        )
 
 
 # 在给定 axes 上绘制一层或全部层的布局内容。
@@ -653,8 +784,8 @@ def draw_layout_axes(
     title: str,
     show_labels: bool,
     show_pins: bool,
-    color_by_layer: bool,
     focus_layer: str | None,
+    lcps: list[SelectedLcp] | None = None,
 ) -> None:
     ax.set_aspect("equal")
     ax.set_xlim(xlim)
@@ -663,10 +794,8 @@ def draw_layout_axes(
 
     sorted_routes = sorted(routes, key=lambda route: -max(abs(route.x2 - route.x1), abs(route.y2 - route.y1)))
     for route in sorted_routes[:5000]:
-        if color_by_layer:
-            color = LAYER_COLORS.get(route.layer.upper(), colors_by_net.get(route.net, "#999999"))
-        else:
-            color = colors_by_net.get(route.net, "#999999")
+        # 合图与分图层统一按 net 上色，避免同层异网糊成一种颜色。
+        color = colors_by_net.get(route.net, "#999999")
         visual_width = max(route.width, MIN_VISUAL_WIRE_UM)
         patch = mpatches.Polygon(
             route_polygon(route, visual_width=visual_width),
@@ -674,7 +803,7 @@ def draw_layout_axes(
             facecolor=color,
             edgecolor="none",
             alpha=0.7,
-            zorder=1,
+            zorder=5,
         )
         ax.add_patch(patch)
 
@@ -720,22 +849,26 @@ def draw_layout_axes(
                 connected_pins,
             )
 
+    if lcps:
+        draw_selected_lcps(ax, lcps, colors_by_net)
+
     legend: list[Any] = []
     for device_type in sorted({module.device_type for module, _placement, _corners in placed_modules}):
         color = DEV_COLORS.get(device_type, DEV_COLORS["unknown"])
         legend.append(mpatches.Patch(facecolor=color, edgecolor=color, alpha=0.35, label=device_type))
-    if color_by_layer:
-        for layer in sort_layers([route.layer for route in routes]):
-            color = LAYER_COLORS.get(layer.upper(), "#999999")
-            legend.append(mpatches.Patch(color=color, label=f"layer {layer}"))
-        if focus_layer is not None:
-            legend.append(mpatches.Patch(facecolor="white", edgecolor=VIA_COLOR, label="via (to other layer)"))
-    else:
-        for net in colors_by_net:
-            legend.append(mpatches.Patch(color=colors_by_net[net], label=f"net {net}"))
+    # 图例始终按本图出现的 net 列出颜色。
+    nets_in_view = list(dict.fromkeys(route.net for route in routes))
+    for net in nets_in_view:
+        legend.append(mpatches.Patch(color=colors_by_net.get(net, "#999999"), label=f"net {net}"))
+    if focus_layer is not None:
+        legend.append(mpatches.Patch(facecolor="white", edgecolor=VIA_COLOR, label="via (to other layer)"))
     if show_pins:
         legend.append(mpatches.Patch(facecolor=PIN_COLOR_CONNECTED, edgecolor=PIN_EDGE_CONNECTED, label="active pin (this view)"))
         legend.append(mpatches.Patch(facecolor=PIN_COLOR_IDLE, edgecolor=PIN_EDGE_IDLE, label="other pin"))
+    if lcps:
+        legend.append(
+            mpatches.Patch(facecolor=LCP_FACE_COLOR, edgecolor=LCP_EDGE_COLOR, label="LCP (selected)")
+        )
     if legend:
         ax.legend(handles=legend, loc="upper right", fontsize=7, framealpha=0.8)
 
@@ -760,8 +893,8 @@ def save_layout_figure(
     dpi: int,
     show_labels: bool,
     show_pins: bool,
-    color_by_layer: bool,
     focus_layer: str | None,
+    lcps: list[SelectedLcp] | None = None,
 ) -> Path:
     import matplotlib
 
@@ -786,8 +919,8 @@ def save_layout_figure(
         title=title,
         show_labels=show_labels,
         show_pins=show_pins,
-        color_by_layer=color_by_layer,
         focus_layer=focus_layer,
+        lcps=lcps,
     )
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -810,7 +943,8 @@ def render_layout(
     net_terminals = load_net_terminals(input_dir)
     placements = load_placements(output_dir)
     routes = load_routes(output_dir)
-    colors_by_net = net_color_map([route.net for route in routes])
+    lcps = load_selected_lcps(output_dir)
+    colors_by_net = net_color_map([route.net for route in routes] + [lcp.net for lcp in lcps])
 
     pin_by_module: dict[str, list[Pin]] = {}
     for pin in pins:
@@ -824,7 +958,7 @@ def render_layout(
         corners = module_corners(module, placement)
         placed_modules.append((module, placement, corners))
 
-    xlim, ylim = compute_bounds(placed_modules, routes)
+    xlim, ylim = compute_bounds(placed_modules, routes, lcps)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 合图：凡在任意层接到的 pin 都标红；分图层：只标本层端点附近的 pin。
@@ -846,8 +980,8 @@ def render_layout(
         dpi=dpi,
         show_labels=show_labels,
         show_pins=show_pins,
-        color_by_layer=False,
         focus_layer=None,
+        lcps=lcps,
     )
     out_paths.append(combined_path)
 
@@ -873,8 +1007,8 @@ def render_layout(
                 dpi=dpi,
                 show_labels=show_labels,
                 show_pins=show_pins,
-                color_by_layer=True,
                 focus_layer=layer,
+                lcps=lcps,
             )
             out_paths.append(layer_path)
 

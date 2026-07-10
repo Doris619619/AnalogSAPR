@@ -1457,12 +1457,14 @@ bool route_is_local_pin_access(
 }
 
 // 收集 detailed route 穿越 active region 的基础 DRC 违反线段索引。
+// 仅检查 M1：active region 对应器件低层占用，高层金属跨过不算 active crossing。
 std::vector<std::size_t> collect_active_region_crossings(
     const RoutingEvaluationRequest& request,
     const std::vector<RouteSegment>& routes) {
     std::vector<std::size_t> violations;
     for (std::size_t index = 0; index < routes.size(); ++index) {
         const auto& route = routes[index];
+        if (route.layer != "M1") continue;
         const Rect metal = route_to_rect(route);
         for (const auto& active : request.active_region_blockers) {
             if (!routing::intersects(metal, active)) continue;
