@@ -684,6 +684,17 @@ void run_routing_evaluator_tests() {
         metrics.design_rule_penalty +
         metrics.routing_failure_penalty;
     require(approx(metrics.penalty, expected_dedup_penalty), "SA penalty should use deduplicated routing penalty terms");
+    // global_* 是 global 阶段快照；routing_cost 必须与之对齐，不得误用最终 penalty/wirelength。
+    require(solution.routing_cost.has_value(), "solution should expose global routing_cost");
+    const double expected_global_routing_cost =
+        metrics.global_wirelength + 3.0 * static_cast<double>(metrics.global_bend_count) + metrics.global_penalty;
+    require(
+        approx(*solution.routing_cost, expected_global_routing_cost),
+        "routing_cost should equal global WL + 3*bends + global_penalty");
+    require(
+        approx(metrics.penalty, metrics.flow_penalty + metrics.current_density_penalty + metrics.coupling_penalty +
+                                    metrics.design_rule_penalty + metrics.routing_failure_penalty),
+        "final penalty should stay the post-detailed aggregate");
     require(metrics.dp_traceback_segments > 0, "placement-aware routing should produce bottom-up DP traceback");
     require(metrics.dp_nodes > 0, "bottom-up DP should visit B*-tree nodes");
     require(metrics.dp_states > 0, "bottom-up DP should keep candidate states");
@@ -875,6 +886,13 @@ void run_routing_evaluator_tests() {
     auto feedback_tree = sapr::make_enhanced_tree(circuit);
     const auto first_feedback_request = sapr::pack_enhanced_tree(circuit, feedback_tree, config);
     const auto first_feedback = sapr::evaluate_with_routing_adapter(circuit, first_feedback_request);
+    require(
+        approx(
+            first_feedback.routing_cost,
+            first_feedback.metrics.global_wirelength +
+                3.0 * static_cast<double>(first_feedback.metrics.global_bend_count) +
+                first_feedback.metrics.global_penalty),
+        "adapter routing_cost should stay aligned with global_* snapshot");
     if (!first_feedback.routes.empty()) {
         sapr::Solution feedback_solution;
         feedback_solution.placements = first_feedback_request.placements;
@@ -890,6 +908,10 @@ void run_routing_evaluator_tests() {
         require(
             first_feedback.metrics.via_count == route_metrics.via_count,
             "routing feedback should use final detailed route vias when routes exist");
+        // detailed 成功后最终 penalty 可为 0，但 global_penalty 仍应保留 global 阶段冲突代价。
+        require(
+            first_feedback.metrics.global_penalty + 1e-9 >= first_feedback.metrics.penalty,
+            "global_penalty should not be overwritten by final detailed penalty");
     }
     sapr::apply_routing_feedback(feedback_tree, first_feedback);
     const auto second_feedback_request = sapr::pack_enhanced_tree(circuit, feedback_tree, config);

@@ -133,6 +133,7 @@ struct RouteSegment {
 };
 
 // 表示当前解的基础评价指标和论文约束违例统计。
+// wirelength/bend/via/penalty 为最终口径（优先 detailed）；global_* 保留 global 阶段快照，避免与最终值混用。
 struct Metrics {
     double area{};
     double wirelength{};
@@ -144,6 +145,11 @@ struct Metrics {
     double normalized_bend{};
     double normalized_via{};
     double penalty{};
+    // global 阶段原始几何与惩罚（写入 metrics 前不被 detailed 覆盖）。
+    double global_wirelength{};
+    int global_bend_count{};
+    int global_via_count{};
+    double global_penalty{};
     double flow_penalty{};
     double current_density_penalty{};
     double coupling_penalty{};

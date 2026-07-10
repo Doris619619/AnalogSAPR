@@ -457,8 +457,14 @@ std::string make_routing_debug_json(
     const Metrics& metrics) {
     std::ostringstream out;
     out << "{\n";
+    // summary 中 routing_cost/global_* 来自 global 阶段；final_penalty/detailed_cost 来自最终口径。
     out << "  \"summary\": {"
         << "\"routing_cost\": " << evaluation.routing_cost
+        << ", \"global_wirelength\": " << metrics.global_wirelength
+        << ", \"global_bends\": " << metrics.global_bend_count
+        << ", \"global_vias\": " << metrics.global_via_count
+        << ", \"global_penalty\": " << metrics.global_penalty
+        << ", \"final_penalty\": " << metrics.penalty
         << ", \"candidate_count\": " << evaluation.candidates.size()
         << ", \"dp_used\": " << (evaluation.used_bottom_up_dp ? "true" : "false")
         << ", \"failed_nets\": " << evaluation.failed_nets
@@ -1144,14 +1150,19 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     solution.placement_order = request.placement_order;
     solution.routes = feedback.routes;
     feedback.metrics = measure(circuit, solution);
+    // 先固化 global 阶段快照；最终 wirelength/bend/via 可被 detailed 覆盖，二者不得混写。
+    feedback.metrics.global_wirelength = routing_evaluation.global_routing.total_metrics.wirelength;
+    feedback.metrics.global_bend_count = routing_evaluation.global_routing.total_metrics.bend_count;
+    feedback.metrics.global_via_count = routing_evaluation.global_routing.total_metrics.via_count;
+    feedback.metrics.global_penalty = routing_evaluation.global_routing.total_penalty;
     if (!detailed.routes.empty()) {
         feedback.metrics.wirelength = detailed.detailed_wirelength;
         feedback.metrics.bend_count = detailed.detailed_bend_count;
         feedback.metrics.via_count = detailed.detailed_via_count;
     } else {
-        feedback.metrics.wirelength = routing_evaluation.global_routing.total_metrics.wirelength;
-        feedback.metrics.bend_count = routing_evaluation.global_routing.total_metrics.bend_count;
-        feedback.metrics.via_count = routing_evaluation.global_routing.total_metrics.via_count;
+        feedback.metrics.wirelength = feedback.metrics.global_wirelength;
+        feedback.metrics.bend_count = feedback.metrics.global_bend_count;
+        feedback.metrics.via_count = feedback.metrics.global_via_count;
     }
     feedback.metrics.flow_violations = count_flow_violations(circuit, request, feedback.routes);
     feedback.metrics.current_density_violations = count_current_density_violations(circuit, feedback.routes);
