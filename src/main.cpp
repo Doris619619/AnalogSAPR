@@ -111,6 +111,15 @@ std::filesystem::path btree_renderer_script_path() {
     return source_candidate;
 }
 
+// 定位 SA 进度 Excel 导出脚本。
+std::filesystem::path sa_trace_xlsx_script_path() {
+    const auto source_candidate = std::filesystem::path("tools") / "export_sa_trace_xlsx.py";
+    if (std::filesystem::exists(source_candidate)) return source_candidate;
+    const auto build_candidate = std::filesystem::path("..") / "tools" / "export_sa_trace_xlsx.py";
+    if (std::filesystem::exists(build_candidate)) return build_candidate;
+    return source_candidate;
+}
+
 std::string python_command() {
     const std::vector<std::filesystem::path> candidates{
         std::filesystem::path("..") / ".venv_gds" / "Scripts" / "python.exe",
@@ -138,13 +147,15 @@ int render_solution_png(const std::filesystem::path& input, const std::filesyste
     return status;
 }
 
+// 渲染最终解 B* 树图；默认叠加全部 net 拓扑弧。
 int render_btree_png(const std::filesystem::path& trace_json, const std::filesystem::path& output,
                      const std::filesystem::path& renderer, int dpi, const std::string& render_name) {
     std::ostringstream command;
     command << python_command() << ' ' << shell_quote(renderer)
             << " --trace " << shell_quote(trace_json)
             << " --output " << shell_quote(output)
-            << " --dpi " << dpi;
+            << " --dpi " << dpi
+            << " --show-routing";
     if (!render_name.empty()) command << " --name " << shell_quote(render_name);
     const int status = std::system(command.str().c_str());
     if (status != 0) {
@@ -189,6 +200,56 @@ std::string json_escape(const std::string& value) {
         }
     }
     return escaped;
+}
+
+// 将终端 `[sa]` 轻量进度写入 output/sa_trace.json，与 btree_trace.json 同级。
+std::filesystem::path write_sa_trace_json(const sapr::Solution& solution, const std::filesystem::path& output) {
+    std::filesystem::create_directories(output);
+    const auto trace_path = output / "sa_trace.json";
+    std::ofstream out(trace_path);
+    if (!out) throw std::runtime_error("failed to write " + trace_path.string());
+    out << std::setprecision(17);
+    out << "{\n";
+    out << "  \"sa_iterations\": " << (solution.sa_progress.empty() ? 0 : solution.sa_progress.front().sa_iterations)
+        << ",\n";
+    out << "  \"recorded\": " << solution.sa_progress.size() << ",\n";
+    out << "  \"iterations\": [\n";
+    for (std::size_t index = 0; index < solution.sa_progress.size(); ++index) {
+        const auto& entry = solution.sa_progress[index];
+        if (index > 0) out << ",\n";
+        out << "    {"
+            << "\"index\": " << entry.iteration
+            << ", \"total\": " << entry.sa_iterations
+            << ", \"move\": \"" << json_escape(entry.move) << '"'
+            << ", \"accept\": " << (entry.accept ? "true" : "false")
+            << ", \"next_cost\": " << entry.next_cost
+            << ", \"current_cost\": " << entry.current_cost
+            << ", \"best_cost\": " << entry.best_cost
+            << ", \"temperature\": " << entry.temperature
+            << '}';
+    }
+    out << "\n  ]\n";
+    out << "}\n";
+    return trace_path;
+}
+
+// 基于已写出的 sa_trace.json 再导出 Excel 表格；失败时仅告警，不影响主流程。
+int export_sa_trace_xlsx(const std::filesystem::path& trace_json, const std::filesystem::path& output) {
+    const auto script = sa_trace_xlsx_script_path();
+    if (!std::filesystem::exists(script)) {
+        std::cerr << "warning: SA Excel export script not found; skip sa_trace.xlsx\n";
+        return 1;
+    }
+    const auto xlsx_path = output / "sa_trace.xlsx";
+    std::ostringstream command;
+    command << python_command() << ' ' << shell_quote(script)
+            << " --trace " << shell_quote(trace_json)
+            << " --output " << shell_quote(xlsx_path);
+    const int status = std::system(command.str().c_str());
+    if (status != 0) {
+        std::cerr << "warning: failed to export sa_trace.xlsx; JSON is still available\n";
+    }
+    return status;
 }
 
 // 将终端打印的基础指标与 routing_evaluation 摘要写入 output/metrics.json（与 png、btree 同级）。
@@ -332,6 +393,10 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
         return 1;
     }
     sapr::write_solution(solution, output);
+    if (!solution.sa_progress.empty()) {
+        const auto sa_trace_path = write_sa_trace_json(solution, output);
+        export_sa_trace_xlsx(sa_trace_path, output);
+    }
     if (solution.routing_debug_json.has_value()) {
         write_routing_debug_json(solution, output);
     }
