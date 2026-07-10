@@ -1,5 +1,5 @@
 // 实现 sapr validate/run 命令行入口和稳定的指标输出。
-// 文件职责：实现命令行入口，负责输入校验、求解运行和 routing debug 输出。
+// 文件职责：实现命令行入口，负责输入校验、求解运行、metrics/routing debug 输出。
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -71,11 +71,12 @@ void print_usage() {
               << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n"
               << "           [--boundary-margin value] [--boundary-clearance 0]\n"
               << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
-              << "           [--cooling-rate 0.96] [--dump-routing-eval]\n"
+              << "           [--cooling-rate 0.96] [--routing-layers 1]\n"
+              << "           [--dump-routing-eval]\n"
               << "           [--debug-search]\n"
               << "           [--render-dpi 200] [--render-name name]\n"
-              << "           [--dump-btree] [--render-btree-name name]\n"
-              << "           [--no-dump-sa-btree]\n";
+              << "           [--dump-btree] [--no-dump-btree] [--render-btree-name name]\n"
+              << "           [--no-dump-sa-btree] [--dump-sa-btree-json-only]\n";
 }
 
 std::string shell_quote(const std::string& value) {
@@ -173,6 +174,101 @@ std::filesystem::path write_routing_debug_json(const sapr::Solution& solution, c
     return debug_path;
 }
 
+// 转义 JSON 字符串字面量。
+std::string json_escape(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 8);
+    for (const char ch : value) {
+        switch (ch) {
+            case '\\': escaped += "\\\\"; break;
+            case '"': escaped += "\\\""; break;
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\t': escaped += "\\t"; break;
+            default: escaped.push_back(ch); break;
+        }
+    }
+    return escaped;
+}
+
+// 将终端打印的基础指标与 routing_evaluation 摘要写入 output/metrics.json（与 png、btree 同级）。
+std::filesystem::path write_metrics_json(const sapr::Solution& solution, const sapr::Metrics& metrics,
+                                        const std::filesystem::path& output) {
+    std::filesystem::create_directories(output);
+    const auto metrics_path = output / "metrics.json";
+    std::ofstream out(metrics_path);
+    if (!out) throw std::runtime_error("failed to write " + metrics_path.string());
+
+    const double routing_cost = solution.routing_cost.value_or(
+        metrics.wirelength + 0.2 * static_cast<double>(metrics.bend_count) + metrics.penalty);
+    const auto& warnings =
+        solution.routing_warnings.empty() ? metrics.routing_warnings : solution.routing_warnings;
+
+    out << std::fixed << std::setprecision(2)
+        << "{\n"
+        << "  \"area\": " << metrics.area << ",\n"
+        << "  \"bend_count\": " << metrics.bend_count << ",\n"
+        << "  \"penalty\": " << metrics.penalty << ",\n"
+        << "  \"via_count\": " << metrics.via_count << ",\n"
+        << "  \"wirelength\": " << metrics.wirelength << ",\n"
+        << "  \"routing_evaluation\": {\n"
+        << "    \"phi_cost\": " << metrics.phi_cost << ",\n"
+        << "    \"normalized_area\": " << metrics.normalized_area << ",\n"
+        << "    \"normalized_wirelength\": " << metrics.normalized_wirelength << ",\n"
+        << "    \"normalized_bend\": " << metrics.normalized_bend << ",\n"
+        << "    \"normalized_via\": " << metrics.normalized_via << ",\n"
+        << "    \"routing_cost\": " << routing_cost << ",\n"
+        << "    \"failed_nets\": " << metrics.routing_failures << ",\n"
+        << "    \"candidate_count\": " << solution.routing_candidate_count.value_or(0) << ",\n"
+        << "    \"detailed_routes\": "
+        << solution.detailed_route_count.value_or(static_cast<std::size_t>(metrics.detailed_routes)) << ",\n"
+        << "    \"traceback_failures\": "
+        << solution.traceback_failures.value_or(metrics.traceback_failures) << ",\n"
+        << "    \"space_nodes_with_routes\": "
+        << solution.space_nodes_with_routes.value_or(metrics.space_nodes_with_routes) << ",\n"
+        << "    \"dp_used\": " << (solution.dp_used.value_or(metrics.dp_used) ? "true" : "false") << ",\n"
+        << "    \"dp_nodes\": " << solution.dp_nodes.value_or(metrics.dp_nodes) << ",\n"
+        << "    \"dp_states\": " << solution.dp_states.value_or(metrics.dp_states) << ",\n"
+        << "    \"dp_pruned_states\": "
+        << solution.dp_pruned_states.value_or(metrics.dp_pruned_states) << ",\n"
+        << "    \"dp_traceback_segments\": "
+        << solution.dp_traceback_segments.value_or(metrics.dp_traceback_segments) << ",\n"
+        << "    \"packing_trace_steps\": "
+        << solution.packing_trace_steps.value_or(metrics.packing_trace_steps) << ",\n"
+        << "    \"packing_time_dp_used\": "
+        << (solution.packing_time_dp_used.value_or(metrics.packing_time_dp_used) ? "true" : "false") << ",\n"
+        << "    \"packing_time_dp_segments\": "
+        << solution.packing_time_dp_segments.value_or(metrics.packing_time_dp_segments) << ",\n"
+        << "    \"space_feedback_nodes\": "
+        << solution.space_feedback_nodes.value_or(metrics.space_feedback_nodes) << ",\n"
+        << "    \"routing_feedback_iterations\": "
+        << solution.routing_feedback_iterations.value_or(metrics.routing_feedback_iterations) << ",\n"
+        << "    \"routing_feedback_converged\": "
+        << (solution.routing_feedback_converged.value_or(metrics.routing_feedback_converged) ? "true" : "false")
+        << ",\n"
+        << "    \"global_wirelength\": " << metrics.wirelength << ",\n"
+        << "    \"global_bends\": " << metrics.bend_count << ",\n"
+        << "    \"global_vias\": " << metrics.via_count << ",\n"
+        << "    \"global_penalty\": " << metrics.penalty << ",\n"
+        << "    \"flow_penalty\": " << metrics.flow_penalty << ",\n"
+        << "    \"current_density_penalty\": " << metrics.current_density_penalty << ",\n"
+        << "    \"coupling_penalty\": " << metrics.coupling_penalty << ",\n"
+        << "    \"design_rule_violations\": " << metrics.design_rule_violations << ",\n"
+        << "    \"design_rule_penalty\": " << metrics.design_rule_penalty << ",\n"
+        << "    \"detailed_cost\": " << metrics.detailed_cost << ",\n"
+        << "    \"detailed_routing_penalty\": " << metrics.detailed_routing_penalty << ",\n"
+        << "    \"routing_failure_penalty\": " << metrics.routing_failure_penalty << ",\n"
+        << "    \"routing_warnings\": [";
+    for (std::size_t index = 0; index < warnings.size(); ++index) {
+        if (index != 0) out << ", ";
+        out << '"' << json_escape(warnings[index]) << '"';
+    }
+    out << "]\n"
+        << "  }\n"
+        << "}\n";
+    return metrics_path;
+}
+
 // 执行输入校验命令。
 int run_validate(const std::vector<std::string>& args) {
     const auto circuit = sapr::load_circuit(option_value(args, "--input", "input"));
@@ -208,13 +304,20 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     config.sa_iterations = option_int(args, "--sa-iterations", config.sa_iterations);
     config.initial_temperature = option_double(args, "--initial-temperature", config.initial_temperature);
     config.cooling_rate = option_double(args, "--cooling-rate", config.cooling_rate);
+    config.routing_layers = option_int(args, "--routing-layers", config.routing_layers);
+    if (config.routing_layers < 1 || config.routing_layers > 7) {
+        throw std::runtime_error("invalid value for --routing-layers: must be in [1, 7]");
+    }
     config.debug_search = has_option(args, "--debug-search");
-    config.dump_sa_btree = !has_option(args, "--no-dump-sa-btree");
+    // json-only 优先于 no-dump：仍收集并写出每轮文本，但跳过 PNG。
+    const bool dump_sa_btree_json_only = has_option(args, "--dump-sa-btree-json-only");
+    config.dump_sa_btree = dump_sa_btree_json_only || !has_option(args, "--no-dump-sa-btree");
     const bool dump_routing_eval = has_option(args, "--dump-routing-eval");
     const int render_dpi = option_int(args, "--render-dpi", 200);
     if (render_dpi <= 0) throw std::runtime_error("invalid value for --render-dpi: must be positive");
     const std::string render_name = option_value(args, "--render-name", "");
-    const bool dump_btree = has_option(args, "--dump-btree");
+    // 最终解 btree 默认开启；--no-dump-btree 可关闭。保留 --dump-btree 兼容旧命令。
+    const bool dump_btree = !has_option(args, "--no-dump-btree");
     const std::string render_btree_name = option_value(args, "--render-btree-name", "");
 
     const auto circuit = sapr::load_circuit(input);
@@ -239,15 +342,21 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
             btree_renderer_script_path(),
             renderer_script_path(executable_path),
             python_command(),
-            render_dpi);
+            render_dpi,
+            !dump_sa_btree_json_only);
     }
     if (dump_btree) {
-        const auto trace_path = write_btree_trace_json(solution, output);
-        const int render_status =
-            render_btree_png(trace_path, output, btree_renderer_script_path(), render_dpi, render_btree_name);
-        if (render_status != 0) return 1;
+        if (!solution.btree_trace_json.has_value()) {
+            std::cerr << "warning: final B* tree trace is not available; skip btree dump\n";
+        } else {
+            const auto trace_path = write_btree_trace_json(solution, output);
+            const int btree_status =
+                render_btree_png(trace_path, output, btree_renderer_script_path(), render_dpi, render_btree_name);
+            if (btree_status != 0) return 1;
+        }
     }
     const auto metrics = solution.metrics.value_or(sapr::measure(circuit, solution));
+    write_metrics_json(solution, metrics, output);
     std::cout << std::fixed << std::setprecision(2)
               << "{\n"
               << "  \"area\": " << metrics.area << ",\n"

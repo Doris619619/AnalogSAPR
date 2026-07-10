@@ -115,6 +115,13 @@ OK
 
 未指定 `--boundary-margin` 时，程序按最大线宽的一半、边界 clearance 和两倍有效网格步长自动估算；该参数独立于器件间 `--spacing`。
 
+布线金属层数默认仅 `M1`（`--routing-layers 1`），避免高层逃逸掩盖 placement/拓扑问题。需要有限 via 或恢复旧多层行为时：
+
+```powershell
+.\build\sapr.exe run --input input --output output --routing-layers 3
+.\build\sapr.exe run --input input --output output --routing-layers 7
+```
+
 需要查看 routing/packing 联合评估细节时，可以追加：
 
 ```powershell
@@ -125,7 +132,9 @@ OK
 
 - `output/placement.txt`：器件放置位置、角度和朝向。
 - `output/routing.txt`：线网、金属层、中心线坐标和线宽。
-- `output/*_layout.png`：布局和布线可视化图，默认每次运行都会生成。
+- `output/*_layout.png`：全层合并的布局布线可视化图，默认每次运行都会生成。
+- `output/*_layout_M*.png`：当 `routing.txt` 含多层时，额外按金属层各生成一张（仅该层走线 + 全部器件/pin）。
+- `output/metrics.json`：基础指标与 `routing_evaluation` 摘要。
 - `output/routing_debug.json`：routing/LCP/DP/detailed routing 诊断快照，默认每次运行都会生成。
 - 标准输出：面积、线长、bend、via 和 penalty 指标。
 - `--dump-routing-eval` 仅额外在标准输出打印：phi cost、routing cost、DP 状态数、packing trace 步数、packing-time DP segment 数、space feedback 节点数和 routing feedback 收敛信息。
@@ -164,7 +173,10 @@ IO/
 └── output/
     ├── placement.txt      # 器件放置位置 + 角度 + orient
     ├── routing.txt        # 走线中心线段 + 金属层 + 线宽
-    ├── *_layout.png       # 每次 run 自动生成的布局布线图
+    ├── *_layout.png       # 全层合并布局布线图
+    ├── *_layout_M*.png    # 多层时按层分图（可选）
+    ├── metrics.json       # 指标与 routing_evaluation 摘要
+    ├── routing_debug.json # 布线诊断详情
     └── routing_debug.json # 每次 run 自动生成的 routing 诊断快照
 ```
 

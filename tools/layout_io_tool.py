@@ -40,7 +40,7 @@ def run_render_io(args: argparse.Namespace) -> int:
     from render_layout import render_layout
 
     render_name = args.name or args.output.name or "layout"
-    out_path = render_layout(
+    out_paths = render_layout(
         input_dir=args.input,
         output_dir=args.output,
         render_name=render_name,
@@ -48,7 +48,8 @@ def run_render_io(args: argparse.Namespace) -> int:
         show_labels=not args.no_labels,
         show_pins=not args.no_pins,
     )
-    print(os.fspath(out_path))
+    for out_path in out_paths:
+        print(os.fspath(out_path))
     return 0
 
 

@@ -68,15 +68,25 @@ bool route_matches_group(const RouteSegment& route, RouteOrientation orientation
 RouteSegment route_from_interval(const MergeGroup& group, const MergeInterval& interval) {
     RouteSegment route = group.sample;
     if (group.orientation == RouteOrientation::Horizontal) {
-        route.x1 = interval.begin;
         route.y1 = group.fixed;
-        route.x2 = interval.end;
         route.y2 = group.fixed;
+        if (group.sample.x1 <= group.sample.x2) {
+            route.x1 = interval.begin;
+            route.x2 = interval.end;
+        } else {
+            route.x1 = interval.end;
+            route.x2 = interval.begin;
+        }
     } else {
         route.x1 = group.fixed;
-        route.y1 = interval.begin;
         route.x2 = group.fixed;
-        route.y2 = interval.end;
+        if (group.sample.y1 <= group.sample.y2) {
+            route.y1 = interval.begin;
+            route.y2 = interval.end;
+        } else {
+            route.y1 = interval.end;
+            route.y2 = interval.begin;
+        }
     }
     return route;
 }
