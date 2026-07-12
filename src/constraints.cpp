@@ -27,10 +27,19 @@ std::vector<std::string> validate_circuit(const Circuit& circuit) {
     for (const auto& pair : circuit.constraints.symmetry_pairs) {
         if (!circuit.modules.contains(pair.left)) errors.push_back("symmetry pair " + pair.name + " references missing module " + pair.left);
         if (!circuit.modules.contains(pair.right)) errors.push_back("symmetry pair " + pair.name + " references missing module " + pair.right);
+        if (pair.axis != Axis::Vertical) errors.push_back("symmetry pair " + pair.name + " uses unsupported horizontal symmetry; only vertical symmetry is supported");
     }
     for (const auto& self : circuit.constraints.symmetry_selfs) {
         if (!circuit.modules.contains(self.module)) errors.push_back("symmetry self " + self.name + " references missing module " + self.module);
+        if (self.axis != Axis::Vertical) errors.push_back("symmetry self " + self.name + " uses unsupported horizontal symmetry; only vertical symmetry is supported");
     }
+    std::unordered_map<std::string, Axis> symmetry_group_axis;
+    auto check_group_axis = [&](const std::string& name, Axis axis) {
+        const auto [found, inserted] = symmetry_group_axis.emplace(name, axis);
+        if (!inserted && found->second != axis) errors.push_back("symmetry group " + name + " mixes vertical and horizontal axes");
+    };
+    for (const auto& pair : circuit.constraints.symmetry_pairs) check_group_axis(pair.name, pair.axis);
+    for (const auto& self : circuit.constraints.symmetry_selfs) check_group_axis(self.name, self.axis);
     for (const auto& flow : circuit.constraints.flows) {
         if (!circuit.nets.contains(flow.net)) errors.push_back("flow references missing net " + flow.net);
         if (!circuit.pins.contains(flow.out_pin)) errors.push_back("flow " + flow.net + " references missing out pin " + flow.out_pin);

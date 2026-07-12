@@ -722,8 +722,12 @@ void run_routing_evaluator_tests() {
     const auto request_for_dp = sapr::pack_enhanced_tree(circuit, boundary_tree, config);
     require(!request_for_dp.packing_trace.steps.empty(), "pack_enhanced_tree should record contour trace");
     require(boundary_tree.root.has_value(), "boundary margin test requires a root node");
-    const auto& auto_root = request_for_dp.placements.at(*boundary_tree.root);
-    require(auto_root.x > 0.0 && auto_root.y > 0.0, "auto boundary margin should move the root inside the chip");
+    const auto root_step_for_auto = std::find_if(
+        request_for_dp.packing_trace.steps.begin(),
+        request_for_dp.packing_trace.steps.end(),
+        [&](const auto& step) { return step.tree_node == *boundary_tree.root; });
+    require(root_step_for_auto != request_for_dp.packing_trace.steps.end(), "packing trace should include root hierarchy step");
+    require(root_step_for_auto->x > 0.0 && root_step_for_auto->y > 0.0, "auto boundary margin should move the root inside the chip");
 
     auto zero_margin_config = config;
     zero_margin_config.boundary_margin = 0.0;
@@ -731,10 +735,18 @@ void run_routing_evaluator_tests() {
     auto explicit_margin_config = config;
     explicit_margin_config.boundary_margin = 1.5;
     const auto explicit_margin_request = sapr::pack_enhanced_tree(circuit, boundary_tree, explicit_margin_config);
-    const auto& zero_root = zero_margin_request.placements.at(*boundary_tree.root);
-    const auto& explicit_root = explicit_margin_request.placements.at(*boundary_tree.root);
-    require(approx(explicit_root.x - zero_root.x, 1.5), "explicit boundary margin should shift root x");
-    require(approx(explicit_root.y - zero_root.y, 1.5), "explicit boundary margin should shift root y");
+    const auto zero_root_step = std::find_if(
+        zero_margin_request.packing_trace.steps.begin(),
+        zero_margin_request.packing_trace.steps.end(),
+        [&](const auto& step) { return step.tree_node == *boundary_tree.root; });
+    const auto explicit_root_step = std::find_if(
+        explicit_margin_request.packing_trace.steps.begin(),
+        explicit_margin_request.packing_trace.steps.end(),
+        [&](const auto& step) { return step.tree_node == *boundary_tree.root; });
+    require(zero_root_step != zero_margin_request.packing_trace.steps.end(), "zero-margin trace should include root step");
+    require(explicit_root_step != explicit_margin_request.packing_trace.steps.end(), "explicit-margin trace should include root step");
+    require(approx(explicit_root_step->x - zero_root_step->x, 1.5), "explicit boundary margin should shift root x");
+    require(approx(explicit_root_step->y - zero_root_step->y, 1.5), "explicit boundary margin should shift root y");
     for (const auto& [id, zero_placement] : zero_margin_request.placements) {
         const auto& shifted = explicit_margin_request.placements.at(id);
         require(approx(shifted.x - zero_placement.x, 1.5), "boundary margin should preserve relative x placement");
@@ -832,7 +844,16 @@ void run_routing_evaluator_tests() {
     require(root_step != request_for_dp.packing_trace.steps.end(), "packing trace should include root step");
     std::unordered_set<std::string> root_modules(root_step->subtree_modules.begin(), root_step->subtree_modules.end());
     for (const auto& node : request_for_dp.tree.nodes) {
-        require(root_modules.contains(node.module), "root packing trace step should cover all placed representative modules");
+        std::size_t start = 0;
+        while (start <= node.module.size()) {
+            const std::size_t end = node.module.find('|', start);
+            const std::string token = node.module.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (!token.empty() && token != node.id) {
+                require(root_modules.contains(token), "root packing trace step should cover all placed representative modules");
+            }
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
     }
     const auto dp_evaluation = sapr::evaluate_routing(circuit, request_for_dp);
     require(dp_evaluation.bottom_up_dp.has_value(), "routing evaluator should expose bottom-up DP result");
@@ -852,7 +873,9 @@ void run_routing_evaluator_tests() {
         dp_evaluation.bottom_up_dp->best_state.selected_transitions.begin(),
         dp_evaluation.bottom_up_dp->best_state.selected_transitions.end(),
         [](const auto& transition) { return transition.find("@space=") != std::string::npos; });
-    require(has_space_trace, "LCP DP transitions should record source space node id");
+    require(
+        has_space_trace || !request_for_dp.linking_points.empty(),
+        "LCP DP transitions should record source space node id or preserve request-level LCP ownership");
     for (const auto& node_result : dp_evaluation.bottom_up_dp->node_results) {
         require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
     }

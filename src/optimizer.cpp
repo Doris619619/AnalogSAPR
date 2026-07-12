@@ -530,9 +530,9 @@ std::string make_routing_debug_json(
 }
 
 // 返回指定模块是否是对称 pair 的代表模块。
-const SymmetryGroupNode* symmetry_pair_for_representative(const EnhancedBStarTree& tree, const std::string& module) {
+const SymmetryGroupNode* symmetry_group_for_hierarchy(const EnhancedBStarTree& tree, const std::string& hierarchy) {
     for (const auto& group : tree.symmetry_groups) {
-        if (!group.self_symmetric && group.representative == module) return &group;
+        if (group.hierarchy_node_id == hierarchy) return &group;
     }
     return nullptr;
 }
@@ -548,20 +548,15 @@ std::pair<double, double> occupied_size(
     const EnhancedBStarTree& tree,
     const BStarNode& node,
     const SolverConfig& config) {
+    (void)tree;
+    (void)config;
+    if (node.kind == BStarNodeKind::Hierarchy) {
+        return {0.0, 0.0};
+    }
     auto size = module_size(circuit, node.module, node.angle);
     const double right_space = node.right_space.required_space();
     const double top_space = node.top_space.required_space();
-    const auto* group = symmetry_pair_for_representative(tree, node.module);
-    if (group == nullptr || !group->mirror.has_value()) return {size.first + right_space, size.second + top_space};
-
-    const auto mirror_size = module_size(circuit, *group->mirror, node.angle);
-    const double gap = std::max(config.spacing, right_space + group->space_cluster.required_space());
-    if (group->axis == Axis::Vertical) {
-        return {size.first + gap + mirror_size.first + group->space_group.required_space(),
-                std::max(size.second, mirror_size.second) + top_space};
-    }
-    return {std::max(size.first, mirror_size.first) + right_space,
-            size.second + gap + mirror_size.second + group->space_group.required_space()};
+    return {size.first + right_space, size.second + top_space};
 }
 
 // 返回 contour 在指定 x 区间内的最高 y。
@@ -586,25 +581,202 @@ std::string orient_for_angle(int angle) {
 }
 
 // 生成对称 pair 中镜像模块的 placement。
-Placement mirror_placement(
-    const Circuit& circuit,
-    const EnhancedBStarTree& tree,
-    const BStarNode& node,
-    const Placement& representative,
-    const SolverConfig& config) {
-    const auto* group = symmetry_pair_for_representative(tree, node.module);
-    if (group == nullptr || !group->mirror.has_value()) return representative;
-    const auto rep_size = module_size(circuit, node.module, representative.angle);
-    const double gap = std::max(config.spacing, node.right_space.required_space() + group->space_cluster.required_space());
-    Placement mirror{*group->mirror, representative.x, representative.y, representative.angle, representative.orient};
-    if (group->axis == Axis::Vertical) {
-        mirror.x = representative.x + rep_size.first + gap;
-        mirror.orient = "MY";
-    } else {
-        mirror.y = representative.y + rep_size.second + gap;
-        mirror.orient = "MX";
+struct AsfPackingResult {
+    std::unordered_map<std::string, Placement> placements;
+    std::vector<SpaceNode> space_nodes;
+    PackingContourTrace trace;
+    Rect bbox;
+    std::vector<std::string> stored_modules;
+};
+
+double required_space_for_group(const SpaceNodeGroup& group) {
+    double result = 0.0;
+    for (const auto& space : group.spaces) result = std::max(result, space.required_space());
+    return result;
+}
+
+double required_space_for_cluster(const std::optional<SpaceNodeCluster>& cluster) {
+    if (!cluster.has_value()) return 0.0;
+    double result = 0.0;
+    for (const auto& space : cluster->spaces) result = std::max(result, space.required_space());
+    return result;
+}
+
+std::pair<double, double> asf_node_occupied_size(const Circuit& circuit, const AsfBStarNode& node, const SolverConfig& config) {
+    const auto size = module_size(circuit, node.module, node.angle);
+    const double outer = node.space_node_groups.empty() ? 0.0 : required_space_for_group(node.space_node_groups.front());
+    const double top = node.space_node_groups.size() < 2 ? 0.0 : required_space_for_group(node.space_node_groups[1]);
+    const double cluster = required_space_for_cluster(node.space_node_cluster);
+    return {size.first + std::max({outer, cluster, config.spacing}), size.second + std::max(top, config.spacing)};
+}
+
+Rect placement_rect(const Circuit& circuit, const Placement& placement) {
+    const auto size = placed_size(circuit.modules.at(placement.module), placement);
+    return {placement.x, placement.y, placement.x + size.first, placement.y + size.second};
+}
+
+void translate_rect(Rect& rect, double dx, double dy) {
+    rect.x1 += dx;
+    rect.y1 += dy;
+    rect.x2 += dx;
+    rect.y2 += dy;
+}
+
+void translate_asf_result(AsfPackingResult& result, double dx, double dy) {
+    for (auto& [_, placement] : result.placements) {
+        placement.x += dx;
+        placement.y += dy;
     }
-    return mirror;
+    translate_rect(result.bbox, dx, dy);
+    for (auto& space : result.space_nodes) {
+        if (space.physical_region.has_value()) translate_rect(*space.physical_region, dx, dy);
+    }
+    for (auto& step : result.trace.steps) {
+        step.x += dx;
+        step.y += dy;
+        step.desired_x += dx;
+        step.desired_y += dy;
+        step.contour_y += dy;
+        translate_rect(step.occupied_bbox, dx, dy);
+    }
+}
+
+void set_region(SpaceNode& space, const Rect& region) {
+    constexpr double kMinRegionWidth = 1.0;
+    Rect fixed = region;
+    if (fixed.x2 < fixed.x1) std::swap(fixed.x1, fixed.x2);
+    if (fixed.y2 < fixed.y1) std::swap(fixed.y1, fixed.y2);
+    if (fixed.x2 - fixed.x1 < 1e-9) fixed.x2 = fixed.x1 + kMinRegionWidth;
+    if (fixed.y2 - fixed.y1 < 1e-9) fixed.y2 = fixed.y1 + kMinRegionWidth;
+    space.physical_region = fixed;
+}
+
+void append_asf_spaces_for_node(
+    const Circuit& circuit,
+    const AsfBStarNode& source_node,
+    const std::unordered_map<std::string, Placement>& placements,
+    std::vector<SpaceNode>& spaces) {
+    const Rect rep = placement_rect(circuit, placements.at(source_node.module));
+    const Rect mirror = source_node.mirror_module.has_value()
+                            ? placement_rect(circuit, placements.at(*source_node.mirror_module))
+                            : rep;
+    const double outer_width = source_node.space_node_groups.empty() ? 1.0 : std::max(1.0, required_space_for_group(source_node.space_node_groups.front()));
+    const double top_width = source_node.space_node_groups.size() < 2 ? 1.0 : std::max(1.0, required_space_for_group(source_node.space_node_groups[1]));
+    const double cluster_width = std::max(1.0, required_space_for_cluster(source_node.space_node_cluster));
+
+    if (!source_node.space_node_groups.empty()) {
+        auto group = source_node.space_node_groups.front();
+        if (group.spaces.size() >= 2) {
+            set_region(group.spaces[0], Rect{rep.x2, rep.y1, rep.x2 + outer_width, rep.y2});
+            set_region(group.spaces[1], Rect{mirror.x1 - outer_width, mirror.y1, mirror.x1, mirror.y2});
+        }
+        spaces.insert(spaces.end(), group.spaces.begin(), group.spaces.end());
+    }
+    if (source_node.space_node_groups.size() >= 2) {
+        auto group = source_node.space_node_groups[1];
+        if (group.spaces.size() >= 2) {
+            set_region(group.spaces[0], Rect{rep.x1, rep.y2, rep.x2, rep.y2 + top_width});
+            set_region(group.spaces[1], Rect{mirror.x1, mirror.y2, mirror.x2, mirror.y2 + top_width});
+        }
+        spaces.insert(spaces.end(), group.spaces.begin(), group.spaces.end());
+    }
+    if (source_node.space_node_cluster.has_value()) {
+        auto cluster = *source_node.space_node_cluster;
+        if (cluster.spaces.size() >= 4) {
+            const double axis_x = 0.0;
+            set_region(cluster.spaces[0], Rect{axis_x, rep.y1, rep.x1, rep.y2});
+            set_region(cluster.spaces[1], Rect{mirror.x2, mirror.y1, axis_x, mirror.y2});
+            set_region(cluster.spaces[2], Rect{rep.x1, rep.y2, rep.x2, rep.y2 + cluster_width});
+            set_region(cluster.spaces[3], Rect{mirror.x1, mirror.y2, mirror.x2, mirror.y2 + cluster_width});
+        }
+        spaces.insert(spaces.end(), cluster.spaces.begin(), cluster.spaces.end());
+    }
+}
+
+AsfPackingResult pack_asf_bstar_tree(const Circuit& circuit, const SymmetryGroupNode& group, const SolverConfig& config) {
+    AsfPackingResult result;
+    result.stored_modules = group.stored_modules;
+    const auto& asf = group.asf_bstar_tree;
+    if (!asf.root.has_value()) return result;
+
+    std::vector<PackedRect> packed;
+    std::unordered_set<std::string> visited;
+    std::function<void(const std::string&, double, double)> place_node = [&](const std::string& id, double desired_x, double desired_y) {
+        if (visited.contains(id)) return;
+        visited.insert(id);
+        const auto& node = asf.nodes.at(id);
+        const auto occupied = asf_node_occupied_size(circuit, node, config);
+        const double x = desired_x;
+        const double contour_y = contour_height(packed, x, occupied.first);
+        const double y = std::max(desired_y, contour_y);
+        Placement placement{id, x, y, node.angle, orient_for_angle(node.angle)};
+        result.placements[id] = placement;
+        const auto rep_size = module_size(circuit, id, node.angle);
+        if (node.mirror_module.has_value()) {
+            const auto mirror_size = module_size(circuit, *node.mirror_module, node.angle);
+            Placement mirror{*node.mirror_module, -x - mirror_size.first, y, node.angle, "MY"};
+            (void)rep_size;
+            result.placements[*node.mirror_module] = mirror;
+        }
+
+        std::vector<std::string> step_modules{id};
+        if (node.mirror_module.has_value()) step_modules.push_back(*node.mirror_module);
+        std::optional<std::string> left_trace;
+        std::optional<std::string> right_trace;
+        if (node.left.has_value()) left_trace = "asf:" + group.name + "/" + *node.left;
+        if (node.right.has_value()) right_trace = "asf:" + group.name + "/" + *node.right;
+        const double group_space = [&]() {
+            double value = 0.0;
+            for (const auto& space_node_group : node.space_node_groups) value += required_space_for_group(space_node_group);
+            value += required_space_for_cluster(node.space_node_cluster);
+            return value;
+        }();
+        result.trace.steps.push_back(PackingContourStep{
+            "asf:" + group.name + "/" + id,
+            id,
+            x,
+            y,
+            Rect{x, y, x + occupied.first, y + occupied.second},
+            desired_x,
+            desired_y,
+            contour_y,
+            group_space,
+            0.0,
+            0.0,
+            left_trace,
+            right_trace,
+            step_modules,
+            {},
+            {},
+        });
+        packed.push_back({x, y, x + occupied.first, y + occupied.second});
+        if (node.left.has_value()) place_node(*node.left, x + occupied.first + config.spacing, y);
+        if (node.right.has_value()) place_node(*node.right, x, y + occupied.second + config.spacing);
+    };
+
+    const double axis_clearance = std::max(1.0, config.spacing);
+    place_node(*asf.root, axis_clearance, 0.0);
+
+    bool first = true;
+    Rect bbox{};
+    for (const auto& [module, placement] : result.placements) {
+        const Rect rect = placement_rect(circuit, placement);
+        if (first) {
+            bbox = rect;
+            first = false;
+        } else {
+            bbox.x1 = std::min(bbox.x1, rect.x1);
+            bbox.y1 = std::min(bbox.y1, rect.y1);
+            bbox.x2 = std::max(bbox.x2, rect.x2);
+            bbox.y2 = std::max(bbox.y2, rect.y2);
+        }
+    }
+    result.bbox = bbox;
+    for (const auto& id : asf.representative_order) {
+        append_asf_spaces_for_node(circuit, asf.nodes.at(id), result.placements, result.space_nodes);
+    }
+    translate_asf_result(result, -result.bbox.x1, -result.bbox.y1);
+    return result;
 }
 
 // 按原始模块顺序整理输出顺序，保证文件稳定。
@@ -621,7 +793,17 @@ RoutingTreeSnapshot make_routing_tree_snapshot(const EnhancedBStarTree& tree) {
     RoutingTreeSnapshot snapshot;
     snapshot.root = tree.root;
     for (const auto& [id, node] : tree.nodes) {
-        snapshot.nodes.push_back(RoutingTreeNodeRef{id, node.module, node.left, node.right});
+        std::string module = node.module;
+        if (node.kind == BStarNodeKind::Hierarchy) {
+            const auto* group = symmetry_group_for_hierarchy(tree, id);
+            if (group != nullptr) {
+                for (const auto& stored : group->stored_modules) {
+                    if (!module.empty()) module += "|";
+                    module += stored;
+                }
+            }
+        }
+        snapshot.nodes.push_back(RoutingTreeNodeRef{id, module, node.left, node.right});
     }
     return snapshot;
 }
@@ -632,7 +814,14 @@ std::vector<std::string> subtree_modules_for_trace(const EnhancedBStarTree& tree
     std::vector<std::string> modules;
     const auto found = tree.nodes.find(id);
     if (found == tree.nodes.end()) return modules;
-    modules.push_back(found->second.module.empty() ? id : found->second.module);
+    if (found->second.kind == BStarNodeKind::Hierarchy) {
+        const auto* group = symmetry_group_for_hierarchy(tree, id);
+        if (group != nullptr) {
+            modules.insert(modules.end(), group->stored_modules.begin(), group->stored_modules.end());
+        }
+    } else {
+        modules.push_back(found->second.module.empty() ? id : found->second.module);
+    }
     if (found->second.left.has_value()) {
         auto left = subtree_modules_for_trace(tree, *found->second.left);
         modules.insert(modules.end(), left.begin(), left.end());
@@ -681,6 +870,13 @@ std::unordered_set<std::string> module_set_for_trace(const std::vector<std::stri
     return {modules.begin(), modules.end()};
 }
 
+std::string raw_tree_id_for_trace(const std::string& id) {
+    constexpr const char* kGlobalPrefix = "global:";
+    const std::string prefix{kGlobalPrefix};
+    if (id.rfind(prefix, 0) == 0) return id.substr(prefix.size());
+    return id;
+}
+
 bool segment_inside_trace_modules(
     const WireSegmentRef& segment,
     const std::unordered_set<std::string>& modules,
@@ -707,10 +903,10 @@ void annotate_packing_time_segments(const EnhancedBStarTree& tree, RoutingEvalua
     for (auto& step : request.packing_trace.steps) {
         const auto current_modules = module_set_for_trace(step.subtree_modules);
         const auto left_modules = step.left.has_value()
-                                      ? module_set_for_trace(subtree_modules_for_trace(tree, *step.left))
+                                      ? module_set_for_trace(subtree_modules_for_trace(tree, raw_tree_id_for_trace(*step.left)))
                                       : std::unordered_set<std::string>{};
         const auto right_modules = step.right.has_value()
-                                       ? module_set_for_trace(subtree_modules_for_trace(tree, *step.right))
+                                       ? module_set_for_trace(subtree_modules_for_trace(tree, raw_tree_id_for_trace(*step.right)))
                                        : std::unordered_set<std::string>{};
         for (const auto& topology : request.net_topologies) {
             for (const auto& segment : topology.segments) {
@@ -746,6 +942,7 @@ void assign_space_physical_regions(
     const SolverConfig& config) {
     constexpr double kMinRegionWidth = 1.0;
     for (auto& space : request.space_nodes) {
+        if (space.physical_region.has_value()) continue;
         if (space.owner.empty() || !request.placements.contains(space.owner) || !circuit.modules.contains(space.owner)) {
             space.physical_region = Rect{0.0, 0.0, kMinRegionWidth, kMinRegionWidth};
             continue;
@@ -813,14 +1010,21 @@ void write_request_lcps_to_tree(EnhancedBStarTree& tree, const RoutingEvaluation
     };
     for (auto& [id, node] : tree.nodes) {
         (void)id;
-        clear_space(node.right_space);
-        clear_space(node.top_space);
+        if (node.kind == BStarNodeKind::Module) {
+            clear_space(node.right_space);
+            clear_space(node.top_space);
+        }
     }
     for (auto& group : tree.symmetry_groups) {
-        clear_space(group.space_group);
-        clear_space(group.space_cluster);
-        for (auto& space : group.space_group_bundle.spaces) clear_space(space);
-        for (auto& space : group.space_cluster_bundle.spaces) clear_space(space);
+        for (auto& [id, node] : group.asf_bstar_tree.nodes) {
+            (void)id;
+            for (auto& space_node_group : node.space_node_groups) {
+                for (auto& space : space_node_group.spaces) clear_space(space);
+            }
+            if (node.space_node_cluster.has_value()) {
+                for (auto& space : node.space_node_cluster->spaces) clear_space(space);
+            }
+        }
     }
 
     auto copy_if_matching = [](SpaceNode& target, const SpaceNode& source) {
@@ -831,14 +1035,21 @@ void write_request_lcps_to_tree(EnhancedBStarTree& tree, const RoutingEvaluation
     for (const auto& source : request.space_nodes) {
         for (auto& [id, node] : tree.nodes) {
             (void)id;
-            copy_if_matching(node.right_space, source);
-            copy_if_matching(node.top_space, source);
+            if (node.kind == BStarNodeKind::Module) {
+                copy_if_matching(node.right_space, source);
+                copy_if_matching(node.top_space, source);
+            }
         }
         for (auto& group : tree.symmetry_groups) {
-            copy_if_matching(group.space_group, source);
-            copy_if_matching(group.space_cluster, source);
-            for (auto& space : group.space_group_bundle.spaces) copy_if_matching(space, source);
-            for (auto& space : group.space_cluster_bundle.spaces) copy_if_matching(space, source);
+            for (auto& [id, node] : group.asf_bstar_tree.nodes) {
+                (void)id;
+                for (auto& space_node_group : node.space_node_groups) {
+                    for (auto& space : space_node_group.spaces) copy_if_matching(space, source);
+                }
+                if (node.space_node_cluster.has_value()) {
+                    for (auto& space : node.space_node_cluster->spaces) copy_if_matching(space, source);
+                }
+            }
         }
     }
 }
@@ -1052,6 +1263,13 @@ void translate_packing_request(RoutingEvaluationRequest& request, double offset)
         step.occupied_bbox.x2 += offset;
         step.occupied_bbox.y2 += offset;
     }
+    for (auto& space : request.space_nodes) {
+        if (!space.physical_region.has_value()) continue;
+        space.physical_region->x1 += offset;
+        space.physical_region->y1 += offset;
+        space.physical_region->x2 += offset;
+        space.physical_region->y2 += offset;
+    }
 }
 
 // 计算 space node 内 LCP 所需的最大线宽，用于 fallback 后扩大预留空间。
@@ -1071,41 +1289,61 @@ RoutingEvaluationRequest pack_enhanced_tree(
     RoutingEvaluationRequest request;
     if (!tree.root.has_value()) return request;
 
+    std::unordered_map<std::string, AsfPackingResult> asf_results;
+    for (const auto& group : tree.symmetry_groups) {
+        asf_results[group.hierarchy_node_id] = pack_asf_bstar_tree(circuit, group, config);
+    }
+
     std::vector<PackedRect> packed;
     std::unordered_set<std::string> visited;
     std::function<void(const std::string&, double, double)> place_node = [&](const std::string& id, double desired_x, double desired_y) {
         if (visited.contains(id)) return;
         visited.insert(id);
         const auto& node = tree.nodes.at(id);
-        const auto occupied = occupied_size(circuit, tree, node, config);
+        std::pair<double, double> occupied = occupied_size(circuit, tree, node, config);
+        if (node.kind == BStarNodeKind::Hierarchy) {
+            const auto found = asf_results.find(node.hierarchy_group);
+            if (found != asf_results.end()) {
+                occupied = {found->second.bbox.width(), found->second.bbox.height()};
+            }
+        }
         const double x = desired_x;
         const double contour_y = contour_height(packed, x, occupied.first);
         const double y = std::max(desired_y, contour_y);
 
-        Placement placement{id, x, y, node.angle, orient_for_angle(node.angle)};
-        request.placements[id] = placement;
-        const auto* pair_group = symmetry_pair_for_representative(tree, id);
-        if (pair_group != nullptr && pair_group->mirror.has_value()) {
-            request.placements[*pair_group->mirror] = mirror_placement(circuit, tree, node, placement, config);
+        std::vector<std::string> subtree_modules = subtree_modules_for_trace(tree, id);
+        if (node.kind == BStarNodeKind::Module) {
+            Placement placement{node.module, x, y, node.angle, orient_for_angle(node.angle)};
+            request.placements[node.module] = placement;
+        } else {
+            auto found = asf_results.find(node.hierarchy_group);
+            if (found != asf_results.end()) {
+                auto local = found->second;
+                translate_asf_result(local, x, y);
+                for (const auto& [module, placement] : local.placements) request.placements[module] = placement;
+                request.space_nodes.insert(request.space_nodes.end(), local.space_nodes.begin(), local.space_nodes.end());
+            }
         }
-        const double group_coupling_space =
-            pair_group == nullptr ? 0.0 : pair_group->space_group.coupling_extra_space + pair_group->space_cluster.coupling_extra_space;
 
+        std::optional<std::string> left_trace;
+        std::optional<std::string> right_trace;
+        if (node.left.has_value()) left_trace = *node.left;
+        if (node.right.has_value()) right_trace = *node.right;
         request.packing_trace.steps.push_back(PackingContourStep{
             id,
-            node.module,
+            node.kind == BStarNodeKind::Module ? node.module : node.hierarchy_group,
             x,
             y,
             Rect{x, y, x + occupied.first, y + occupied.second},
             desired_x,
             desired_y,
             contour_y,
-            node.right_space.required_space(),
-            node.top_space.required_space(),
-            node.right_space.coupling_extra_space + node.top_space.coupling_extra_space + group_coupling_space,
-            node.left,
-            node.right,
-            subtree_modules_for_trace(tree, id),
+            node.kind == BStarNodeKind::Module ? node.right_space.required_space() : 0.0,
+            node.kind == BStarNodeKind::Module ? node.top_space.required_space() : 0.0,
+            node.kind == BStarNodeKind::Module ? node.right_space.coupling_extra_space + node.top_space.coupling_extra_space : 0.0,
+            left_trace,
+            right_trace,
+            subtree_modules,
             {},
             {},
         });
@@ -1125,11 +1363,16 @@ RoutingEvaluationRequest pack_enhanced_tree(
         layout_width = std::max(layout_width, rect.x2);
         layout_height = std::max(layout_height, rect.y2);
     }
+    for (const auto& id : tree.representative_order) {
+        const auto& node = tree.nodes.at(id);
+        if (node.kind != BStarNodeKind::Module) continue;
+        request.space_nodes.push_back(node.right_space);
+        request.space_nodes.push_back(node.top_space);
+    }
     translate_packing_request(
         request,
         resolve_boundary_margin(circuit, config, layout_width, layout_height));
     request.placement_order = ordered_placements(circuit, request);
-    request.space_nodes = collect_space_nodes(tree);
     request.lcp_candidate_seed = config.seed;
     request.routing_layers = config.routing_layers;
     assign_space_physical_regions(circuit, request, config);
