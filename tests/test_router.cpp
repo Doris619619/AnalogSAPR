@@ -135,6 +135,24 @@ void run_router_tests() {
         }
     }
 
+    const auto two_group_circuit = sapr::load_circuit(
+        std::filesystem::path(SAPR_SOURCE_DIR) / "cases" / "4ring_2_complex_symmetry_perturbed_2groups" / "input");
+    const auto two_group_tree = sapr::make_enhanced_tree(two_group_circuit);
+    require(sapr::is_valid_tree(two_group_tree), "two hierarchy nodes should form a valid global tree");
+    for (const auto& [id, node] : two_group_tree.nodes) {
+        (void)id;
+        require(!(node.left.has_value() && node.right.has_value() && node.left == node.right),
+                "global tree must not attach the same child as both left and right");
+    }
+    for (const auto& group : two_group_tree.symmetry_groups) {
+        require(!group.asf_bstar_tree.nodes.empty(), "multi-pair symmetry group should build a non-empty ASF tree");
+        for (const auto& [id, node] : group.asf_bstar_tree.nodes) {
+            (void)id;
+            require(!(node.left.has_value() && node.right.has_value() && node.left == node.right),
+                    "ASF tree must not attach the same child as both left and right");
+        }
+    }
+
     auto tree = sapr::make_enhanced_tree(circuit);
     require(sapr::is_valid_tree(tree), "enhanced tree should be valid");
     require(sapr::self_symmetry_on_rightmost_branch(tree), "self-symmetry module should stay on right-most branch");

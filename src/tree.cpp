@@ -174,9 +174,11 @@ void rebuild_asf_bstar_tree(AsfBStarTree& tree) {
     tree.root = ordinary.empty() ? self_nodes.front() : ordinary.front();
     if (ordinary.size() > 1) {
         const std::size_t split = (ordinary.size() + 1) / 2;
-        attach_child(tree, ordinary.front(), ordinary[1], true);
-        for (std::size_t index = 2; index < split; ++index) {
-            attach_child(tree, ordinary[index - 1], ordinary[index], true);
+        if (split > 1) {
+            attach_child(tree, ordinary.front(), ordinary[1], true);
+            for (std::size_t index = 2; index < split; ++index) {
+                attach_child(tree, ordinary[index - 1], ordinary[index], true);
+            }
         }
         if (split < ordinary.size()) {
             attach_child(tree, ordinary.front(), ordinary[split], false);
@@ -211,9 +213,11 @@ void rebuild_global_bstar_tree(EnhancedBStarTree& tree) {
     tree.root = order.front();
     if (order.size() > 1) {
         const std::size_t split = (order.size() + 1) / 2;
-        attach_child(tree, order.front(), order[1], true);
-        for (std::size_t index = 2; index < split; ++index) {
-            attach_child(tree, order[index - 1], order[index], true);
+        if (split > 1) {
+            attach_child(tree, order.front(), order[1], true);
+            for (std::size_t index = 2; index < split; ++index) {
+                attach_child(tree, order[index - 1], order[index], true);
+            }
         }
         if (split < order.size()) {
             attach_child(tree, order.front(), order[split], false);
