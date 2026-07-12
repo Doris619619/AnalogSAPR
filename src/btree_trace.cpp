@@ -190,7 +190,9 @@ std::string make_btree_trace_json(
         out << "    {\"id\": ";
         write_json_string(out, id);
         out << ", \"module\": ";
-        write_json_string(out, node.module);
+        write_json_string(out, node.kind == BStarNodeKind::Hierarchy ? node.hierarchy_group : node.module);
+        out << ", \"kind\": ";
+        write_json_string(out, node.kind == BStarNodeKind::Hierarchy ? "hierarchy" : "module");
         out << ", \"parent\": ";
         write_json_optional_string(out, node.parent);
         out << ", \"left\": ";

@@ -33,4 +33,15 @@ void run_constraint_tests() {
     invalid_flow.constraints.flows.front().out_pin = "M2.G";
     const auto flow_errors = sapr::validate_circuit(invalid_flow);
     require(!flow_errors.empty(), "flow pin outside net should be reported");
+
+    auto horizontal_symmetry = circuit;
+    horizontal_symmetry.constraints.symmetry_pairs.front().axis = sapr::Axis::Horizontal;
+    const auto horizontal_errors = sapr::validate_circuit(horizontal_symmetry);
+    require(!horizontal_errors.empty(), "horizontal symmetry should be rejected by the vertical-only ASF implementation");
+
+    auto mixed_axis_group = circuit;
+    mixed_axis_group.constraints.symmetry_selfs.front().name = mixed_axis_group.constraints.symmetry_pairs.front().name;
+    mixed_axis_group.constraints.symmetry_selfs.front().axis = sapr::Axis::Horizontal;
+    const auto mixed_axis_errors = sapr::validate_circuit(mixed_axis_group);
+    require(!mixed_axis_errors.empty(), "a symmetry group with mixed axes should be rejected");
 }

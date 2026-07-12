@@ -139,6 +139,17 @@ void append_unique(std::vector<std::string>& values, const std::string& value) {
     if (std::find(values.begin(), values.end(), value) == values.end()) values.push_back(value);
 }
 
+void append_tree_node_modules(std::vector<std::string>& values, const std::string& module_field) {
+    if (module_field.empty()) return;
+    std::size_t start = 0;
+    while (start <= module_field.size()) {
+        const std::size_t end = module_field.find('|', start);
+        append_unique(values, module_field.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+}
+
 bool contains_value(const std::vector<std::string>& values, const std::string& value) {
     return std::find(values.begin(), values.end(), value) != values.end();
 }
@@ -462,7 +473,18 @@ std::unordered_set<std::string> collect_subtree_modules(
     std::unordered_set<std::string> modules;
     const auto found = nodes.find(id);
     if (found == nodes.end()) return modules;
-    modules.insert(found->second.module.empty() ? found->second.id : found->second.module);
+    if (found->second.module.empty()) {
+        modules.insert(found->second.id);
+    } else {
+        std::size_t start = 0;
+        while (start <= found->second.module.size()) {
+            const std::size_t end = found->second.module.find('|', start);
+            const std::string token = found->second.module.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (!token.empty()) modules.insert(token);
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+    }
     if (found->second.left.has_value()) {
         const auto left = collect_subtree_modules(*found->second.left, nodes, cache);
         modules.insert(left.begin(), left.end());
@@ -544,7 +566,7 @@ std::vector<RoutingDpState> merge_child_states_for_node(
             if (trace_index_it != trace_index.index_by_node.end()) state.packing_step_index = trace_index_it->second;
             if (left != nullptr && !merge_child_state(state, *left, true)) continue;
             if (right != nullptr && !merge_child_state(state, *right, false)) continue;
-            append_unique(state.covered_terminals, node.module);
+            append_tree_node_modules(state.covered_terminals, node.module);
             merged.push_back(std::move(state));
         }
     }
@@ -555,7 +577,7 @@ std::vector<RoutingDpState> merge_child_states_for_node(
         if (trace_step != trace_index.step_by_node.end()) state.contour_y = trace_step->second->contour_y;
         const auto trace_index_it = trace_index.index_by_node.find(node.id);
         if (trace_index_it != trace_index.index_by_node.end()) state.packing_step_index = trace_index_it->second;
-        append_unique(state.covered_terminals, node.module);
+        append_tree_node_modules(state.covered_terminals, node.module);
         merged.push_back(std::move(state));
     }
     return merged;

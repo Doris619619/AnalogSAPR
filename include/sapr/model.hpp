@@ -324,13 +324,24 @@ struct SpaceNode {
 };
 
 // 表示 ASF 对称组中的一组镜像或轴间 space node。
-struct SpaceNodeBundle {
+struct SpaceNodeGroup {
+    std::string name;
     std::vector<SpaceNode> spaces;
 };
 
+struct SpaceNodeCluster {
+    std::string name;
+    std::vector<SpaceNode> spaces;
+};
+
+enum class BStarNodeKind { Module, Hierarchy };
+
 // 表示增强 B*-tree 的一个器件节点。
 struct BStarNode {
+    std::string id;
+    BStarNodeKind kind{BStarNodeKind::Module};
     std::string module;
+    std::string hierarchy_group;
     std::optional<std::string> parent;
     std::optional<std::string> left;
     std::optional<std::string> right;
@@ -339,23 +350,36 @@ struct BStarNode {
     SpaceNode top_space;
 };
 
+struct AsfBStarNode {
+    std::string module;
+    std::optional<std::string> mirror_module;
+    bool is_self_symmetric{};
+    std::optional<std::string> parent;
+    std::optional<std::string> left;
+    std::optional<std::string> right;
+    int angle{};
+    std::vector<SpaceNodeGroup> space_node_groups;
+    std::optional<SpaceNodeCluster> space_node_cluster;
+};
+
+struct AsfBStarTree {
+    std::string group_name;
+    Axis axis{Axis::Vertical};
+    std::optional<std::string> root;
+    std::unordered_map<std::string, AsfBStarNode> nodes;
+    std::vector<std::string> representative_order;
+    std::unordered_map<std::string, std::string> mirror_map;
+    std::vector<std::string> self_nodes;
+    std::vector<std::string> right_most_branch;
+};
+
 // 表示一个 ASF-B*-tree 对称组在主树中的层次约束摘要。
 struct SymmetryGroupNode {
     std::string name;
     Axis axis{Axis::Vertical};
-    std::string representative;
-    std::optional<std::string> mirror;
-    bool self_symmetric{};
+    AsfBStarTree asf_bstar_tree;
+    std::string hierarchy_node_id;
     std::vector<std::string> stored_modules;
-    std::optional<std::string> right_most_module;
-    SpaceNode space_group;
-    SpaceNode space_cluster;
-    std::vector<std::string> half_tree_nodes;
-    std::unordered_map<std::string, std::string> mirror_map;
-    std::vector<std::string> self_nodes;
-    std::vector<std::string> right_most_branch;
-    SpaceNodeBundle space_group_bundle;
-    SpaceNodeBundle space_cluster_bundle;
 };
 
 // 表示一条 net 在增强 B*-tree 中的 LCP 拓扑摘要。

@@ -1,44 +1,86 @@
-﻿// 文件职责：实现 enhanced B*-tree、ASF 对称约束、space node、LCP 扰动和真实二维 placement 扰动。
+// 文件职责：实现 enhanced B*-tree、vertical ASF-B*-tree、space node、LCP 扰动和 placement 扰动。
 #include "sapr/tree.hpp"
 
 #include <algorithm>
 #include <functional>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace sapr {
 namespace {
 
-// 创建一个带稳定候选容器的 space node。
 SpaceNode make_space_node(const std::string& id, const std::string& owner, SpaceNodeKind kind) {
     return {id, owner, kind, {}, 0.0, {}, 0.0, {}};
 }
 
-// 为对称组构造论文 Fig. 5 中的 mirrored space node group。
-SpaceNodeBundle make_space_group_bundle(const std::string& group_name, const std::string& owner) {
-    return {{{group_name + ":group:right_left", owner, SpaceNodeKind::Group, {}, 0.0, {}, 0.0, {}},
-             {group_name + ":group:top_pair", owner, SpaceNodeKind::Group, {}, 0.0, {}, 0.0, {}}}};
-}
-
-// 为对称组构造论文 Fig. 5 中的四空间 cluster。
-SpaceNodeBundle make_space_cluster_bundle(const std::string& group_name, const std::string& owner) {
-    return {{{group_name + ":cluster:left_right", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0, {}},
-             {group_name + ":cluster:left_top", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0, {}},
-             {group_name + ":cluster:right_right", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0, {}},
-             {group_name + ":cluster:right_top", owner, SpaceNodeKind::Cluster, {}, 0.0, {}, 0.0, {}}}};
-}
-
-// 为模块创建论文中的右侧和上侧 space node，并初始化触碰线网的 LCP 容器。
-BStarNode make_node(const Circuit& circuit, const std::string& module) {
-    (void)circuit;
+BStarNode make_module_node(const std::string& module) {
     BStarNode node;
+    node.id = module;
+    node.kind = BStarNodeKind::Module;
     node.module = module;
     node.right_space = make_space_node(module + ":right", module, SpaceNodeKind::Right);
     node.top_space = make_space_node(module + ":top", module, SpaceNodeKind::Top);
     return node;
 }
 
-// 将节点作为父节点的左或右孩子接入，并维护 parent 反向关系。
+BStarNode make_hierarchy_node(const std::string& group_name) {
+    BStarNode node;
+    node.id = group_name;
+    node.kind = BStarNodeKind::Hierarchy;
+    node.hierarchy_group = group_name;
+    return node;
+}
+
+SpaceNodeGroup make_space_node_group_outer(
+    const std::string& group_name,
+    const std::string& module,
+    const std::optional<std::string>& mirror) {
+    SpaceNodeGroup group;
+    group.name = group_name + "/" + module + ":space_node_group_outer";
+    group.spaces.push_back(make_space_node(group.name + ":representative_right", module, SpaceNodeKind::Group));
+    group.spaces.push_back(make_space_node(group.name + ":mirror_left", mirror.value_or(module), SpaceNodeKind::Group));
+    return group;
+}
+
+SpaceNodeGroup make_space_node_group_top(
+    const std::string& group_name,
+    const std::string& module,
+    const std::optional<std::string>& mirror) {
+    SpaceNodeGroup group;
+    group.name = group_name + "/" + module + ":space_node_group_top";
+    group.spaces.push_back(make_space_node(group.name + ":representative_top", module, SpaceNodeKind::Group));
+    group.spaces.push_back(make_space_node(group.name + ":mirror_top", mirror.value_or(module), SpaceNodeKind::Group));
+    return group;
+}
+
+SpaceNodeCluster make_space_node_cluster(
+    const std::string& group_name,
+    const std::string& module,
+    const std::optional<std::string>& mirror) {
+    SpaceNodeCluster cluster;
+    cluster.name = group_name + "/" + module + ":space_node_cluster";
+    cluster.spaces.push_back(make_space_node(cluster.name + ":representative_axis", module, SpaceNodeKind::Cluster));
+    cluster.spaces.push_back(make_space_node(cluster.name + ":mirror_axis", mirror.value_or(module), SpaceNodeKind::Cluster));
+    cluster.spaces.push_back(make_space_node(cluster.name + ":representative_top", module, SpaceNodeKind::Cluster));
+    cluster.spaces.push_back(make_space_node(cluster.name + ":mirror_top", mirror.value_or(module), SpaceNodeKind::Cluster));
+    return cluster;
+}
+
+AsfBStarNode make_asf_node(
+    const std::string& group_name,
+    const std::string& module,
+    const std::optional<std::string>& mirror,
+    bool self_symmetric) {
+    AsfBStarNode node;
+    node.module = module;
+    node.mirror_module = mirror;
+    node.is_self_symmetric = self_symmetric;
+    node.space_node_groups.push_back(make_space_node_group_outer(group_name, module, mirror));
+    node.space_node_groups.push_back(make_space_node_group_top(group_name, module, mirror));
+    return node;
+}
+
 void attach_child(EnhancedBStarTree& tree, const std::string& parent, const std::string& child, bool as_left) {
     if (as_left) {
         tree.nodes.at(parent).left = child;
@@ -48,20 +90,15 @@ void attach_child(EnhancedBStarTree& tree, const std::string& parent, const std:
     tree.nodes.at(child).parent = parent;
 }
 
-// 返回当前代表是否为自对称模块。
-bool is_self_module(const EnhancedBStarTree& tree, const std::string& module) {
-    for (const auto& group : tree.symmetry_groups) {
-        if (group.self_symmetric && group.representative == module) return true;
+void attach_child(AsfBStarTree& tree, const std::string& parent, const std::string& child, bool as_left) {
+    if (as_left) {
+        tree.nodes.at(parent).left = child;
+    } else {
+        tree.nodes.at(parent).right = child;
     }
-    return false;
+    tree.nodes.at(child).parent = parent;
 }
 
-// 判断节点是否允许普通 module move 直接移动。
-bool is_movable_module(const EnhancedBStarTree& tree, const std::string& module) {
-    return tree.nodes.contains(module) && !is_self_module(tree, module);
-}
-
-// 按当前真实树结构刷新稳定遍历顺序。
 void refresh_representative_order(EnhancedBStarTree& tree) {
     tree.representative_order.clear();
     if (!tree.root.has_value()) return;
@@ -76,7 +113,126 @@ void refresh_representative_order(EnhancedBStarTree& tree) {
     visit(*tree.root);
 }
 
-// 删除一个节点并把其子树接回原父节点，保证其余节点仍保持单根可达。
+void refresh_representative_order(AsfBStarTree& tree) {
+    tree.representative_order.clear();
+    if (!tree.root.has_value()) return;
+    std::unordered_set<std::string> seen;
+    std::function<void(const std::string&)> visit = [&](const std::string& id) {
+        if (!tree.nodes.contains(id) || !seen.insert(id).second) return;
+        tree.representative_order.push_back(id);
+        const auto& node = tree.nodes.at(id);
+        if (node.left.has_value()) visit(*node.left);
+        if (node.right.has_value()) visit(*node.right);
+    };
+    visit(*tree.root);
+}
+
+void refresh_right_most_branch(AsfBStarTree& tree) {
+    tree.right_most_branch.clear();
+    auto current = tree.root;
+    while (current.has_value() && tree.nodes.contains(*current)) {
+        tree.right_most_branch.push_back(*current);
+        current = tree.nodes.at(*current).right;
+    }
+}
+
+void refresh_space_node_clusters(AsfBStarTree& tree) {
+    std::unordered_set<std::string> right_branch(tree.right_most_branch.begin(), tree.right_most_branch.end());
+    for (auto& [id, node] : tree.nodes) {
+        if (right_branch.contains(id)) {
+            if (!node.space_node_cluster.has_value()) {
+                node.space_node_cluster = make_space_node_cluster(tree.group_name, node.module, node.mirror_module);
+            }
+        } else {
+            node.space_node_cluster.reset();
+        }
+    }
+}
+
+void rebuild_asf_bstar_tree(AsfBStarTree& tree) {
+    const auto old_order = tree.representative_order;
+    for (auto& [id, node] : tree.nodes) {
+        (void)id;
+        node.parent.reset();
+        node.left.reset();
+        node.right.reset();
+    }
+    tree.root.reset();
+
+    std::vector<std::string> ordinary;
+    std::vector<std::string> self_nodes;
+    for (const auto& id : old_order) {
+        if (!tree.nodes.contains(id)) continue;
+        if (tree.nodes.at(id).is_self_symmetric) {
+            self_nodes.push_back(id);
+        } else {
+            ordinary.push_back(id);
+        }
+    }
+    if (ordinary.empty() && self_nodes.empty()) return;
+
+    tree.root = ordinary.empty() ? self_nodes.front() : ordinary.front();
+    if (ordinary.size() > 1) {
+        const std::size_t split = (ordinary.size() + 1) / 2;
+        attach_child(tree, ordinary.front(), ordinary[1], true);
+        for (std::size_t index = 2; index < split; ++index) {
+            attach_child(tree, ordinary[index - 1], ordinary[index], true);
+        }
+        if (split < ordinary.size()) {
+            attach_child(tree, ordinary.front(), ordinary[split], false);
+            for (std::size_t index = split + 1; index < ordinary.size(); ++index) {
+                attach_child(tree, ordinary[index - 1], ordinary[index], true);
+            }
+        }
+    }
+
+    std::string right_parent = *tree.root;
+    while (tree.nodes.at(right_parent).right.has_value()) right_parent = *tree.nodes.at(right_parent).right;
+    for (const auto& self : self_nodes) {
+        if (self == right_parent) continue;
+        attach_child(tree, right_parent, self, false);
+        right_parent = self;
+    }
+    refresh_representative_order(tree);
+    refresh_right_most_branch(tree);
+    refresh_space_node_clusters(tree);
+}
+
+void rebuild_global_bstar_tree(EnhancedBStarTree& tree) {
+    const auto order = tree.representative_order;
+    for (auto& [id, node] : tree.nodes) {
+        (void)id;
+        node.parent.reset();
+        node.left.reset();
+        node.right.reset();
+    }
+    tree.root.reset();
+    if (order.empty()) return;
+    tree.root = order.front();
+    if (order.size() > 1) {
+        const std::size_t split = (order.size() + 1) / 2;
+        attach_child(tree, order.front(), order[1], true);
+        for (std::size_t index = 2; index < split; ++index) {
+            attach_child(tree, order[index - 1], order[index], true);
+        }
+        if (split < order.size()) {
+            attach_child(tree, order.front(), order[split], false);
+            for (std::size_t index = split + 1; index < order.size(); ++index) {
+                attach_child(tree, order[index - 1], order[index], true);
+            }
+        }
+    }
+    refresh_representative_order(tree);
+}
+
+bool asf_selfs_on_right_most_branch(const AsfBStarTree& tree) {
+    std::unordered_set<std::string> right_branch(tree.right_most_branch.begin(), tree.right_most_branch.end());
+    for (const auto& self : tree.self_nodes) {
+        if (!right_branch.contains(self)) return false;
+    }
+    return true;
+}
+
 void detach_node_preserving_children(EnhancedBStarTree& tree, const std::string& id) {
     auto& node = tree.nodes.at(id);
     const auto parent = node.parent;
@@ -109,7 +265,6 @@ void detach_node_preserving_children(EnhancedBStarTree& tree, const std::string&
     node.right.reset();
 }
 
-// 将 child 插入到 parent 的指定方向，原方向子树挂到 child 同侧。
 void insert_node_at_child(EnhancedBStarTree& tree, const std::string& parent, const std::string& child, bool as_left) {
     auto& child_node = tree.nodes.at(child);
     child_node.parent.reset();
@@ -128,7 +283,6 @@ void insert_node_at_child(EnhancedBStarTree& tree, const std::string& parent, co
     if (displaced.has_value()) tree.nodes.at(*displaced).parent = child;
 }
 
-// 判断 candidate 是否位于 root 到 target 的路径上，避免插入形成环。
 bool is_ancestor_of(const EnhancedBStarTree& tree, const std::string& candidate, const std::string& target) {
     auto current = tree.nodes.at(target).parent;
     while (current.has_value()) {
@@ -138,7 +292,6 @@ bool is_ancestor_of(const EnhancedBStarTree& tree, const std::string& candidate,
     return false;
 }
 
-// 通过两次安全的 delete-insert 交换节点位置，保持 module id 与物理语义一致。
 void swap_tree_positions(EnhancedBStarTree& tree, const std::string& first, const std::string& second) {
     if (first == second) return;
     if (is_ancestor_of(tree, first, second) || is_ancestor_of(tree, second, first)) {
@@ -160,82 +313,6 @@ void swap_tree_positions(EnhancedBStarTree& tree, const std::string& first, cons
     if (tree.nodes.contains(*first_parent)) insert_node_at_child(tree, *first_parent, second, first_as_left);
 }
 
-// 初始构造近似平衡二维 ordinary B*-tree，并把 self-symmetry 节点接到 right-most branch。
-void rebuild_asf_tree(EnhancedBStarTree& tree) {
-    std::vector<std::string> old_order = tree.representative_order;
-    for (auto& [id, node] : tree.nodes) {
-        (void)id;
-        node.parent.reset();
-        node.left.reset();
-        node.right.reset();
-    }
-    tree.root.reset();
-
-    std::vector<std::string> ordinary;
-    std::vector<std::string> selfs;
-    for (const auto& id : old_order) {
-        if (!tree.nodes.contains(id)) continue;
-        if (is_self_module(tree, id)) selfs.push_back(id);
-        else ordinary.push_back(id);
-    }
-    if (ordinary.empty() && selfs.empty()) return;
-
-    tree.root = ordinary.empty() ? selfs.front() : ordinary.front();
-    if (ordinary.size() > 1) {
-        const std::size_t split = (ordinary.size() + 1) / 2;
-        attach_child(tree, ordinary.front(), ordinary[1], true);
-        for (std::size_t index = 2; index < split; ++index) {
-            attach_child(tree, ordinary[index - 1], ordinary[index], true);
-        }
-        if (split < ordinary.size()) {
-            attach_child(tree, ordinary.front(), ordinary[split], false);
-            for (std::size_t index = split + 1; index < ordinary.size(); ++index) {
-                attach_child(tree, ordinary[index - 1], ordinary[index], true);
-            }
-        }
-    }
-
-    std::string right_parent = *tree.root;
-    while (tree.nodes.at(right_parent).right.has_value()) right_parent = *tree.nodes.at(right_parent).right;
-    for (const auto& self : selfs) {
-        if (self == right_parent) continue;
-        attach_child(tree, right_parent, self, false);
-        right_parent = self;
-    }
-    refresh_representative_order(tree);
-}
-
-// 只修复 ASF self-symmetry right-most branch，不改变 ordinary tree 的二维拓扑。
-void repair_asf_rightmost_branch(EnhancedBStarTree& tree) {
-    std::vector<std::string> selfs;
-    for (const auto& [id, _] : tree.nodes) {
-        if (is_self_module(tree, id)) selfs.push_back(id);
-    }
-    std::sort(selfs.begin(), selfs.end());
-    for (const auto& self : selfs) detach_node_preserving_children(tree, self);
-    if (!tree.root.has_value() && !selfs.empty()) tree.root = selfs.front();
-    if (tree.root.has_value()) {
-        std::string right_parent = *tree.root;
-        while (tree.nodes.at(right_parent).right.has_value()) right_parent = *tree.nodes.at(right_parent).right;
-        for (const auto& self : selfs) {
-            if (self == right_parent) continue;
-            attach_child(tree, right_parent, self, false);
-            right_parent = self;
-        }
-    }
-    refresh_representative_order(tree);
-}
-
-// 收集当前可移动 ordinary/代表节点。
-std::vector<std::string> movable_modules(const EnhancedBStarTree& tree) {
-    std::vector<std::string> result;
-    for (const auto& id : tree.representative_order) {
-        if (is_movable_module(tree, id)) result.push_back(id);
-    }
-    return result;
-}
-
-// 返回从 root 可达的代表节点数量。
 std::size_t reachable_count(const EnhancedBStarTree& tree) {
     if (!tree.root.has_value()) return 0;
     std::unordered_set<std::string> seen;
@@ -250,7 +327,6 @@ std::size_t reachable_count(const EnhancedBStarTree& tree) {
     return seen.size();
 }
 
-// 给匹配的 space node 写入 routing resource 反馈。
 bool update_space_node(SpaceNode& space, const RoutingFeedback& feedback) {
     const auto found = feedback.required_space_by_node.find(space.id);
     const auto coupling_found = feedback.coupling_space_by_node.find(space.id);
@@ -266,16 +342,45 @@ bool update_space_node(SpaceNode& space, const RoutingFeedback& feedback) {
     return updated;
 }
 
+void for_each_asf_space(AsfBStarNode& node, const std::function<void(SpaceNode&)>& visit) {
+    for (auto& group : node.space_node_groups) {
+        for (auto& space : group.spaces) visit(space);
+    }
+    if (node.space_node_cluster.has_value()) {
+        for (auto& space : node.space_node_cluster->spaces) visit(space);
+    }
+}
+
+void for_each_asf_space(const AsfBStarNode& node, const std::function<void(const SpaceNode&)>& visit) {
+    for (const auto& group : node.space_node_groups) {
+        for (const auto& space : group.spaces) visit(space);
+    }
+    if (node.space_node_cluster.has_value()) {
+        for (const auto& space : node.space_node_cluster->spaces) visit(space);
+    }
+}
+
+std::vector<std::string> movable_nodes(const EnhancedBStarTree& tree) {
+    std::vector<std::string> result;
+    for (const auto& id : tree.representative_order) {
+        if (tree.nodes.contains(id)) result.push_back(id);
+    }
+    return result;
+}
+
+struct GroupBuildState {
+    SymmetryGroupNode group;
+    std::vector<std::string> input_order;
+};
+
 }  // namespace
 
-// 返回该控制点需要的最大线宽。
 double LinkingControlPoint::required_width() const {
     double result = 0.0;
     for (const auto& segment : segments) result = std::max(result, segment.max_width);
     return result;
 }
 
-// 按论文公式计算该空间节点需要预留的宽度。
 double SpaceNode::required_space() const {
     double result = allocated_space + coupling_extra_space;
     double formula = 0.0;
@@ -285,7 +390,6 @@ double SpaceNode::required_space() const {
     return std::max(result, formula);
 }
 
-// 返回 space node 类型的稳定文本名称，供调试和测试使用。
 std::string space_kind_name(SpaceNodeKind kind) {
     switch (kind) {
         case SpaceNodeKind::Right: return "right";
@@ -296,62 +400,97 @@ std::string space_kind_name(SpaceNodeKind kind) {
     return "unknown";
 }
 
-// 按输入和约束构造增强 B*-tree，普通模块和对称代表进入主树。
 EnhancedBStarTree make_enhanced_tree(const Circuit& circuit) {
     EnhancedBStarTree tree;
-    std::unordered_set<std::string> mirrored_modules;
-    for (const auto& pair : circuit.constraints.symmetry_pairs) mirrored_modules.insert(pair.right);
+    std::unordered_map<std::string, GroupBuildState> groups_by_name;
+    std::vector<std::string> group_order;
+    std::unordered_set<std::string> grouped_modules;
 
-    for (const auto& module : circuit.module_order) {
-        if (mirrored_modules.contains(module)) continue;
-        tree.nodes[module] = make_node(circuit, module);
-        tree.representative_order.push_back(module);
-    }
+    auto ensure_group = [&](const std::string& name, Axis axis) -> GroupBuildState& {
+        auto [it, inserted] = groups_by_name.emplace(name, GroupBuildState{});
+        if (inserted) {
+            group_order.push_back(name);
+            it->second.group.name = name;
+            it->second.group.axis = axis;
+            it->second.group.hierarchy_node_id = name;
+            it->second.group.asf_bstar_tree.group_name = name;
+            it->second.group.asf_bstar_tree.axis = axis;
+        } else if (it->second.group.axis != axis) {
+            throw std::runtime_error("symmetry group " + name + " mixes axes");
+        }
+        if (axis != Axis::Vertical) {
+            throw std::runtime_error("only vertical symmetry is supported for ASF-B*-tree");
+        }
+        return it->second;
+    };
 
     for (const auto& pair : circuit.constraints.symmetry_pairs) {
-        tree.symmetry_groups.push_back({pair.name,
-                                        pair.axis,
-                                        pair.left,
-                                        pair.right,
-                                        false,
-                                        {pair.left},
-                                        std::nullopt,
-                                        make_space_node(pair.name + ":space_group", pair.left, SpaceNodeKind::Group),
-                                        make_space_node(pair.name + ":space_cluster", pair.left, SpaceNodeKind::Cluster),
-                                        {pair.left},
-                                        {{pair.left, pair.right}},
-                                        {},
-                                        {},
-                                        make_space_group_bundle(pair.name, pair.left),
-                                        make_space_cluster_bundle(pair.name, pair.left)});
+        auto& state = ensure_group(pair.name, pair.axis);
+        auto& asf = state.group.asf_bstar_tree;
+        asf.nodes[pair.left] = make_asf_node(pair.name, pair.left, pair.right, false);
+        asf.mirror_map[pair.left] = pair.right;
+        state.input_order.push_back(pair.left);
+        state.group.stored_modules.push_back(pair.left);
+        state.group.stored_modules.push_back(pair.right);
+        grouped_modules.insert(pair.left);
+        grouped_modules.insert(pair.right);
     }
     for (const auto& self : circuit.constraints.symmetry_selfs) {
-        tree.symmetry_groups.push_back({self.name,
-                                        self.axis,
-                                        self.module,
-                                        std::nullopt,
-                                        true,
-                                        {self.module},
-                                        self.module,
-                                        make_space_node(self.name + ":space_group", self.module, SpaceNodeKind::Group),
-                                        make_space_node(self.name + ":space_cluster", self.module, SpaceNodeKind::Cluster),
-                                        {self.module},
-                                        {},
-                                        {self.module},
-                                        {self.module},
-                                        make_space_group_bundle(self.name, self.module),
-                                        make_space_cluster_bundle(self.name, self.module)});
+        auto& state = ensure_group(self.name, self.axis);
+        auto& asf = state.group.asf_bstar_tree;
+        asf.nodes[self.module] = make_asf_node(self.name, self.module, std::nullopt, true);
+        asf.self_nodes.push_back(self.module);
+        state.input_order.push_back(self.module);
+        state.group.stored_modules.push_back(self.module);
+        grouped_modules.insert(self.module);
     }
 
-    rebuild_asf_tree(tree);
+    std::unordered_set<std::string> inserted_groups;
+    for (const auto& module : circuit.module_order) {
+        std::string group_for_module;
+        for (const auto& [name, state] : groups_by_name) {
+            if (std::find(state.group.stored_modules.begin(), state.group.stored_modules.end(), module) !=
+                state.group.stored_modules.end()) {
+                group_for_module = name;
+                break;
+            }
+        }
+        if (!group_for_module.empty()) {
+            if (inserted_groups.insert(group_for_module).second) {
+                tree.nodes[group_for_module] = make_hierarchy_node(group_for_module);
+                tree.representative_order.push_back(group_for_module);
+            }
+            continue;
+        }
+        if (!grouped_modules.contains(module)) {
+            tree.nodes[module] = make_module_node(module);
+            tree.representative_order.push_back(module);
+        }
+    }
+
+    for (const auto& name : group_order) {
+        auto& state = groups_by_name.at(name);
+        auto& asf = state.group.asf_bstar_tree;
+        asf.representative_order.clear();
+        for (const auto& module : state.input_order) {
+            if (asf.nodes.contains(module) &&
+                std::find(asf.representative_order.begin(), asf.representative_order.end(), module) ==
+                    asf.representative_order.end()) {
+                asf.representative_order.push_back(module);
+            }
+        }
+        rebuild_asf_bstar_tree(asf);
+        tree.symmetry_groups.push_back(std::move(state.group));
+    }
+
+    rebuild_global_bstar_tree(tree);
     return tree;
 }
 
-// 按输入顺序构造左孩子链式增强 B*-tree，作为兼容 baseline 的确定性拓扑。
 EnhancedBStarTree make_chain_tree(const Circuit& circuit) {
     EnhancedBStarTree tree;
     for (const auto& module : circuit.module_order) {
-        tree.nodes[module] = make_node(circuit, module);
+        tree.nodes[module] = make_module_node(module);
         tree.representative_order.push_back(module);
     }
     if (!tree.representative_order.empty()) tree.root = tree.representative_order.front();
@@ -361,41 +500,38 @@ EnhancedBStarTree make_chain_tree(const Circuit& circuit) {
     return tree;
 }
 
-// 收集树中全部 space node，作为 routing adapter 的评价输入。
 std::vector<SpaceNode> collect_space_nodes(const EnhancedBStarTree& tree) {
     std::vector<SpaceNode> result;
     for (const auto& id : tree.representative_order) {
         const auto& node = tree.nodes.at(id);
+        if (node.kind != BStarNodeKind::Module) continue;
         result.push_back(node.right_space);
         result.push_back(node.top_space);
     }
     for (const auto& group : tree.symmetry_groups) {
-        result.push_back(group.space_group);
-        result.push_back(group.space_cluster);
-        for (const auto& space : group.space_group_bundle.spaces) result.push_back(space);
-        for (const auto& space : group.space_cluster_bundle.spaces) result.push_back(space);
+        for (const auto& [id, node] : group.asf_bstar_tree.nodes) {
+            (void)id;
+            for_each_asf_space(node, [&](const SpaceNode& space) { result.push_back(space); });
+        }
     }
     return result;
 }
 
-// 统计当前树状态中持久化保存的 LCP 数量。
 std::size_t count_tree_lcps(const EnhancedBStarTree& tree) {
     std::size_t count = 0;
     for (const auto& space : collect_space_nodes(tree)) count += space.linking_points.size();
     return count;
 }
 
-// 判断普通模块主树中是否存在 right child，用于验证二维 B*-tree 搜索自由度。
 bool has_ordinary_right_child(const EnhancedBStarTree& tree) {
     for (const auto& id : tree.representative_order) {
-        if (!is_movable_module(tree, id)) continue;
         const auto& node = tree.nodes.at(id);
-        if (node.right.has_value() && is_movable_module(tree, *node.right)) return true;
+        if (node.kind != BStarNodeKind::Module) continue;
+        if (node.right.has_value() && tree.nodes.at(*node.right).kind == BStarNodeKind::Module) return true;
     }
     return false;
 }
 
-// 检查增强 B*-tree 是否仍是单根、无环且 parent/child 关系一致。
 bool is_valid_tree(const EnhancedBStarTree& tree) {
     if (tree.nodes.empty()) return !tree.root.has_value() && tree.representative_order.empty();
     if (!tree.root.has_value() || !tree.nodes.contains(*tree.root)) return false;
@@ -412,63 +548,54 @@ bool is_valid_tree(const EnhancedBStarTree& tree) {
         }
         return true;
     };
-    return visit(*tree.root) && seen.size() == tree.nodes.size() &&
-           reachable_count(tree) == tree.nodes.size() && self_symmetry_on_rightmost_branch(tree);
+    if (!visit(*tree.root) || seen.size() != tree.nodes.size() || reachable_count(tree) != tree.nodes.size()) return false;
+    return self_symmetry_on_rightmost_branch(tree);
 }
 
-// 检查所有自对称代表是否位于主树的 right-most branch。
 bool self_symmetry_on_rightmost_branch(const EnhancedBStarTree& tree) {
-    std::unordered_set<std::string> right_branch;
-    auto current = tree.root;
-    while (current.has_value()) {
-        right_branch.insert(*current);
-        current = tree.nodes.at(*current).right;
-    }
     for (const auto& group : tree.symmetry_groups) {
-        if (group.self_symmetric && !right_branch.contains(group.representative)) return false;
+        if (!asf_selfs_on_right_most_branch(group.asf_bstar_tree)) return false;
     }
     return true;
 }
 
-// 将 routing adapter 返回的资源预留反馈写回对应 space node。
 void apply_routing_feedback(EnhancedBStarTree& tree, const RoutingFeedback& feedback) {
     for (auto& [id, node] : tree.nodes) {
         (void)id;
+        if (node.kind != BStarNodeKind::Module) continue;
         update_space_node(node.right_space, feedback);
         update_space_node(node.top_space, feedback);
     }
     for (auto& group : tree.symmetry_groups) {
-        update_space_node(group.space_group, feedback);
-        update_space_node(group.space_cluster, feedback);
-        for (auto& space : group.space_group_bundle.spaces) update_space_node(space, feedback);
-        for (auto& space : group.space_cluster_bundle.spaces) update_space_node(space, feedback);
+        for (auto& [id, node] : group.asf_bstar_tree.nodes) {
+            (void)id;
+            for_each_asf_space(node, [&](SpaceNode& space) { update_space_node(space, feedback); });
+        }
     }
 }
 
-// 收集增强 B*-tree 中所有可容纳 LCP 的 space node。
 std::vector<SpaceNode*> collect_mutable_spaces(EnhancedBStarTree& tree) {
     std::vector<SpaceNode*> spaces;
     for (auto& [id, node] : tree.nodes) {
         (void)id;
+        if (node.kind != BStarNodeKind::Module) continue;
         spaces.push_back(&node.right_space);
         spaces.push_back(&node.top_space);
     }
     for (auto& group : tree.symmetry_groups) {
-        spaces.push_back(&group.space_group);
-        spaces.push_back(&group.space_cluster);
-        for (auto& space : group.space_group_bundle.spaces) spaces.push_back(&space);
-        for (auto& space : group.space_cluster_bundle.spaces) spaces.push_back(&space);
+        for (auto& [id, node] : group.asf_bstar_tree.nodes) {
+            (void)id;
+            for_each_asf_space(node, [&](SpaceNode& space) { spaces.push_back(&space); });
+        }
     }
     return spaces;
 }
 
-// 表示一个 LCP 在某个 space node 中的位置。
 struct LcpSlot {
     SpaceNode* space{};
     std::size_t index{};
 };
 
-// 收集当前树中全部 LCP 的可变位置。
 std::vector<LcpSlot> collect_lcp_slots(std::vector<SpaceNode*>& spaces) {
     std::vector<LcpSlot> slots;
     for (auto* space : spaces) {
@@ -479,7 +606,6 @@ std::vector<LcpSlot> collect_lcp_slots(std::vector<SpaceNode*>& spaces) {
     return slots;
 }
 
-// 判断 LCP 是否仍满足论文要求的同一 net 且至少两条 wire segment 的约束。
 bool is_valid_lcp(const LinkingControlPoint& point) {
     if (point.segments.size() < 2) return false;
     const std::string& net = point.segments.front().net;
@@ -492,13 +618,11 @@ bool is_valid_lcp(const LinkingControlPoint& point) {
     return true;
 }
 
-// 将一个 LCP 移入新的 space node，并维护归属 id。
 void move_lcp_to_space(LinkingControlPoint& point, SpaceNode& target) {
     point.space_node_id = target.id;
     target.linking_points.push_back(std::move(point));
 }
 
-// 执行论文 LCP delete-insert 扰动。
 bool perturb_lcp_delete_insert(EnhancedBStarTree& tree, std::mt19937& rng) {
     auto spaces = collect_mutable_spaces(tree);
     auto slots = collect_lcp_slots(spaces);
@@ -515,7 +639,6 @@ bool perturb_lcp_delete_insert(EnhancedBStarTree& tree, std::mt19937& rng) {
     return true;
 }
 
-// 执行论文 LCP swap 扰动。
 bool perturb_lcp_swap(EnhancedBStarTree& tree, std::mt19937& rng) {
     auto spaces = collect_mutable_spaces(tree);
     auto slots = collect_lcp_slots(spaces);
@@ -530,7 +653,6 @@ bool perturb_lcp_swap(EnhancedBStarTree& tree, std::mt19937& rng) {
     return true;
 }
 
-// 执行论文 LCP split 扰动。
 bool perturb_lcp_split(EnhancedBStarTree& tree, std::mt19937& rng) {
     auto spaces = collect_mutable_spaces(tree);
     auto slots = collect_lcp_slots(spaces);
@@ -552,7 +674,6 @@ bool perturb_lcp_split(EnhancedBStarTree& tree, std::mt19937& rng) {
     return true;
 }
 
-// 执行论文 LCP merge 扰动。
 bool perturb_lcp_merge(EnhancedBStarTree& tree, std::mt19937& rng) {
     auto spaces = collect_mutable_spaces(tree);
     auto slots = collect_lcp_slots(spaces);
@@ -578,7 +699,6 @@ bool perturb_lcp_merge(EnhancedBStarTree& tree, std::mt19937& rng) {
     return false;
 }
 
-// 对增强 B*-tree 执行一次论文 placement 侧扰动：module 或 LCP 的 hybrid move。
 PerturbationReport perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937& rng) {
     PerturbationReport report;
     report.lcp_before = count_tree_lcps(tree);
@@ -587,14 +707,13 @@ PerturbationReport perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937&
     const bool has_tree_lcp = !collect_lcp_slots(spaces).empty();
     std::uniform_int_distribution<int> move_dist(0, has_tree_lcp ? 6 : 2);
     const int move = move_dist(rng);
-    const auto movable = movable_modules(tree);
+    const auto movable = movable_nodes(tree);
     if (move == 0 && movable.size() > 1) {
         std::uniform_int_distribution<std::size_t> index_dist(0, movable.size() - 1);
         const auto first = movable[index_dist(rng)];
         auto second = movable[index_dist(rng)];
         if (first == second) second = movable[(index_dist(rng) + 1) % movable.size()];
         swap_tree_positions(tree, first, second);
-        repair_asf_rightmost_branch(tree);
         report.move = "module-swap";
         report.changed = true;
     } else if (move == 1 && movable.size() > 1) {
@@ -607,20 +726,23 @@ PerturbationReport perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937&
         if (!targets.empty()) {
             std::uniform_int_distribution<std::size_t> target_dist(0, targets.size() - 1);
             std::uniform_int_distribution<int> side_dist(0, 1);
-            const auto target = targets[target_dist(rng)];
-            const bool as_left = side_dist(rng) == 0;
             detach_node_preserving_children(tree, id);
-            insert_node_at_child(tree, target, id, as_left);
-            repair_asf_rightmost_branch(tree);
+            insert_node_at_child(tree, targets[target_dist(rng)], id, side_dist(rng) == 0);
             report.move = "module-delete-insert";
             report.changed = true;
         }
-    } else if (move == 2 && !movable.empty()) {
-        std::uniform_int_distribution<std::size_t> index_dist(0, movable.size() - 1);
-        auto& node = tree.nodes.at(movable[index_dist(rng)]);
-        node.angle = (node.angle + 90) % 360;
-        report.move = "module-rotate";
-        report.changed = true;
+    } else if (move == 2) {
+        std::vector<std::string> rotatable;
+        for (const auto& id : movable) {
+            if (tree.nodes.at(id).kind == BStarNodeKind::Module) rotatable.push_back(id);
+        }
+        if (!rotatable.empty()) {
+            std::uniform_int_distribution<std::size_t> index_dist(0, rotatable.size() - 1);
+            auto& node = tree.nodes.at(rotatable[index_dist(rng)]);
+            node.angle = (node.angle + 90) % 360;
+            report.move = "module-rotate";
+            report.changed = true;
+        }
     } else if (move == 3) {
         report.move = "lcp-delete-insert";
         report.used_lcp_move = true;
