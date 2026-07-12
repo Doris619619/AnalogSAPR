@@ -775,6 +775,20 @@ AsfPackingResult pack_asf_bstar_tree(const Circuit& circuit, const SymmetryGroup
     for (const auto& id : asf.representative_order) {
         append_asf_spaces_for_node(circuit, asf.nodes.at(id), result.placements, result.space_nodes);
     }
+    for (const auto& space : result.space_nodes) {
+        if (!space.physical_region.has_value()) continue;
+        const auto& region = *space.physical_region;
+        if (first) {
+            bbox = region;
+            first = false;
+        } else {
+            bbox.x1 = std::min(bbox.x1, region.x1);
+            bbox.y1 = std::min(bbox.y1, region.y1);
+            bbox.x2 = std::max(bbox.x2, region.x2);
+            bbox.y2 = std::max(bbox.y2, region.y2);
+        }
+    }
+    result.bbox = bbox;
     translate_asf_result(result, -result.bbox.x1, -result.bbox.y1);
     return result;
 }

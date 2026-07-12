@@ -152,6 +152,31 @@ void run_router_tests() {
                     "ASF tree must not attach the same child as both left and right");
         }
     }
+    auto two_group_perturbed = two_group_tree;
+    std::mt19937 two_group_rng(23);
+    bool saw_asf_move = false;
+    for (int i = 0; i < 50; ++i) {
+        const auto report = sapr::perturb_placement_tree(two_group_perturbed, two_group_rng);
+        saw_asf_move = saw_asf_move || report.move.starts_with("asf-module-");
+        require(sapr::is_valid_tree(two_group_perturbed), "ASF internal perturbation should preserve tree legality");
+        for (const auto& group : two_group_perturbed.symmetry_groups) {
+            const auto& asf_tree = group.asf_bstar_tree;
+            for (const auto& [representative, mirror] : asf_tree.mirror_map) {
+                require(asf_tree.nodes.contains(representative), "ASF tree should keep representative nodes");
+                require(!asf_tree.nodes.contains(mirror), "ASF tree must not directly contain mirror nodes");
+            }
+            std::unordered_set<std::string> right_most(
+                asf_tree.right_most_branch.begin(),
+                asf_tree.right_most_branch.end());
+            for (const auto& [id, node] : asf_tree.nodes) {
+                if (node.space_node_cluster.has_value()) {
+                    require(right_most.contains(id), "space_node_cluster should only exist on the ASF right-most branch");
+                }
+                require(node.space_node_groups.size() == 2, "each ASF representative/self node should keep two space_node_group containers");
+            }
+        }
+    }
+    require(saw_asf_move, "SA perturbation pool should include ASF internal moves for hierarchy-heavy cases");
 
     auto tree = sapr::make_enhanced_tree(circuit);
     require(sapr::is_valid_tree(tree), "enhanced tree should be valid");

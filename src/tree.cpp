@@ -237,6 +237,106 @@ bool asf_selfs_on_right_most_branch(const AsfBStarTree& tree) {
     return true;
 }
 
+bool is_valid_asf_tree(const AsfBStarTree& tree) {
+    if (tree.nodes.empty()) return !tree.root.has_value() && tree.representative_order.empty();
+    if (!tree.root.has_value() || !tree.nodes.contains(*tree.root)) return false;
+    if (tree.nodes.at(*tree.root).parent.has_value()) return false;
+    std::unordered_set<std::string> seen;
+    std::function<bool(const std::string&)> visit = [&](const std::string& id) {
+        if (!tree.nodes.contains(id) || !seen.insert(id).second) return false;
+        const auto& node = tree.nodes.at(id);
+        for (const auto& child : {node.left, node.right}) {
+            if (!child.has_value()) continue;
+            if (!tree.nodes.contains(*child)) return false;
+            if (tree.nodes.at(*child).parent != id) return false;
+            if (!visit(*child)) return false;
+        }
+        return true;
+    };
+    if (!visit(*tree.root) || seen.size() != tree.nodes.size()) return false;
+    return asf_selfs_on_right_most_branch(tree);
+}
+
+void detach_node_preserving_children(AsfBStarTree& tree, const std::string& id) {
+    auto& node = tree.nodes.at(id);
+    const auto parent = node.parent;
+    const auto left = node.left;
+    const auto right = node.right;
+    std::optional<std::string> replacement;
+    if (left.has_value()) {
+        replacement = left;
+        tree.nodes.at(*left).parent = parent;
+        if (right.has_value()) {
+            std::string tail = *left;
+            while (tree.nodes.at(tail).right.has_value()) tail = *tree.nodes.at(tail).right;
+            tree.nodes.at(tail).right = right;
+            tree.nodes.at(*right).parent = tail;
+        }
+    } else if (right.has_value()) {
+        replacement = right;
+        tree.nodes.at(*right).parent = parent;
+    }
+
+    if (parent.has_value()) {
+        auto& parent_node = tree.nodes.at(*parent);
+        if (parent_node.left == id) parent_node.left = replacement;
+        if (parent_node.right == id) parent_node.right = replacement;
+    } else {
+        tree.root = replacement;
+    }
+    node.parent.reset();
+    node.left.reset();
+    node.right.reset();
+}
+
+void insert_node_at_child(AsfBStarTree& tree, const std::string& parent, const std::string& child, bool as_left) {
+    auto& child_node = tree.nodes.at(child);
+    child_node.parent.reset();
+    child_node.left.reset();
+    child_node.right.reset();
+    auto& parent_node = tree.nodes.at(parent);
+    auto displaced = as_left ? parent_node.left : parent_node.right;
+    if (as_left) {
+        parent_node.left = child;
+        child_node.left = displaced;
+    } else {
+        parent_node.right = child;
+        child_node.right = displaced;
+    }
+    child_node.parent = parent;
+    if (displaced.has_value()) tree.nodes.at(*displaced).parent = child;
+}
+
+bool is_ancestor_of(const AsfBStarTree& tree, const std::string& candidate, const std::string& target) {
+    auto current = tree.nodes.at(target).parent;
+    while (current.has_value()) {
+        if (*current == candidate) return true;
+        current = tree.nodes.at(*current).parent;
+    }
+    return false;
+}
+
+void swap_tree_positions(AsfBStarTree& tree, const std::string& first, const std::string& second) {
+    if (first == second) return;
+    if (is_ancestor_of(tree, first, second) || is_ancestor_of(tree, second, first)) {
+        std::swap(tree.nodes.at(first).angle, tree.nodes.at(second).angle);
+        return;
+    }
+
+    const auto first_parent = tree.nodes.at(first).parent;
+    const auto second_parent = tree.nodes.at(second).parent;
+    if (!first_parent.has_value() || !second_parent.has_value()) {
+        std::swap(tree.nodes.at(first).angle, tree.nodes.at(second).angle);
+        return;
+    }
+    const bool first_as_left = tree.nodes.at(*first_parent).left == first;
+    const bool second_as_left = tree.nodes.at(*second_parent).left == second;
+    detach_node_preserving_children(tree, first);
+    detach_node_preserving_children(tree, second);
+    if (tree.nodes.contains(*second_parent)) insert_node_at_child(tree, *second_parent, first, second_as_left);
+    if (tree.nodes.contains(*first_parent)) insert_node_at_child(tree, *first_parent, second, first_as_left);
+}
+
 void detach_node_preserving_children(EnhancedBStarTree& tree, const std::string& id) {
     auto& node = tree.nodes.at(id);
     const auto parent = node.parent;
@@ -370,6 +470,66 @@ std::vector<std::string> movable_nodes(const EnhancedBStarTree& tree) {
         if (tree.nodes.contains(id)) result.push_back(id);
     }
     return result;
+}
+
+std::vector<std::string> movable_nodes(const AsfBStarTree& tree) {
+    std::vector<std::string> result;
+    for (const auto& id : tree.representative_order) {
+        if (tree.nodes.contains(id)) result.push_back(id);
+    }
+    return result;
+}
+
+bool finalize_asf_perturbation(AsfBStarTree& tree) {
+    refresh_representative_order(tree);
+    refresh_right_most_branch(tree);
+    refresh_space_node_clusters(tree);
+    return is_valid_asf_tree(tree);
+}
+
+bool perturb_asf_bstar_tree(AsfBStarTree& tree, std::mt19937& rng, std::string& move) {
+    const auto movable = movable_nodes(tree);
+    if (movable.empty()) return false;
+    AsfBStarTree before = tree;
+    std::uniform_int_distribution<int> move_dist(0, 2);
+    const int selected = move_dist(rng);
+    bool changed = false;
+    if (selected == 0 && movable.size() > 1) {
+        std::uniform_int_distribution<std::size_t> index_dist(0, movable.size() - 1);
+        const auto first = movable[index_dist(rng)];
+        auto second = movable[index_dist(rng)];
+        if (first == second) second = movable[(index_dist(rng) + 1) % movable.size()];
+        swap_tree_positions(tree, first, second);
+        move = "asf-module-swap";
+        changed = true;
+    } else if (selected == 1 && movable.size() > 1) {
+        std::uniform_int_distribution<std::size_t> index_dist(0, movable.size() - 1);
+        const auto id = movable[index_dist(rng)];
+        std::vector<std::string> targets;
+        for (const auto& candidate : movable) {
+            if (candidate != id && !is_ancestor_of(tree, id, candidate)) targets.push_back(candidate);
+        }
+        if (!targets.empty()) {
+            std::uniform_int_distribution<std::size_t> target_dist(0, targets.size() - 1);
+            std::uniform_int_distribution<int> side_dist(0, 1);
+            detach_node_preserving_children(tree, id);
+            insert_node_at_child(tree, targets[target_dist(rng)], id, side_dist(rng) == 0);
+            move = "asf-module-delete-insert";
+            changed = true;
+        }
+    } else {
+        std::uniform_int_distribution<std::size_t> index_dist(0, movable.size() - 1);
+        auto& node = tree.nodes.at(movable[index_dist(rng)]);
+        node.angle = (node.angle + 90) % 360;
+        move = "asf-module-rotate";
+        changed = true;
+    }
+    if (!changed) return false;
+    if (!finalize_asf_perturbation(tree)) {
+        tree = std::move(before);
+        return false;
+    }
+    return true;
 }
 
 struct GroupBuildState {
@@ -709,7 +869,10 @@ PerturbationReport perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937&
     if (tree.representative_order.empty()) return report;
     auto spaces = collect_mutable_spaces(tree);
     const bool has_tree_lcp = !collect_lcp_slots(spaces).empty();
-    std::uniform_int_distribution<int> move_dist(0, has_tree_lcp ? 6 : 2);
+    const bool has_asf_tree = std::any_of(tree.symmetry_groups.begin(), tree.symmetry_groups.end(), [](const auto& group) {
+        return !group.asf_bstar_tree.nodes.empty();
+    });
+    std::uniform_int_distribution<int> move_dist(0, has_tree_lcp ? 8 : (has_asf_tree ? 5 : 2));
     const int move = move_dist(rng);
     const auto movable = movable_nodes(tree);
     if (move == 0 && movable.size() > 1) {
@@ -747,22 +910,34 @@ PerturbationReport perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937&
             report.move = "module-rotate";
             report.changed = true;
         }
-    } else if (move == 3) {
+    } else if (has_tree_lcp && move == 3) {
         report.move = "lcp-delete-insert";
         report.used_lcp_move = true;
         report.changed = perturb_lcp_delete_insert(tree, rng);
-    } else if (move == 4) {
+    } else if (has_tree_lcp && move == 4) {
         report.move = "lcp-swap";
         report.used_lcp_move = true;
         report.changed = perturb_lcp_swap(tree, rng);
-    } else if (move == 5) {
+    } else if (has_tree_lcp && move == 5) {
         report.move = "lcp-split";
         report.used_lcp_move = true;
         report.changed = perturb_lcp_split(tree, rng);
-    } else {
+    } else if (has_tree_lcp && move == 6) {
         report.move = "lcp-merge";
         report.used_lcp_move = true;
         report.changed = perturb_lcp_merge(tree, rng);
+    } else if (has_asf_tree) {
+        std::vector<std::size_t> candidates;
+        for (std::size_t index = 0; index < tree.symmetry_groups.size(); ++index) {
+            if (!tree.symmetry_groups[index].asf_bstar_tree.nodes.empty()) candidates.push_back(index);
+        }
+        if (!candidates.empty()) {
+            std::uniform_int_distribution<std::size_t> group_dist(0, candidates.size() - 1);
+            auto& group = tree.symmetry_groups[candidates[group_dist(rng)]];
+            std::string asf_move;
+            report.changed = perturb_asf_bstar_tree(group.asf_bstar_tree, rng, asf_move);
+            report.move = report.changed ? asf_move + ":" + group.name : "none";
+        }
     }
     if (report.move.empty()) report.move = "none";
     refresh_representative_order(tree);
