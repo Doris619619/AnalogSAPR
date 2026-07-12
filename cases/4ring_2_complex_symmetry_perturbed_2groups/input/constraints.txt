@@ -1,0 +1,14 @@
+# SYMMETRY_PAIR / SYMMETRY_SELF / FLOW / WIRE_WIDTH
+
+SYMMETRY_PAIR  sg_resistor_array   vertical  XR13  XR10
+SYMMETRY_PAIR  sg_resistor_array   vertical  XR14  XR9
+SYMMETRY_PAIR  sg_resistor_array   vertical  XR27  XR26
+SYMMETRY_PAIR  sg_resistor_array   vertical  XR32  XR30
+SYMMETRY_PAIR  sg_load_tail_array  vertical  XC5   XC6
+SYMMETRY_PAIR  sg_load_tail_array  vertical  MP23  MP24
+SYMMETRY_PAIR  sg_load_tail_array  vertical  MM33  MM34
+
+WIRE_WIDTH     VDD    0.05  1.0
+WIRE_WIDTH     GND    0.05  1.0
+WIRE_WIDTH     LOI+   0.05  1.0
+WIRE_WIDTH     LOI-   0.05  1.0
