@@ -133,11 +133,14 @@ bool net_has_implicit_via(const std::vector<sapr::RouteSegment>& routes, const s
     return false;
 }
 
+// 构造一条水平 selected candidate，让 detailed routing 只测试 DRC 统计逻辑。
 sapr::RoutingEvaluation make_line_evaluation(
     const sapr::Circuit& circuit,
     const std::unordered_map<std::string, sapr::Placement>& placements,
-    double y) {
-    sapr::routing::RoutingContext context(circuit, placements);
+    double y,
+    int layer = 0,
+    const sapr::routing::GridConfig& config = {}) {
+    sapr::routing::RoutingContext context(circuit, placements, config);
     sapr::routing::RouteCandidate candidate;
     candidate.net = "N";
     candidate.from_terminal = "M.A";
@@ -145,8 +148,8 @@ sapr::RoutingEvaluation make_line_evaluation(
     candidate.wire_width = 1.0;
     candidate.path.success = true;
     candidate.path.points = {
-        context.grid().snap_to_grid(sapr::routing::Point{0.0, y}, 0),
-        context.grid().snap_to_grid(sapr::routing::Point{9.0, y}, 0),
+        context.grid().snap_to_grid(sapr::routing::Point{0.0, y}, layer),
+        context.grid().snap_to_grid(sapr::routing::Point{9.0, y}, layer),
     };
     candidate.path.metrics.wirelength = 9.0;
 
@@ -1198,6 +1201,39 @@ void run_routing_evaluator_tests() {
     auto active_crossing_eval = make_line_evaluation(drc_circuit, drc_placements, 5.0);
     const auto active_crossing_detail = sapr::run_detailed_routing(drc_circuit, drc_request, active_crossing_eval);
     require(active_crossing_detail.design_rule_violations > 0, "active crossing route should count as DRC");
+
+    // M2 从 active 上方跨过不应记为 active-region DRC；障碍也只应落在 M1。
+    const auto multi_layer_active_config = sapr::routing::make_grid_config_for_routing_layers(2);
+    const sapr::routing::RoutingContext multi_layer_active_context(
+        drc_circuit, drc_placements, multi_layer_active_config);
+    int active_obstacle_layers = 0;
+    bool active_blocks_m1 = false;
+    bool active_blocks_m2 = false;
+    for (const auto& obstacle : multi_layer_active_context.obstacles().obstacles()) {
+        if (obstacle.reason != "active_region") continue;
+        ++active_obstacle_layers;
+        if (obstacle.layer == 0) active_blocks_m1 = true;
+        if (obstacle.layer == 1) active_blocks_m2 = true;
+    }
+    require(active_obstacle_layers == 1, "active region should create exactly one obstacle layer");
+    require(active_blocks_m1, "active region should block M1");
+    require(!active_blocks_m2, "active region should not block M2");
+    const auto active_rect =
+        sapr::routing::transform_active_to_global(drc_circuit.modules.at("M"), drc_placements.at("M"));
+    const sapr::routing::Point active_center{
+        0.5 * (active_rect.x1 + active_rect.x2),
+        0.5 * (active_rect.y1 + active_rect.y2),
+    };
+    require(
+        multi_layer_active_context.obstacles().is_blocked(active_center, 0),
+        "active center should be blocked on M1");
+    require(
+        !multi_layer_active_context.obstacles().is_blocked(active_center, 1),
+        "active center should remain free on M2");
+
+    auto m2_over_active_eval = make_line_evaluation(drc_circuit, drc_placements, 5.0, 1, multi_layer_active_config);
+    const auto m2_over_active_detail = sapr::run_detailed_routing(drc_circuit, drc_request, m2_over_active_eval);
+    require(m2_over_active_detail.design_rule_violations == 0, "M2 over active region should not count as DRC");
 
     const auto full_active_circuit = make_full_active_region_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> full_active_placements{

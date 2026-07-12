@@ -386,7 +386,7 @@ def render_structure(
     name: str,
     dpi: int,
     output_basename: str | None = None,
-    show_routing: bool = False,
+    show_routing: bool = True,
     net_filter: str | None = None,
 ) -> Path:
     import matplotlib
@@ -657,13 +657,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--show-routing",
-        action="store_true",
-        help="Draw routing topology arcs (default: off, tree structure only)",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Draw routing topology arcs on the structure figure (default: on; use --no-show-routing to disable)",
     )
     parser.add_argument(
         "--net",
         default=None,
-        help="When used with --show-routing, only draw the given net name",
+        help="Only draw the given net name (requires routing arcs enabled)",
     )
     args = parser.parse_args()
 

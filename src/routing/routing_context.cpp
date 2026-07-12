@@ -227,10 +227,10 @@ RoutingContext::RoutingContext(
         }
     }
 
+    // active region 只阻挡器件所在低层 M1；M2+ 允许从器件上方跨过，避免被建成贯穿各层的垂直障碍柱。
+    constexpr int kActiveRegionLayer = 0;  // M1
     for (const auto& [owner, active] : active_regions) {
-        for (int layer = 0; layer < grid_->layer_count(); ++layer) {
-            obstacles_.add_obstacle(Obstacle{active, layer, "active_region", owner});
-        }
+        obstacles_.add_obstacle(Obstacle{active, kActiveRegionLayer, "active_region", owner});
     }
 
     for (const auto& [key, global_pin] : global_pins_) {

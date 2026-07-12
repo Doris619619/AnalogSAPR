@@ -63,7 +63,7 @@ optimizer / SA 只需要调用 routing evaluator，不直接操作 A*、DP 或 d
 | grid point | 离散网格点 `(ix, iy, layer)` |
 | physical point | 连续坐标 `(x, y)` |
 | layer | 默认仅 `M1`（`GridConfig.layer_count=1`）；可用 `--routing-layers 3/7` 放开到 `M1~M3` / `M1~M7`，各层均允许水平和垂直走线 |
-| obstacle | active region 默认阻塞所有金属层 |
+| obstacle | active region 只阻塞 M1；M2+ 可从器件上方跨过 |
 | pin access | pin 所在点允许作为起点或终点 |
 
 坐标转换规则：
@@ -561,13 +561,13 @@ segment_to_rect(centerline, width)
 
 ### DRC 规则
 
-如果 metal rect 与 module active region 相交：
+仅对 **M1** 线段检查：若 metal rect 与 module active region 相交：
 
 ```text
-intersects(metal_rect, active_region)
+layer == M1 && intersects(metal_rect, active_region)
 ```
 
-且不是 pin access corridor，则记为 DRC violation。
+且不是 pin access corridor，则记为 DRC violation。M2+ 跨过 active region 不算 violation。
 
 Penalty：
 

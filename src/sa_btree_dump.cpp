@@ -51,7 +51,8 @@ void render_structure_png(
             << " --name " << shell_quote(name)
             << " --structure-only"
             << " --output-basename " << shell_quote(output_basename);
-    if (show_routing) command << " --show-routing";
+    // 显式开关，避免依赖脚本默认值变化导致 tree / tree_with_nets 语义漂移。
+    command << (show_routing ? " --show-routing" : " --no-show-routing");
     const int status = std::system(command.str().c_str());
     if (status != 0) {
         throw std::runtime_error("SA btree structure rendering failed for " + output_basename);

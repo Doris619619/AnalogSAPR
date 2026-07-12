@@ -181,6 +181,18 @@ struct Metrics {
     std::vector<std::string> routing_warnings;
 };
 
+// 记录 SA 单轮轻量进度，字段与终端 `[sa]` 日志对齐。
+struct SaProgressEntry {
+    int iteration{};
+    int sa_iterations{};
+    std::string move;
+    bool accept{};
+    double next_cost{};
+    double current_cost{};
+    double best_cost{};
+    double temperature{};
+};
+
 // 记录 SA 单轮候选树可视化所需的扰动与接受信息。
 struct SaBtreeIterationTrace {
     int iteration{};
@@ -223,6 +235,8 @@ struct Solution {
     std::optional<std::string> btree_trace_json;
     std::optional<std::string> routing_debug_json;
     std::vector<std::string> routing_warnings;
+    // 与 btree_trace.json 并列写出的 SA 轻量进度（sa_trace.json）。
+    std::vector<SaProgressEntry> sa_progress;
     std::vector<SaBtreeIterationTrace> sa_btree_iterations;
 };
 
