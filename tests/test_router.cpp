@@ -27,8 +27,12 @@ bool overlaps(const sapr::Rect& left, const sapr::Rect& right) {
 bool valid_lcp_topology(const sapr::LinkingControlPoint& point) {
     if (point.segments.size() < 2) return false;
     const auto& net = point.segments.front().net;
+    std::unordered_set<std::string> segment_ids;
     for (const auto& segment : point.segments) {
         if (segment.net != net) return false;
+        if (segment.from != point.id && segment.to != point.id) return false;
+        const std::string key = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
+        if (!segment_ids.insert(key).second) return false;
     }
     return true;
 }
@@ -135,6 +139,49 @@ void run_router_tests() {
         }
     }
 
+    const auto two_group_circuit = sapr::load_circuit(
+        std::filesystem::path(SAPR_SOURCE_DIR) / "cases" / "4ring_2_complex_symmetry_perturbed_2groups" / "input");
+    const auto two_group_tree = sapr::make_enhanced_tree(two_group_circuit);
+    require(sapr::is_valid_tree(two_group_tree), "two hierarchy nodes should form a valid global tree");
+    for (const auto& [id, node] : two_group_tree.nodes) {
+        (void)id;
+        require(!(node.left.has_value() && node.right.has_value() && node.left == node.right),
+                "global tree must not attach the same child as both left and right");
+    }
+    for (const auto& group : two_group_tree.symmetry_groups) {
+        require(!group.asf_bstar_tree.nodes.empty(), "multi-pair symmetry group should build a non-empty ASF tree");
+        for (const auto& [id, node] : group.asf_bstar_tree.nodes) {
+            (void)id;
+            require(!(node.left.has_value() && node.right.has_value() && node.left == node.right),
+                    "ASF tree must not attach the same child as both left and right");
+        }
+    }
+    auto two_group_perturbed = two_group_tree;
+    std::mt19937 two_group_rng(23);
+    bool saw_asf_move = false;
+    for (int i = 0; i < 50; ++i) {
+        const auto report = sapr::perturb_placement_tree(two_group_perturbed, two_group_rng);
+        saw_asf_move = saw_asf_move || report.move.starts_with("asf-module-");
+        require(sapr::is_valid_tree(two_group_perturbed), "ASF internal perturbation should preserve tree legality");
+        for (const auto& group : two_group_perturbed.symmetry_groups) {
+            const auto& asf_tree = group.asf_bstar_tree;
+            for (const auto& [representative, mirror] : asf_tree.mirror_map) {
+                require(asf_tree.nodes.contains(representative), "ASF tree should keep representative nodes");
+                require(!asf_tree.nodes.contains(mirror), "ASF tree must not directly contain mirror nodes");
+            }
+            std::unordered_set<std::string> right_most(
+                asf_tree.right_most_branch.begin(),
+                asf_tree.right_most_branch.end());
+            for (const auto& [id, node] : asf_tree.nodes) {
+                if (node.space_node_cluster.has_value()) {
+                    require(right_most.contains(id), "space_node_cluster should only exist on the ASF right-most branch");
+                }
+                require(node.space_node_groups.size() == 2, "each ASF representative/self node should keep two space_node_group containers");
+            }
+        }
+    }
+    require(saw_asf_move, "SA perturbation pool should include ASF internal moves for hierarchy-heavy cases");
+
     auto tree = sapr::make_enhanced_tree(circuit);
     require(sapr::is_valid_tree(tree), "enhanced tree should be valid");
     require(sapr::self_symmetry_on_rightmost_branch(tree), "self-symmetry module should stay on right-most branch");
@@ -158,8 +205,10 @@ void run_router_tests() {
                           {},
                           0.0,
                           {}};
+    require(approx(space.formula_required_space(), 4.0), "space formula value should match paper equation before feedback");
     require(approx(space.required_space(), 4.0), "space formula should match paper equation");
     space.allocated_space = 9.0;
+    require(approx(space.formula_required_space(), 4.0), "feedback allocation should not change formula value");
     require(approx(space.required_space(), 9.0), "feedback allocation should override smaller formula result");
 
     const sapr::SolverConfig config{5.0, 40.0, 7, 0};

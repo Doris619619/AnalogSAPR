@@ -1422,10 +1422,19 @@ void run_routing_evaluator_tests() {
     const auto star_request = make_star_lcp_request(star_circuit, star_placements);
     const auto star_detail = sapr::run_detailed_routing(star_circuit, star_request, star_eval);
     require(
-        std::any_of(star_detail.report.warnings.begin(), star_detail.report.warnings.end(), [](const auto& warning) {
+        std::none_of(star_detail.report.warnings.begin(), star_detail.report.warnings.end(), [](const auto& warning) {
             return warning.find("switched whole-net LCP location to LCP_STAR:b") != std::string::npos;
         }),
-        "detailed routing should switch the whole LCP net to a consistent alternate location");
+        "detailed routing should keep the DP-selected LCP binding stable");
+    require(
+        std::none_of(star_detail.report.warnings.begin(), star_detail.report.warnings.end(), [](const auto& warning) {
+            return warning.find("selected branches disagree on LCP binding before detailed legalize") !=
+                   std::string::npos;
+        }),
+        "consistent DP-selected STAR branches should not report an LCP binding conflict");
+    require(
+        star_detail.traceback_failures > 0,
+        "fixed LCP binding should fail this blocked STAR location instead of switching during detailed routing");
     const sapr::DetailedRouteTrace* star_trace = nullptr;
     for (const auto& trace : star_detail.report.traces) {
         if (trace.net == "STAR") {
@@ -1433,16 +1442,11 @@ void run_routing_evaluator_tests() {
             break;
         }
     }
-    require(star_trace != nullptr && !star_trace->segments.empty(), "STAR detailed traceback should exist");
+    require(star_trace != nullptr, "STAR detailed traceback should exist");
     for (const auto& segment : star_trace->segments) {
         require(
-            segment.lcp_candidate_id == "LCP_STAR:b",
-            "all detailed STAR segments must share the same switched LCP location");
+            segment.lcp_candidate_id.empty() || segment.lcp_candidate_id == "LCP_STAR:a",
+            "STAR detailed segments must not switch away from the DP-selected LCP location");
     }
-    require(
-        std::any_of(star_detail.routes.begin(), star_detail.routes.end(), [](const auto& route) {
-            return route.net == "STAR";
-        }),
-        "whole-net LCP switch should still emit STAR routes");
     require(!has_cross_net_same_layer_short(star_detail.routes), "LCP-consistent detailed routes should not short");
 }

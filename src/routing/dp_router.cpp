@@ -16,6 +16,7 @@ namespace {
 constexpr double kBendWeight = 3.0;
 constexpr double kMissingSegmentPenalty = 100000.0;
 constexpr double kShortConflictPenalty = 1000000.0;
+constexpr double kMultiTerminalMissingPenalty = 1000000.0;
 
 // 表示同一逻辑 wire segment 对应的一组 A* 候选路径。
 struct CandidateGroup {
@@ -204,7 +205,8 @@ AppendCandidateResult append_candidate_if_consistent(
     const RoutingContext& context) {
     AppendCandidateResult result;
     if (!candidate.path.success) {
-        result.reason = "path_fail";
+        result.reason =
+            candidate.path.message.find("multi_terminal_missing") != std::string::npos ? "multi_terminal_missing" : "path_fail";
         return result;
     }
     const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
@@ -612,11 +614,19 @@ void apply_segment_transition(
             failed.penalty += kMissingSegmentPenalty;
             append_unique(failed.covered_wire_segments, group.key);
             std::string message = "missing successful A* candidate for " + group.key;
+            bool has_multi_terminal_missing = false;
             for (const auto& candidate : group.candidates) {
                 if (!candidate_matches_group(candidate, group)) continue;
                 if (!candidate.path.message.empty()) {
                     message += " [" + candidate.lcp_candidate_id + ": " + candidate.path.message + "]";
+                    if (candidate.path.message.find("multi_terminal_missing") != std::string::npos) {
+                        has_multi_terminal_missing = true;
+                    }
                 }
+            }
+            if (has_multi_terminal_missing) {
+                failed.penalty += kMultiTerminalMissingPenalty;
+                append_unique(failed.failure_messages, "multi-terminal LCP candidate cannot cover all incident segments for " + group.key);
             }
             append_unique(failed.failure_messages, message);
             failed.choice_message = "missing " + group.key;
