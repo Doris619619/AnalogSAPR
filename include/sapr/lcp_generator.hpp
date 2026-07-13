@@ -5,13 +5,13 @@
 
 namespace sapr {
 
-// 初始生成 placement-aware LCP 拓扑、space 归属和候选点，并写入 routing request。
+// 初始生成 LCP 拓扑及其初始 space 归属；存在 placement 时同时生成物理候选点。
 void generate_initial_lcp_topology(const Circuit& circuit, RoutingEvaluationRequest& request);
 
-// 基于 request 中已有的 LCP/space 归属刷新物理候选点，不改变 LCP 拓扑。
+// 基于 request 中已有的 LCP/space 归属刷新物理候选点，不改变 LCP 拓扑或 space 归属。
 void refresh_lcp_location_candidates(const Circuit& circuit, RoutingEvaluationRequest& request);
 
-// 保持历史入口名称，等价于初始生成 LCP 拓扑。
+// 兼容历史入口：已有 LCP 时仅刷新候选点；否则生成初始 LCP。
 void generate_automatic_lcps(const Circuit& circuit, RoutingEvaluationRequest& request);
 
 }  // namespace sapr

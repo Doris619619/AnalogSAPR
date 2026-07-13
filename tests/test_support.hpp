@@ -31,3 +31,5 @@ void run_constraint_tests();
 void run_router_tests();
 // 运行 A*/DP 布线评估集成测试。
 void run_routing_evaluator_tests();
+// 运行 LCP space 绑定与几何失配重绑测试。
+void run_lcp_binding_tests();

@@ -186,11 +186,17 @@ struct SaProgressEntry {
     int iteration{};
     int sa_iterations{};
     std::string move;
+    // 标记本轮记录的扰动是否真实改变了候选树，便于识别空扰动。
+    bool changed{};
     bool accept{};
     double next_cost{};
     double current_cost{};
     double best_cost{};
     double temperature{};
+    // 本轮候选解内部 routing feedback 闭环的收敛摘要。
+    int routing_feedback_iterations{};
+    bool routing_feedback_converged{};
+    int space_feedback_nodes{};
 };
 
 // 记录 SA 单轮候选树可视化所需的扰动与接受信息。
@@ -435,7 +441,9 @@ struct RoutingEvaluationRequest {
 struct RoutingFeedback {
     std::vector<RouteSegment> routes;
     Metrics metrics;
+    // 不含 coupling_extra_space 的基础 routing 预留宽度，写回 SpaceNode::allocated_space。
     std::unordered_map<std::string, double> required_space_by_node;
+    // 独立于基础预留宽度的耦合附加空间，写回 SpaceNode::coupling_extra_space。
     std::unordered_map<std::string, double> coupling_space_by_node;
     double routing_cost{};
     std::size_t routing_candidate_count{};

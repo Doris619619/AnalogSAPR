@@ -1,0 +1,16 @@
+{
+  "sa_iterations": 2,
+  "recorded": 2,
+  "summary": {
+    "converged_count": 2,
+    "not_converged_count": 0,
+    "max_routing_feedback_iterations": 1,
+    "final_routing_feedback_converged": true,
+    "final_routing_feedback_iterations": 1,
+    "final_space_feedback_nodes": 10
+  },
+  "iterations": [
+    {"index": 1, "move": "module-rotate", "accept": true, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 10},
+    {"index": 2, "move": "lcp-split", "accept": true, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 10}
+  ]
+}

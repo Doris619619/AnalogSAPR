@@ -8,14 +8,15 @@
 
 ```text
 构造 enhanced B*-tree
-→ contour packing 生成 placement candidate
+→ 生成并持久化初始 LCP 拓扑及 space 归属
+→ contour packing 生成 placement candidate 与 space 几何
 → A* 生成候选路径，bottom-up DP 选择一致 traceback
 → top-down detailed routing 输出最终线段
 → routing feedback 写回 space node 的资源需求
 → 在模拟退火中继续扰动 tree 并搜索更优解
 ```
 
-其中增强 B*-tree 负责器件代表节点、对称组、right/top/group/cluster space node 和 LCP 拓扑；模拟退火会执行 module swap/delete-insert/rotate 以及 LCP delete-insert/swap/split/merge 等扰动。每个候选解内部会按 `routing_feedback_iterations` 做有限轮 routing feedback → re-pack 闭环，使详细布线阶段发现的线宽、耦合和空间需求反馈到下一轮 packing。
+其中初始 LCP 在进入模拟退火前建立并写回增强 B*-tree；模拟退火会执行 module swap/delete-insert/rotate 以及 LCP delete-insert/swap/split/merge 等扰动。packing 只计算当前 space 的物理区域并刷新该归属内的 LCP 候选位置，不会自动迁移 LCP 到其他 space。每个候选解内部会按 `routing_feedback_iterations` 做有限轮 routing feedback → re-pack 闭环，使详细布线阶段发现的线宽、耦合和空间需求反馈到下一轮 packing。
 
 ## 环境要求
 

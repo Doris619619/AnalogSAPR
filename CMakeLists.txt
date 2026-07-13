@@ -51,6 +51,7 @@ if(BUILD_TESTING)
         tests/test_main.cpp
         tests/test_constraints.cpp
         tests/test_io.cpp
+        tests/test_lcp_binding.cpp
         tests/test_routing_evaluator.cpp
         tests/test_router.cpp
     )

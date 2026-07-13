@@ -775,7 +775,11 @@ void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& 
         const auto xy = placed_pin(circuit.modules.at(pin.module), pin, placement);
         request.placed_pins.push_back({key, pin.module, pin.name, xy.first, xy.second, pin.layer});
     }
-    generate_automatic_lcps(circuit, request);
+    const bool has_existing_lcp = std::any_of(request.space_nodes.begin(), request.space_nodes.end(), [](const SpaceNode& space) {
+        return !space.linking_points.empty();
+    });
+    // packing 只刷新既有 LCP 的物理候选；初始 LCP 必须由 SA 前的初始化步骤建立。
+    if (has_existing_lcp) refresh_lcp_location_candidates(circuit, request);
     std::unordered_map<std::string, NetTopology> topologies;
     for (const auto& [name, net] : circuit.nets) {
         topologies[name].net = name;
@@ -843,12 +847,6 @@ void write_request_lcps_to_tree(EnhancedBStarTree& tree, const RoutingEvaluation
     }
 }
 
-// 为初始 tree 生成一次持久化 LCP 拓扑，使 LCP 扰动进入 SA state。
-void initialize_tree_lcps(const Circuit& circuit, EnhancedBStarTree& tree, const SolverConfig& config) {
-    const auto request = pack_enhanced_tree(circuit, tree, config);
-    write_request_lcps_to_tree(tree, request);
-}
-
 // 根据当前 placement bbox 计算 row-width 溢出惩罚。
 void apply_row_width_metrics(const Circuit& circuit, const RoutingEvaluationRequest& request, Metrics& metrics, const SolverConfig& config) {
     if (config.row_width <= 0.0 || request.placements.empty()) {
@@ -891,7 +889,7 @@ bool feedback_expands_space(
     for (const auto& space : request.space_nodes) {
         const auto required = feedback.required_space_by_node.find(space.id);
         if (required != feedback.required_space_by_node.end() &&
-            required->second > space.required_space() + tolerance) {
+            required->second > space.allocated_space + tolerance) {
             return true;
         }
         const auto coupling = feedback.coupling_space_by_node.find(space.id);
@@ -915,6 +913,8 @@ CandidateState evaluate_candidate_with_feedback_loop(
     bool converged = false;
     for (int iteration = 0; iteration < max_iterations; ++iteration) {
         state.request = pack_enhanced_tree(circuit, state.tree, config);
+        // 将 pack 阶段可能发生的几何失配重绑写回 tree，避免后续 SA 仍粘在旧 space。
+        write_request_lcps_to_tree(state.tree, state.request);
         state.feedback = evaluate_with_routing_adapter(circuit, state.request);
         apply_row_width_metrics(circuit, state.request, state.feedback.metrics, config);
         const bool expands_space =
@@ -1064,6 +1064,13 @@ double max_lcp_width_for_space(const SpaceNode& space) {
 }
 
 }  // namespace
+
+// 在 SA 开始前按网表创建初始 LCP 拓扑；初始 packing 仅提供 space 几何用于确定初始归属。
+void initialize_lcp_topology(const Circuit& circuit, EnhancedBStarTree& tree, const SolverConfig& config) {
+    auto request = pack_enhanced_tree(circuit, tree, config);
+    generate_initial_lcp_topology(circuit, request);
+    write_request_lcps_to_tree(tree, request);
+}
 
 // 按增强 B*-tree 和 ASF 对称组生成当前候选布局。
 RoutingEvaluationRequest pack_enhanced_tree(
@@ -1218,12 +1225,16 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
         !request.linking_points.empty() && routing_evaluation.bottom_up_dp.has_value() && !routing_evaluation.bottom_up_dp->success;
     for (const auto& space : request.space_nodes) {
         const auto detailed_space = detailed.required_space_by_node.find(space.id);
-        double required_space =
-            detailed_space == detailed.required_space_by_node.end()
-                ? space.required_space()
-                : std::max(space.required_space(), detailed_space->second);
+        // required_space_by_node 的语义是基础预留宽度，不能混入 coupling_extra_space。
+        // 否则写回 allocated_space 后，下一轮 required_space() 会把同一 coupling 再加一次。
+        double required_space = space.allocated_space;
+        if (detailed_space != detailed.required_space_by_node.end()) {
+            required_space = std::max(required_space, detailed_space->second);
+        }
         if (lcp_direct_fallback && !space.linking_points.empty()) {
-            required_space = std::max(required_space, space.required_space() + max_lcp_width_for_space(space));
+            required_space = std::max(
+                required_space,
+                std::max(0.0, space.required_space() - space.coupling_extra_space) + max_lcp_width_for_space(space));
         }
         feedback.required_space_by_node[space.id] = required_space;
         const auto detailed_coupling = detailed.coupling_space_by_node.find(space.id);
@@ -1233,7 +1244,7 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
                 : detailed_coupling->second;
         feedback.coupling_space_by_node[space.id] = coupling_space;
         const bool has_required_feedback =
-            required_space > space.required_space() + 1e-9;
+            required_space > space.allocated_space + 1e-9;
         const bool has_coupling_feedback = coupling_space > 1e-9;
         if (has_required_feedback || has_coupling_feedback) ++space_feedback_nodes;
     }
@@ -1252,7 +1263,7 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     }
 
     auto initial_tree = make_enhanced_tree(circuit);
-    initialize_tree_lcps(circuit, initial_tree, config);
+    initialize_lcp_topology(circuit, initial_tree, config);
     if (config.debug_search) {
         std::cerr << "[search] init ordinary_right_child=" << (has_ordinary_right_child(initial_tree) ? "true" : "false")
                   << " tree_lcps=" << count_tree_lcps(initial_tree) << '\n';
@@ -1279,8 +1290,15 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     std::vector<SaBtreeIterationTrace> sa_btree_iterations;
     if (config.dump_sa_btree) sa_btree_iterations.reserve(static_cast<std::size_t>(config.sa_iterations));
     for (int iteration = 0; iteration < config.sa_iterations; ++iteration) {
+        // 同一 SA 温度轮内重采样，避免不可执行的 LCP 操作消耗一次退火迭代。
+        constexpr int max_perturbation_attempts = 8;
         auto next_tree = current.tree;
-        const auto perturbation = perturb_placement_tree(next_tree, rng);
+        PerturbationReport perturbation;
+        for (int attempt = 0; attempt < max_perturbation_attempts; ++attempt) {
+            next_tree = current.tree;
+            perturbation = perturb_placement_tree(next_tree, rng);
+            if (perturbation.changed) break;
+        }
         auto next = evaluate_candidate(circuit, std::move(next_tree), config, base_metrics);
         const double delta = next.cost - current.cost;
         const bool accept = delta <= 0.0 || probability(rng) < std::exp(-delta / std::max(temperature, 1e-9));
@@ -1305,6 +1323,10 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
             sa_btree_iterations.push_back(std::move(trace));
         }
         const double logged_next_cost = next.cost;
+        // accept 前先取出本轮候选的 feedback 收敛信息，避免 move 后丢失。
+        const int next_feedback_iterations = next.feedback.metrics.routing_feedback_iterations;
+        const bool next_feedback_converged = next.feedback.metrics.routing_feedback_converged;
+        const int next_space_feedback_nodes = next.feedback.metrics.space_feedback_nodes;
         if (accept) current = std::move(next);
         if (current.cost < best.cost) best = current;
         // 默认输出轻量 SA 进度，避免长评估时终端看起来像卡住。
@@ -1320,11 +1342,15 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
         progress.iteration = iteration + 1;
         progress.sa_iterations = config.sa_iterations;
         progress.move = perturbation.move;
+        progress.changed = perturbation.changed;
         progress.accept = accept;
         progress.next_cost = logged_next_cost;
         progress.current_cost = current.cost;
         progress.best_cost = best.cost;
         progress.temperature = temperature;
+        progress.routing_feedback_iterations = next_feedback_iterations;
+        progress.routing_feedback_converged = next_feedback_converged;
+        progress.space_feedback_nodes = next_space_feedback_nodes;
         sa_progress.push_back(std::move(progress));
         if (config.debug_search) {
             std::cerr << "[search] iter=" << iteration

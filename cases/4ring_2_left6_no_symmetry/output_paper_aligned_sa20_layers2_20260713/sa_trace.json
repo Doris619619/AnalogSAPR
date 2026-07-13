@@ -1,0 +1,26 @@
+{
+  "sa_iterations": 20,
+  "recorded": 20,
+  "iterations": [
+    {"index": 1, "total": 20, "move": "module-rotate", "accept": true, "next_cost": 14700002.602360215, "current_cost": 14700002.602360215, "best_cost": 14700002.602360215, "temperature": 5},
+    {"index": 2, "total": 20, "move": "lcp-split", "accept": true, "next_cost": 103373.13894994199, "current_cost": 103373.13894994199, "best_cost": 103373.13894994199, "temperature": 4.7999999999999998},
+    {"index": 3, "total": 20, "move": "lcp-merge", "accept": true, "next_cost": 101529.36456890564, "current_cost": 101529.36456890564, "best_cost": 101529.36456890564, "temperature": 4.6079999999999997},
+    {"index": 4, "total": 20, "move": "lcp-merge", "accept": true, "next_cost": 100003.05333307985, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 4.4236799999999992},
+    {"index": 5, "total": 20, "move": "module-rotate", "accept": false, "next_cost": 21500003.906102631, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 4.2467327999999993},
+    {"index": 6, "total": 20, "move": "lcp-swap", "accept": false, "next_cost": 12106003.679036917, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 4.076863487999999},
+    {"index": 7, "total": 20, "move": "module-rotate", "accept": false, "next_cost": 21500003.906102631, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 3.9137889484799988},
+    {"index": 8, "total": 20, "move": "module-delete-insert", "accept": false, "next_cost": 200003.64553005039, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 3.7572373905407987},
+    {"index": 9, "total": 20, "move": "lcp-swap", "accept": false, "next_cost": 12106003.679036917, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 3.6069478949191667},
+    {"index": 10, "total": 20, "move": "lcp-delete-insert", "accept": false, "next_cost": 13830063.949252129, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 3.4626699791224},
+    {"index": 11, "total": 20, "move": "lcp-split", "accept": false, "next_cost": 16100003.895961571, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 3.324163179957504},
+    {"index": 12, "total": 20, "move": "lcp-split", "accept": false, "next_cost": 16100003.895961571, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 3.1911966527592037},
+    {"index": 13, "total": 20, "move": "lcp-swap", "accept": false, "next_cost": 12106003.679036917, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 3.0635487866488353},
+    {"index": 14, "total": 20, "move": "module-swap", "accept": false, "next_cost": 16100003.895961571, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 2.9410068351828818},
+    {"index": 15, "total": 20, "move": "module-swap", "accept": false, "next_cost": 13100003.97489576, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 2.8233665617755666},
+    {"index": 16, "total": 20, "move": "module-rotate", "accept": false, "next_cost": 12900003.961562427, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 2.710431899304544},
+    {"index": 17, "total": 20, "move": "lcp-delete-insert", "accept": false, "next_cost": 14900003.631576238, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 2.6020146233323622},
+    {"index": 18, "total": 20, "move": "module-swap", "accept": false, "next_cost": 16100003.895961571, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 2.4979340383990678},
+    {"index": 19, "total": 20, "move": "module-swap", "accept": false, "next_cost": 16100003.895961571, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 2.3980166768631048},
+    {"index": 20, "total": 20, "move": "lcp-split", "accept": false, "next_cost": 16100003.895961571, "current_cost": 100003.05333307985, "best_cost": 100003.05333307985, "temperature": 2.3020960097885808}
+  ]
+}
