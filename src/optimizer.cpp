@@ -1424,6 +1424,7 @@ RoutingEvaluationRequest pack_enhanced_tree(
         resolve_boundary_margin(circuit, config, layout_width, layout_height));
     request.placement_order = ordered_placements(circuit, request);
     request.lcp_candidate_seed = config.seed;
+    request.allow_lcp_location_negotiation = config.negotiate_lcp_locations;
     request.routing_layers = config.routing_layers;
     assign_space_physical_regions(circuit, request, config);
     request.tree = make_routing_tree_snapshot(tree);
