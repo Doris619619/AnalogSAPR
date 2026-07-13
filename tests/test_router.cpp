@@ -27,8 +27,12 @@ bool overlaps(const sapr::Rect& left, const sapr::Rect& right) {
 bool valid_lcp_topology(const sapr::LinkingControlPoint& point) {
     if (point.segments.size() < 2) return false;
     const auto& net = point.segments.front().net;
+    std::unordered_set<std::string> segment_ids;
     for (const auto& segment : point.segments) {
         if (segment.net != net) return false;
+        if (segment.from != point.id && segment.to != point.id) return false;
+        const std::string key = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
+        if (!segment_ids.insert(key).second) return false;
     }
     return true;
 }
@@ -201,8 +205,10 @@ void run_router_tests() {
                           {},
                           0.0,
                           {}};
+    require(approx(space.formula_required_space(), 4.0), "space formula value should match paper equation before feedback");
     require(approx(space.required_space(), 4.0), "space formula should match paper equation");
     space.allocated_space = 9.0;
+    require(approx(space.formula_required_space(), 4.0), "feedback allocation should not change formula value");
     require(approx(space.required_space(), 9.0), "feedback allocation should override smaller formula result");
 
     const sapr::SolverConfig config{5.0, 40.0, 7, 0};

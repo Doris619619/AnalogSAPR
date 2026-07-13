@@ -545,13 +545,17 @@ double LinkingControlPoint::required_width() const {
     return result;
 }
 
-double SpaceNode::required_space() const {
-    double result = allocated_space + coupling_extra_space;
+double SpaceNode::formula_required_space() const {
     double formula = 0.0;
     for (const auto& point : linking_points) {
         formula += point.required_width() * static_cast<double>(std::max<std::size_t>(point.segments.size(), 2)) / 2.0;
     }
-    return std::max(result, formula);
+    return formula;
+}
+
+double SpaceNode::required_space() const {
+    double result = allocated_space + coupling_extra_space;
+    return std::max(result, formula_required_space());
 }
 
 std::string space_kind_name(SpaceNodeKind kind) {
@@ -771,15 +775,29 @@ std::vector<LcpSlot> collect_lcp_slots(std::vector<SpaceNode*>& spaces) {
 }
 
 bool is_valid_lcp(const LinkingControlPoint& point) {
+    if (point.id.empty() || point.space_node_id.empty()) return false;
     if (point.segments.size() < 2) return false;
     const std::string& net = point.segments.front().net;
     std::unordered_set<std::string> segment_ids;
     for (const auto& segment : point.segments) {
         if (segment.net != net) return false;
+        if (segment.from != point.id && segment.to != point.id) return false;
         const std::string key = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
         if (!segment_ids.insert(key).second) return false;
     }
     return true;
+}
+
+void retarget_lcp_segments(LinkingControlPoint& point, const std::string& old_id, const std::string& new_id) {
+    point.id = new_id;
+    for (auto& segment : point.segments) {
+        if (segment.from == old_id) segment.from = new_id;
+        if (segment.to == old_id) segment.to = new_id;
+    }
+}
+
+bool can_materialize_space(const SpaceNode& space) {
+    return !space.id.empty() && !space.owner.empty();
 }
 
 void move_lcp_to_space(LinkingControlPoint& point, SpaceNode& target) {
@@ -792,10 +810,19 @@ bool perturb_lcp_delete_insert(EnhancedBStarTree& tree, std::mt19937& rng) {
     auto slots = collect_lcp_slots(spaces);
     if (slots.empty() || spaces.size() < 2) return false;
     std::uniform_int_distribution<std::size_t> slot_dist(0, slots.size() - 1);
-    std::uniform_int_distribution<std::size_t> space_dist(0, spaces.size() - 1);
+    std::vector<SpaceNode*> targets;
+    for (auto* space : spaces) {
+        if (space != nullptr && can_materialize_space(*space)) targets.push_back(space);
+    }
+    if (targets.size() < 2) return false;
+    std::uniform_int_distribution<std::size_t> space_dist(0, targets.size() - 1);
     const auto slot = slots[slot_dist(rng)];
-    SpaceNode* target = spaces[space_dist(rng)];
-    if (target == slot.space && spaces.size() > 1) target = spaces[(space_dist(rng) + 1) % spaces.size()];
+    SpaceNode* target = targets[space_dist(rng)];
+    if (target == slot.space && targets.size() > 1) {
+        const auto found = std::find(targets.begin(), targets.end(), target);
+        const std::size_t index = found == targets.end() ? 0 : static_cast<std::size_t>(found - targets.begin());
+        target = targets[(index + 1) % targets.size()];
+    }
 
     auto point = std::move(slot.space->linking_points[slot.index]);
     slot.space->linking_points.erase(slot.space->linking_points.begin() + static_cast<std::ptrdiff_t>(slot.index));
@@ -828,12 +855,18 @@ bool perturb_lcp_split(EnhancedBStarTree& tree, std::mt19937& rng) {
     std::uniform_int_distribution<std::size_t> slot_dist(0, splittable.size() - 1);
     const auto slot = splittable[slot_dist(rng)];
     auto& point = slot.space->linking_points[slot.index];
+    const auto original = point;
+    const std::string old_id = point.id;
     const std::size_t half = point.segments.size() / 2;
     LinkingControlPoint split = point;
-    split.id = point.id + ":split";
     split.segments.assign(point.segments.begin() + static_cast<std::ptrdiff_t>(half), point.segments.end());
     point.segments.erase(point.segments.begin() + static_cast<std::ptrdiff_t>(half), point.segments.end());
-    if (!is_valid_lcp(point) || !is_valid_lcp(split)) return false;
+    retarget_lcp_segments(point, old_id, old_id + ":split:a");
+    retarget_lcp_segments(split, old_id, old_id + ":split:b");
+    if (!is_valid_lcp(point) || !is_valid_lcp(split)) {
+        point = original;
+        return false;
+    }
     slot.space->linking_points.push_back(std::move(split));
     return true;
 }
@@ -851,14 +884,19 @@ bool perturb_lcp_merge(EnhancedBStarTree& tree, std::mt19937& rng) {
         const auto& second_point = second.space->linking_points[second.index];
         if (first_point.segments.empty() || second_point.segments.empty()) continue;
         if (first_point.segments.front().net != second_point.segments.front().net) continue;
+        LinkingControlPoint merged = first_point;
+        const std::string first_id = first_point.id;
+        const std::string second_id = second_point.id;
+        const std::string merged_id = first_id + ":merge:" + second_id;
         const auto second_segments = second_point.segments;
-        first.space->linking_points[first.index].segments.insert(
-            first.space->linking_points[first.index].segments.end(),
-            second_segments.begin(),
-            second_segments.end());
-        const bool valid = is_valid_lcp(first.space->linking_points[first.index]);
+        merged.segments.insert(merged.segments.end(), second_segments.begin(), second_segments.end());
+        retarget_lcp_segments(merged, first_id, merged_id);
+        retarget_lcp_segments(merged, second_id, merged_id);
+        const bool valid = is_valid_lcp(merged);
+        if (!valid) return false;
+        first.space->linking_points[first.index] = std::move(merged);
         second.space->linking_points.erase(second.space->linking_points.begin() + static_cast<std::ptrdiff_t>(second.index));
-        return valid;
+        return true;
     }
     return false;
 }

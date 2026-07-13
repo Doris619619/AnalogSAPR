@@ -320,6 +320,8 @@ struct SpaceNode {
     std::optional<Rect> physical_region;
 
     // 按论文公式计算该空间节点需要预留的宽度。
+    // 按论文公式返回 LCP 本身需要的 routing resource，不包含 feedback 下界。
+    [[nodiscard]] double formula_required_space() const;
     [[nodiscard]] double required_space() const;
 };
 

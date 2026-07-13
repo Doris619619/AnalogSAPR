@@ -257,6 +257,31 @@ void write_debug_topologies_json(std::ostringstream& out, const RoutingEvaluatio
 }
 
 // 写出 routing.txt 语义的一段最终金属线，便于和 PNG 上的异常线段互相定位。
+// 写出 space node 的论文公式值、feedback 下界和最终预留空间。
+void write_debug_space_nodes_json(std::ostringstream& out, const RoutingEvaluationRequest& request) {
+    out << "  \"space_nodes\": [\n";
+    for (std::size_t index = 0; index < request.space_nodes.size(); ++index) {
+        if (index != 0) out << ",\n";
+        const auto& space = request.space_nodes[index];
+        out << "    {\"id\": ";
+        write_json_string(out, space.id);
+        out << ", \"owner\": ";
+        write_json_string(out, space.owner);
+        out << ", \"kind\": ";
+        write_json_string(out, space_kind_name(space.kind));
+        out << ", \"formula_required_space\": " << space.formula_required_space()
+            << ", \"allocated_space\": " << space.allocated_space
+            << ", \"coupling_extra_space\": " << space.coupling_extra_space
+            << ", \"final_required_space\": " << space.required_space()
+            << ", \"required_space\": " << space.required_space()
+            << ", \"lcp_count\": " << space.linking_points.size()
+            << ", \"physical_region\": ";
+        write_optional_rect_json(out, space.physical_region);
+        out << '}';
+    }
+    out << "\n  ]";
+}
+
 void write_route_segment_json(std::ostringstream& out, const RouteSegment& route) {
     out << "{\"net\": ";
     write_json_string(out, route.net);
@@ -484,6 +509,8 @@ std::string make_routing_debug_json(
     out
         << "},\n";
     write_debug_topologies_json(out, request);
+    out << ",\n";
+    write_debug_space_nodes_json(out, request);
     out << ",\n  \"final_candidates\": [";
     for (std::size_t index = 0; index < evaluation.candidates.size(); ++index) {
         if (index != 0) out << ',';

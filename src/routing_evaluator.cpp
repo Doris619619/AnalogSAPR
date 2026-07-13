@@ -1107,7 +1107,9 @@ DetailedLegalization legalize_detailed_candidate(
     }
     return DetailedLegalization{false, selected, {}, {}, false, false, std::move(failure_messages)};
 }
+/*
 // 表示整网在同一 LCP location 下合法化后的结果。
+*/
 struct LcpNetLegalization {
     bool success{};
     std::string chosen_lcp_candidate_id;
@@ -1560,17 +1562,43 @@ int detailed_priority_rank(Priority priority) {
 }
 
 // 按论文 detailed routing 优先级排序 net route。
+bool module_in_symmetry_constraints(const Circuit& circuit, const std::string& module) {
+    for (const auto& pair : circuit.constraints.symmetry_pairs) {
+        if (pair.left == module || pair.right == module) return true;
+    }
+    for (const auto& self : circuit.constraints.symmetry_selfs) {
+        if (self.module == module) return true;
+    }
+    return false;
+}
+
+bool net_touches_symmetry_group(const Circuit& circuit, const std::string& net) {
+    const auto found = circuit.nets.find(net);
+    if (found == circuit.nets.end()) return false;
+    for (const auto& terminal : found->second.terminals) {
+        const auto pin = circuit.pins.find(terminal);
+        if (pin != circuit.pins.end() && module_in_symmetry_constraints(circuit, pin->second.module)) return true;
+    }
+    return false;
+}
+
+int detailed_net_rank(const Circuit& circuit, const std::string& net) {
+    if (net_touches_symmetry_group(circuit, net)) return 0;
+    const auto found = circuit.nets.find(net);
+    const Priority priority = found == circuit.nets.end() ? Priority::Normal : found->second.priority;
+    if (priority == Priority::Symmetry) return 0;
+    if (priority == Priority::Critical) return 1;
+    if (circuit.constraints.wire_widths.contains(net)) return 2;
+    return detailed_priority_rank(priority) + 1;
+}
+
 std::vector<const routing::NetRouteChoice*> ordered_detailed_routes(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation) {
     std::vector<const routing::NetRouteChoice*> routes;
     for (const auto& route : evaluation.global_routing.net_routes) routes.push_back(&route);
     std::stable_sort(routes.begin(), routes.end(), [&](const auto* left, const auto* right) {
-        const auto left_it = circuit.nets.find(left->net);
-        const auto right_it = circuit.nets.find(right->net);
-        const Priority left_priority = left_it == circuit.nets.end() ? Priority::Normal : left_it->second.priority;
-        const Priority right_priority = right_it == circuit.nets.end() ? Priority::Normal : right_it->second.priority;
-        return detailed_priority_rank(left_priority) < detailed_priority_rank(right_priority);
+        return detailed_net_rank(circuit, left->net) < detailed_net_rank(circuit, right->net);
     });
     return routes;
 }
@@ -1642,11 +1670,7 @@ std::vector<routing::RouteCandidate> order_candidates_for_detailed_routing(
     const std::vector<routing::RouteCandidate>& candidates) {
     auto ordered = order_candidates_by_topology(request, candidates);
     std::stable_sort(ordered.begin(), ordered.end(), [&](const auto& left, const auto& right) {
-        const auto left_it = circuit.nets.find(left.net);
-        const auto right_it = circuit.nets.find(right.net);
-        const Priority left_priority = left_it == circuit.nets.end() ? Priority::Normal : left_it->second.priority;
-        const Priority right_priority = right_it == circuit.nets.end() ? Priority::Normal : right_it->second.priority;
-        return detailed_priority_rank(left_priority) < detailed_priority_rank(right_priority);
+        return detailed_net_rank(circuit, left.net) < detailed_net_rank(circuit, right.net);
     });
     return ordered;
 }
