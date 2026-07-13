@@ -721,7 +721,8 @@ void run_routing_evaluator_tests() {
     require(
         single_loop_solution.metrics->routing_feedback_iterations == 1,
         "routing_feedback_iterations=1 should keep current single-pass behavior");
-    const auto boundary_tree = sapr::make_enhanced_tree(circuit);
+    auto boundary_tree = sapr::make_enhanced_tree(circuit);
+    sapr::initialize_lcp_topology(circuit, boundary_tree, config);
     const auto request_for_dp = sapr::pack_enhanced_tree(circuit, boundary_tree, config);
     require(!request_for_dp.packing_trace.steps.empty(), "pack_enhanced_tree should record contour trace");
     require(boundary_tree.root.has_value(), "boundary margin test requires a root node");
@@ -883,7 +884,9 @@ void run_routing_evaluator_tests() {
         require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
     }
     const auto mixed_circuit = sapr::load_circuit(mixed_lcp_direct_case_input_dir());
-    const auto mixed_request = sapr::pack_enhanced_tree(mixed_circuit, sapr::make_chain_tree(mixed_circuit), config);
+    auto mixed_tree = sapr::make_chain_tree(mixed_circuit);
+    sapr::initialize_lcp_topology(mixed_circuit, mixed_tree, config);
+    const auto mixed_request = sapr::pack_enhanced_tree(mixed_circuit, mixed_tree, config);
     const auto mixed_evaluation = sapr::evaluate_routing(mixed_circuit, mixed_request);
     require(
         mixed_evaluation.bottom_up_dp.has_value() && mixed_evaluation.bottom_up_dp->success,
@@ -910,6 +913,7 @@ void run_routing_evaluator_tests() {
         !no_local_segment_evaluation.bottom_up_dp->packing_time_dp_used,
         "cleared local segments should force fallback DP transition inference");
     auto feedback_tree = sapr::make_enhanced_tree(circuit);
+    sapr::initialize_lcp_topology(circuit, feedback_tree, config);
     const auto first_feedback_request = sapr::pack_enhanced_tree(circuit, feedback_tree, config);
     const auto first_feedback = sapr::evaluate_with_routing_adapter(circuit, first_feedback_request);
     require(

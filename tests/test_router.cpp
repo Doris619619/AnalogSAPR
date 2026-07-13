@@ -37,6 +37,53 @@ bool valid_lcp_topology(const sapr::LinkingControlPoint& point) {
     return true;
 }
 
+// 验证所有 LCP 的 id 唯一，且被删除 LCP 不会残留在线段端点中。
+bool lcp_references_are_consistent(const sapr::EnhancedBStarTree& tree, const std::string& removed_id = "") {
+    std::unordered_set<std::string> point_ids;
+    for (const auto& space : sapr::collect_space_nodes(tree)) {
+        for (const auto& point : space.linking_points) {
+            if (!point_ids.insert(point.id).second || !valid_lcp_topology(point)) return false;
+            for (const auto& segment : point.segments) {
+                if (!removed_id.empty() && (segment.from == removed_id || segment.to == removed_id)) return false;
+            }
+        }
+    }
+    return true;
+}
+
+// 构造包含一个四线段 LCP 的树，用于确定性覆盖 split 的端点重连语义。
+sapr::EnhancedBStarTree make_split_test_tree(const sapr::Circuit& circuit) {
+    auto tree = sapr::make_enhanced_tree(circuit);
+    auto& asf_tree = tree.symmetry_groups.front().asf_bstar_tree;
+    auto& asf_node = asf_tree.nodes.at(asf_tree.representative_order.front());
+    auto& space = asf_node.space_node_groups.front().spaces.front();
+    space.linking_points = {{"S", "", {{"N", "A", "S", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:A->S"},
+                                       {"N", "B", "S", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:B->S"},
+                                       {"N", "S", "C", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:S->C"},
+                                       {"N", "S", "D", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:S->D"}},
+                              {}}};
+    space.linking_points.front().space_node_id = space.id;
+    return tree;
+}
+
+// 构造两个同网 LCP 的树，用于确定性覆盖 merge 的全局端点重连语义。
+sapr::EnhancedBStarTree make_merge_test_tree(const sapr::Circuit& circuit) {
+    auto tree = sapr::make_enhanced_tree(circuit);
+    auto& asf_tree = tree.symmetry_groups.front().asf_bstar_tree;
+    auto& asf_node = asf_tree.nodes.at(asf_tree.representative_order.front());
+    auto& first_space = asf_node.space_node_groups.front().spaces.at(0);
+    auto& second_space = asf_node.space_node_groups.front().spaces.at(1);
+    first_space.linking_points = {{"A", "", {{"N", "P", "A", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:P->A"},
+                                                        {"N", "A", "X", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:A->X"}},
+                                               {}}};
+    second_space.linking_points = {{"B", "", {{"N", "Q", "B", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:Q->B"},
+                                                         {"N", "B", "Y", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:B->Y"}},
+                                                {}}};
+    first_space.linking_points.front().space_node_id = first_space.id;
+    second_space.linking_points.front().space_node_id = second_space.id;
+    return tree;
+}
+
 // 从 placement 生成模块包围盒。
 sapr::Rect placement_box(const sapr::Circuit& circuit, const sapr::Placement& placement) {
     const auto size = sapr::placed_size(circuit.modules.at(placement.module), placement);
@@ -120,6 +167,7 @@ void run_router_tests() {
         sapr::load_circuit(std::filesystem::path(SAPR_SOURCE_DIR) / "cases" / "4ring_2_left6_no_symmetry" / "input");
     auto no_symmetry_tree = sapr::make_enhanced_tree(no_symmetry_circuit);
     require(sapr::has_ordinary_right_child(no_symmetry_tree), "ordinary modules should keep two-dimensional right branches");
+    sapr::initialize_lcp_topology(no_symmetry_circuit, no_symmetry_tree, sapr::SolverConfig{});
     const auto no_symmetry_request = sapr::pack_enhanced_tree(no_symmetry_circuit, no_symmetry_tree, sapr::SolverConfig{});
     const double first_y = no_symmetry_request.placements.at(no_symmetry_request.placement_order.front()).y;
     const bool has_second_row = std::any_of(
@@ -212,6 +260,7 @@ void run_router_tests() {
     require(approx(space.required_space(), 9.0), "feedback allocation should override smaller formula result");
 
     const sapr::SolverConfig config{5.0, 40.0, 7, 0};
+    sapr::initialize_lcp_topology(circuit, tree, config);
     const auto request = sapr::pack_enhanced_tree(circuit, tree, config);
     require(request.placements.contains("M1"), "representative placement should exist");
     require(request.placements.contains("M2"), "mirror placement should exist");
@@ -259,6 +308,7 @@ void run_router_tests() {
     auto feedback_tree = tree;
     sapr::RoutingFeedback feedback;
     feedback.required_space_by_node["sg1/M1:space_node_group_outer:representative_right"] = 25.0;
+    feedback.coupling_space_by_node["sg1/M1:space_node_group_outer:representative_right"] = 2.0;
     sapr::apply_routing_feedback(feedback_tree, feedback);
     const auto expanded = sapr::pack_enhanced_tree(circuit, feedback_tree, config);
     const auto expanded_right_space = std::find_if(expanded.space_nodes.begin(), expanded.space_nodes.end(), [](const auto& space_node) {
@@ -266,7 +316,12 @@ void run_router_tests() {
     });
     require(expanded_right_space != expanded.space_nodes.end(), "expanded request should keep M1 right space");
     require(
-        expanded_right_space->physical_region->x2 - expanded_right_space->physical_region->x1 >= 25.0,
+        approx(expanded_right_space->allocated_space, 25.0) &&
+            approx(expanded_right_space->coupling_extra_space, 2.0) &&
+            approx(expanded_right_space->required_space(), 27.0),
+        "routing feedback should keep base allocation and coupling space separate");
+    require(
+        expanded_right_space->physical_region->x2 - expanded_right_space->physical_region->x1 >= 27.0,
         "space physical region width should grow with required space feedback");
 
     auto perturbed = tree;
@@ -282,8 +337,53 @@ void run_router_tests() {
         }
     }
 
+    bool split_executed = false;
+    for (unsigned int seed = 0; seed < 1000 && !split_executed; ++seed) {
+        auto split_tree = make_split_test_tree(circuit);
+        std::mt19937 split_rng(seed);
+        const auto report = sapr::perturb_placement_tree(split_tree, split_rng);
+        if (report.move != "lcp-split" || !report.changed) continue;
+        split_executed = true;
+        require(sapr::count_tree_lcps(split_tree) == 2, "split should replace one LCP with two LCPs");
+        require(lcp_references_are_consistent(split_tree), "split should reconnect every moved segment to its new LCP");
+        bool has_split_endpoint = false;
+        for (const auto& space_node : sapr::collect_space_nodes(split_tree)) {
+            for (const auto& point : space_node.linking_points) {
+                for (const auto& segment : point.segments) {
+                    has_split_endpoint = has_split_endpoint || segment.from.find("S:split") != std::string::npos ||
+                                         segment.to.find("S:split") != std::string::npos;
+                }
+            }
+        }
+        require(has_split_endpoint, "split should change moved segment endpoints to the created LCP");
+    }
+    require(split_executed, "test seeds should exercise a successful LCP split");
+
+    bool merge_executed = false;
+    for (unsigned int seed = 0; seed < 1000 && !merge_executed; ++seed) {
+        auto merge_tree = make_merge_test_tree(circuit);
+        std::mt19937 merge_rng(seed);
+        const auto report = sapr::perturb_placement_tree(merge_tree, merge_rng);
+        if (report.move != "lcp-merge" || !report.changed) continue;
+        merge_executed = true;
+        require(sapr::count_tree_lcps(merge_tree) == 1, "merge should combine two LCPs into one LCP");
+        const auto spaces_after_merge = sapr::collect_space_nodes(merge_tree);
+        std::string surviving_id;
+        for (const auto& space_node : spaces_after_merge) {
+            if (!space_node.linking_points.empty()) surviving_id = space_node.linking_points.front().id;
+        }
+        const std::string removed_id = surviving_id == "A" ? "B" : "A";
+        require(
+            lcp_references_are_consistent(merge_tree, removed_id),
+            "merge should reconnect all references to the retained LCP before deleting the old LCP");
+    }
+    require(merge_executed, "test seeds should exercise a successful LCP merge");
+
     const auto solution = sapr::solve_placement_aware(circuit, config);
     require(solution.metrics.has_value(), "solution should carry routing metric snapshot");
+    require(
+        std::all_of(solution.sa_progress.begin(), solution.sa_progress.end(), [](const auto& entry) { return entry.changed; }),
+        "SA should resample instead of evaluating an unchanged perturbation");
     require(solution.routing_candidate_count.value_or(0) > circuit.net_order.size(), "routing should evaluate topology candidates");
     for (const auto& route : solution.routes) {
         require(route.x1 != route.x2 || route.y1 != route.y2, "zero-length route should be filtered");
@@ -301,7 +401,8 @@ void run_router_tests() {
     }
 
     const auto four_pin_circuit = make_same_location_lcp_circuit(4);
-    const auto four_pin_tree = sapr::make_enhanced_tree(four_pin_circuit);
+    auto four_pin_tree = sapr::make_enhanced_tree(four_pin_circuit);
+    sapr::initialize_lcp_topology(four_pin_circuit, four_pin_tree, config);
     const auto four_pin_request = sapr::pack_enhanced_tree(four_pin_circuit, four_pin_tree, config);
     require(count_lcps_with_token(four_pin_request, ":leaf:") == 2, "4-pin net should create two leaf LCPs");
     require(count_lcps_with_token(four_pin_request, ":root") == 1, "4-pin net should create one root LCP");
@@ -321,7 +422,8 @@ void run_router_tests() {
 
     auto flow_lcp_circuit = make_same_location_lcp_circuit(4);
     flow_lcp_circuit.constraints.flows.push_back({"N", "M.P0", "M.P3"});
-    const auto flow_lcp_tree = sapr::make_enhanced_tree(flow_lcp_circuit);
+    auto flow_lcp_tree = sapr::make_enhanced_tree(flow_lcp_circuit);
+    sapr::initialize_lcp_topology(flow_lcp_circuit, flow_lcp_tree, config);
     const auto flow_lcp_request = sapr::pack_enhanced_tree(flow_lcp_circuit, flow_lcp_tree, config);
     require(
         topology_has_flow_path(flow_lcp_request, "M.P0", "M.P3"),
@@ -329,7 +431,8 @@ void run_router_tests() {
 
     auto blocked_lcp_circuit = make_same_location_lcp_circuit(4);
     blocked_lcp_circuit.modules.at("M").active = {0.0, 0.0, 10.0, 10.0};
-    const auto blocked_lcp_tree = sapr::make_enhanced_tree(blocked_lcp_circuit);
+    auto blocked_lcp_tree = sapr::make_enhanced_tree(blocked_lcp_circuit);
+    sapr::initialize_lcp_topology(blocked_lcp_circuit, blocked_lcp_tree, config);
     const auto blocked_lcp_request = sapr::pack_enhanced_tree(blocked_lcp_circuit, blocked_lcp_tree, config);
     for (const auto& point : blocked_lcp_request.linking_points) {
         for (const auto& candidate : point.location_candidates) {
@@ -340,7 +443,8 @@ void run_router_tests() {
     }
 
     const auto seven_pin_circuit = make_same_location_lcp_circuit(7);
-    const auto seven_pin_tree = sapr::make_enhanced_tree(seven_pin_circuit);
+    auto seven_pin_tree = sapr::make_enhanced_tree(seven_pin_circuit);
+    sapr::initialize_lcp_topology(seven_pin_circuit, seven_pin_tree, config);
     const auto seven_pin_request = sapr::pack_enhanced_tree(seven_pin_circuit, seven_pin_tree, config);
     require(count_lcps_with_token(seven_pin_request, ":leaf:") == 3, "7-pin same-location net should split into 3 balanced leaves");
     for (const auto& point : seven_pin_request.linking_points) {

@@ -51,6 +51,8 @@ struct WorkingLcp {
     double required_width{kDefaultWidth};
     double ideal_x{};
     double ideal_y{};
+    // 关联 pin 坐标，供 space 绑定用星形估计线长。
+    std::vector<std::pair<double, double>> pin_xy;
     Rect support_bbox{};
     NetDirection direction{NetDirection::Neutral};
     unsigned int candidate_seed{};
@@ -345,12 +347,14 @@ WireSegmentRef make_segment(
             net + ":" + from + "->" + to};
 }
 
-// 返回 module 的已放置 bbox。
+// 返回 module 的已放置 bbox；初始 LCP 拓扑阶段尚未 packing 时回退到模块本地 active 区域。
 Rect module_box_for_pin(
     const Circuit& circuit,
     const std::unordered_map<std::string, Placement>& placements,
     const std::string& module) {
-    const auto& placement = placements.at(module);
+    const auto found = placements.find(module);
+    if (found == placements.end()) return circuit.modules.at(module).active;
+    const auto& placement = found->second;
     const auto size = placed_size(circuit.modules.at(module), placement);
     return {placement.x, placement.y, placement.x + size.first, placement.y + size.second};
 }
@@ -399,21 +403,63 @@ std::pair<double, double> space_anchor(
     return {cx, cy};
 }
 
-// 计算 space 绑定分数。
+// 估计 LCP 落到 space 锚点后的星形线长；无 pin 时回退到 ideal 距离。
+double estimated_wirelength_to_pins(
+    const SpaceNode& space,
+    const WorkingLcp& lcp,
+    const std::unordered_map<std::string, Rect>& module_boxes) {
+    // 初始拓扑阶段没有物理坐标，此时不能用虚构几何影响 space 归属。
+    if (module_boxes.empty()) return 0.0;
+    const auto anchor = space_anchor(space, module_boxes);
+    if (lcp.pin_xy.empty()) {
+        return std::abs(anchor.first - lcp.ideal_x) + std::abs(anchor.second - lcp.ideal_y);
+    }
+    double total = 0.0;
+    for (const auto& [x, y] : lcp.pin_xy) {
+        total += std::abs(anchor.first - x) + std::abs(anchor.second - y);
+    }
+    return total;
+}
+
+// 计算 space 绑定分数：整网估计线长 + 溢出/占用/方向惩罚。
 double space_score(
     const SpaceNode& space,
     const WorkingLcp& lcp,
     const SpaceBindingState& state,
     const std::unordered_map<std::string, Rect>& module_boxes) {
-    const auto anchor = space_anchor(space, module_boxes);
-    const double distance = std::abs(anchor.first - lcp.ideal_x) + std::abs(anchor.second - lcp.ideal_y);
+    const double estimated_wl = estimated_wirelength_to_pins(space, lcp, module_boxes);
     const double capacity_width = std::max(space.required_space(), kGridUnit);
     const double remaining_width = std::max(0.0, capacity_width - state.used_width);
-    const double width_penalty = remaining_width < lcp.required_width ? 10000.0 : 0.0;
+    const double overflow_penalty = remaining_width < lcp.required_width ? 10000.0 : 0.0;
+    const double used_space_penalty = static_cast<double>(state.used_lcp_count) * lcp.required_width;
     double direction_penalty = 0.0;
     if (lcp.direction == NetDirection::Horizontal && space.kind == SpaceNodeKind::Top) direction_penalty = 50.0;
     if (lcp.direction == NetDirection::Vertical && space.kind != SpaceNodeKind::Top) direction_penalty = 50.0;
-    return distance + static_cast<double>(state.used_lcp_count) * lcp.required_width + width_penalty + direction_penalty;
+    return estimated_wl + overflow_penalty + used_space_penalty + direction_penalty;
+}
+
+// 在 spaces 中为单个 LCP 选择分数最低的 space，并更新占用状态。
+SpaceNode* choose_best_space_for_lcp(
+    WorkingLcp& lcp,
+    std::vector<SpaceNode>& spaces,
+    std::unordered_map<std::string, SpaceBindingState>& states,
+    const std::unordered_map<std::string, Rect>& module_boxes) {
+    SpaceNode* best_space = nullptr;
+    double best_score = std::numeric_limits<double>::infinity();
+    for (auto& space : spaces) {
+        const double score = space_score(space, lcp, states[space.id], module_boxes);
+        if (score < best_score ||
+            (std::abs(score - best_score) <= 1e-9 && best_space != nullptr && space.id < best_space->id)) {
+            best_score = score;
+            best_space = &space;
+        }
+    }
+    if (best_space == nullptr) return nullptr;
+    lcp.point.space_node_id = best_space->id;
+    auto& state = states[best_space->id];
+    state.used_width += lcp.required_width;
+    ++state.used_lcp_count;
+    return best_space;
 }
 
 // 将 LCP 稳定绑定到分数最低的 space node。
@@ -428,20 +474,7 @@ void bind_lcps_to_spaces(
     });
     std::unordered_map<std::string, SpaceBindingState> states;
     for (auto& lcp : lcps) {
-        SpaceNode* best_space = nullptr;
-        double best_score = std::numeric_limits<double>::infinity();
-        for (auto& space : spaces) {
-            const double score = space_score(space, lcp, states[space.id], module_boxes);
-            if (score < best_score || (std::abs(score - best_score) <= 1e-9 && best_space != nullptr && space.id < best_space->id)) {
-                best_score = score;
-                best_space = &space;
-            }
-        }
-        if (best_space == nullptr) continue;
-        lcp.point.space_node_id = best_space->id;
-        auto& state = states[best_space->id];
-        state.used_width += lcp.required_width;
-        ++state.used_lcp_count;
+        choose_best_space_for_lcp(lcp, spaces, states, module_boxes);
     }
 }
 
@@ -684,14 +717,26 @@ void generate_candidates_for_lcp(
 }
 
 // 从 request placed_pins 收集指定 net 的全局 pin。
-std::vector<PinInfo> pins_for_net(const Net& net, const RoutingEvaluationRequest& request) {
+std::vector<PinInfo> pins_for_net(
+    const Circuit& circuit,
+    const Net& net,
+    const RoutingEvaluationRequest& request) {
     std::unordered_map<std::string, PlacedPin> placed;
     for (const auto& pin : request.placed_pins) placed[pin.key] = pin;
     std::vector<PinInfo> result;
     for (const auto& terminal : net.terminals) {
         const auto found = placed.find(terminal);
-        if (found == placed.end()) continue;
-        result.push_back({terminal, found->second.module, found->second.x, found->second.y, routing::layer_to_index(found->second.layer)});
+        if (found != placed.end()) {
+            result.push_back({terminal, found->second.module, found->second.x, found->second.y, routing::layer_to_index(found->second.layer)});
+            continue;
+        }
+        const auto circuit_pin = circuit.pins.find(terminal);
+        if (circuit_pin == circuit.pins.end()) continue;
+        result.push_back({terminal,
+                          circuit_pin->second.module,
+                          circuit_pin->second.x,
+                          circuit_pin->second.y,
+                          routing::layer_to_index(circuit_pin->second.layer)});
     }
     return result;
 }
@@ -730,7 +775,7 @@ void append_net_lcps(
     const Net& net,
     const RoutingEvaluationRequest& request,
     std::vector<WorkingLcp>& lcps) {
-    const auto pins = pins_for_net(net, request);
+    const auto pins = pins_for_net(circuit, net, request);
     if (pins.size() <= 2) return;
     const auto [min_width, max_width] = width_range_for_net(circuit, net.name);
     const double layer_penalty = std::max(min_width * 4.0, median_pairwise_distance(pins) * 0.10);
@@ -760,6 +805,7 @@ void append_net_lcps(
         lcp.ideal_y = ideal.second;
         for (int pin_index : cluster.pins) {
             const auto& pin = pins[static_cast<std::size_t>(pin_index)];
+            lcp.pin_xy.push_back({pin.x, pin.y});
             const auto [from, to] = oriented_pin_leaf_endpoints(flow, pin.terminal, leaf_id);
             lcp.point.segments.push_back(make_segment(circuit, net.name, from, to, min_width, max_width));
         }
@@ -781,6 +827,7 @@ void append_net_lcps(
     root.candidate_seed = request.lcp_candidate_seed;
     root.point.id = net.name + ":root";
     root.support_bbox = root_box;
+    for (const auto& pin : pins) root.pin_xy.push_back({pin.x, pin.y});
     std::vector<double> weighted_xs;
     std::vector<double> weighted_ys;
     for (std::size_t index = 0; index < leaf_ideals.size(); ++index) {
@@ -868,8 +915,17 @@ WorkingLcp working_lcp_from_existing(
     }
     if (!has_box) box = {0.0, 0.0, 0.0, 0.0};
     lcp.support_bbox = box;
-    lcp.ideal_x = (box.x1 + box.x2) / 2.0;
-    lcp.ideal_y = (box.y1 + box.y2) / 2.0;
+    for (const auto& pin : endpoint_pins) lcp.pin_xy.push_back({pin.x, pin.y});
+    if (!endpoint_pins.empty()) {
+        std::vector<int> indices(endpoint_pins.size());
+        std::iota(indices.begin(), indices.end(), 0);
+        const auto ideal = cluster_ideal(endpoint_pins, indices);
+        lcp.ideal_x = ideal.first;
+        lcp.ideal_y = ideal.second;
+    } else {
+        lcp.ideal_x = (box.x1 + box.x2) / 2.0;
+        lcp.ideal_y = (box.y1 + box.y2) / 2.0;
+    }
     lcp.direction = endpoint_pins.empty() ? NetDirection::Neutral : direction_for_pins(endpoint_pins);
     return lcp;
 }
@@ -892,8 +948,11 @@ void generate_initial_lcp_topology(const Circuit& circuit, RoutingEvaluationRequ
     }
     const auto module_boxes = module_boxes_for_request(circuit, request);
     bind_lcps_to_spaces(lcps, request.space_nodes, module_boxes);
-    for (auto& lcp : lcps) {
-        generate_candidates_for_lcp(lcp, request.space_nodes, module_boxes, request.active_region_blockers);
+    const bool has_physical_context = !request.placements.empty() && !request.placed_pins.empty();
+    if (has_physical_context) {
+        for (auto& lcp : lcps) {
+            generate_candidates_for_lcp(lcp, request.space_nodes, module_boxes, request.active_region_blockers);
+        }
     }
 
     for (auto& lcp : lcps) {
@@ -922,7 +981,7 @@ void refresh_lcp_location_candidates(const Circuit& circuit, RoutingEvaluationRe
     }
 }
 
-// 保持旧入口语义，供现有调用点继续使用。
+// 保持旧入口语义：已有 LCP 时只刷新候选点，space 归属仅由 SA 的 LCP 扰动改变。
 void generate_automatic_lcps(const Circuit& circuit, RoutingEvaluationRequest& request) {
     const bool has_existing_lcp = std::any_of(request.space_nodes.begin(), request.space_nodes.end(), [](const SpaceNode& space) {
         return !space.linking_points.empty();

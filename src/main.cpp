@@ -1,5 +1,6 @@
 // 实现 sapr validate/run 命令行入口和稳定的指标输出。
 // 文件职责：实现命令行入口，负责输入校验、求解运行、metrics/routing debug 输出。
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -221,6 +222,7 @@ std::filesystem::path write_sa_trace_json(const sapr::Solution& solution, const 
             << "\"index\": " << entry.iteration
             << ", \"total\": " << entry.sa_iterations
             << ", \"move\": \"" << json_escape(entry.move) << '"'
+            << ", \"changed\": " << (entry.changed ? "true" : "false")
             << ", \"accept\": " << (entry.accept ? "true" : "false")
             << ", \"next_cost\": " << entry.next_cost
             << ", \"current_cost\": " << entry.current_cost
@@ -231,6 +233,68 @@ std::filesystem::path write_sa_trace_json(const sapr::Solution& solution, const 
     out << "\n  ]\n";
     out << "}\n";
     return trace_path;
+}
+
+// 汇总 SA 每轮候选与最终解的 routing feedback 收敛信息，写入独立 JSON。
+std::filesystem::path write_sa_feedback_converge_json(
+    const sapr::Solution& solution,
+    const sapr::Metrics& metrics,
+    const std::filesystem::path& output) {
+    std::filesystem::create_directories(output);
+    const auto path = output / "sa_feedback_converge.json";
+    std::ofstream out(path);
+    if (!out) throw std::runtime_error("failed to write " + path.string());
+
+    int converged_count = 0;
+    int not_converged_count = 0;
+    int max_feedback_iterations = 0;
+    for (const auto& entry : solution.sa_progress) {
+        if (entry.routing_feedback_converged) {
+            ++converged_count;
+        } else {
+            ++not_converged_count;
+        }
+        max_feedback_iterations =
+            std::max(max_feedback_iterations, entry.routing_feedback_iterations);
+    }
+
+    const bool final_converged =
+        solution.routing_feedback_converged.value_or(metrics.routing_feedback_converged);
+    const int final_feedback_iterations =
+        solution.routing_feedback_iterations.value_or(metrics.routing_feedback_iterations);
+    const int final_space_feedback_nodes =
+        solution.space_feedback_nodes.value_or(metrics.space_feedback_nodes);
+
+    out << "{\n";
+    out << "  \"sa_iterations\": "
+        << (solution.sa_progress.empty() ? 0 : solution.sa_progress.front().sa_iterations) << ",\n";
+    out << "  \"recorded\": " << solution.sa_progress.size() << ",\n";
+    out << "  \"summary\": {\n";
+    out << "    \"converged_count\": " << converged_count << ",\n";
+    out << "    \"not_converged_count\": " << not_converged_count << ",\n";
+    out << "    \"max_routing_feedback_iterations\": " << max_feedback_iterations << ",\n";
+    out << "    \"final_routing_feedback_converged\": " << (final_converged ? "true" : "false")
+        << ",\n";
+    out << "    \"final_routing_feedback_iterations\": " << final_feedback_iterations << ",\n";
+    out << "    \"final_space_feedback_nodes\": " << final_space_feedback_nodes << "\n";
+    out << "  },\n";
+    out << "  \"iterations\": [\n";
+    for (std::size_t index = 0; index < solution.sa_progress.size(); ++index) {
+        const auto& entry = solution.sa_progress[index];
+        if (index > 0) out << ",\n";
+        out << "    {"
+            << "\"index\": " << entry.iteration
+            << ", \"move\": \"" << json_escape(entry.move) << '"'
+            << ", \"accept\": " << (entry.accept ? "true" : "false")
+            << ", \"routing_feedback_iterations\": " << entry.routing_feedback_iterations
+            << ", \"routing_feedback_converged\": "
+            << (entry.routing_feedback_converged ? "true" : "false")
+            << ", \"space_feedback_nodes\": " << entry.space_feedback_nodes
+            << '}';
+    }
+    out << "\n  ]\n";
+    out << "}\n";
+    return path;
 }
 
 // 基于已写出的 sa_trace.json 再导出 Excel 表格；失败时仅告警，不影响主流程。
@@ -425,6 +489,7 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     }
     const auto metrics = solution.metrics.value_or(sapr::measure(circuit, solution));
     write_metrics_json(solution, metrics, output);
+    write_sa_feedback_converge_json(solution, metrics, output);
     std::cout << std::fixed << std::setprecision(2)
               << "{\n"
               << "  \"area\": " << metrics.area << ",\n"
