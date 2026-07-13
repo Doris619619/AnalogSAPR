@@ -1045,7 +1045,9 @@ PerturbationReport perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937&
     const bool has_asf_tree = std::any_of(tree.symmetry_groups.begin(), tree.symmetry_groups.end(), [](const auto& group) {
         return !group.asf_bstar_tree.nodes.empty();
     });
-    std::uniform_int_distribution<int> move_dist(0, has_tree_lcp ? 8 : (has_asf_tree ? 5 : 2));
+    // 无 ASF 的普通树仍只提供 7 类既有扰动，避免新增 ASF 预留编号改变同 seed 的抽样序列。
+    const int max_move = has_tree_lcp ? (has_asf_tree ? 8 : 6) : (has_asf_tree ? 5 : 2);
+    std::uniform_int_distribution<int> move_dist(0, max_move);
     const int move = move_dist(rng);
     const auto movable = movable_nodes(tree);
     if (move == 0 && movable.size() > 1) {
@@ -1066,8 +1068,11 @@ PerturbationReport perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937&
         if (!targets.empty()) {
             std::uniform_int_distribution<std::size_t> target_dist(0, targets.size() - 1);
             std::uniform_int_distribution<int> side_dist(0, 1);
+            // 在修改树前按固定顺序消费随机数，保证同 seed 不受 C++ 参数求值顺序影响。
+            const auto target = targets[target_dist(rng)];
+            const bool as_left = side_dist(rng) == 0;
             detach_node_preserving_children(tree, id);
-            insert_node_at_child(tree, targets[target_dist(rng)], id, side_dist(rng) == 0);
+            insert_node_at_child(tree, target, id, as_left);
             report.move = "module-delete-insert";
             report.changed = true;
         }

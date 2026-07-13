@@ -1453,4 +1453,28 @@ void run_routing_evaluator_tests() {
             "STAR detailed segments must not switch away from the DP-selected LCP location");
     }
     require(!has_cross_net_same_layer_short(star_detail.routes), "LCP-consistent detailed routes should not short");
+
+    // placement-aware 流程显式开启协商后，应在提交 detailed route 前整网选择可行的备用 LCP 位置。
+    auto negotiated_star_request = star_request;
+    negotiated_star_request.allow_lcp_location_negotiation = true;
+    const auto negotiated_star_detail = sapr::run_detailed_routing(star_circuit, negotiated_star_request, star_eval);
+    require(
+        negotiated_star_detail.traceback_failures == 0,
+        "explicit whole-net LCP negotiation should resolve the blocked DP-selected location");
+    require(
+        std::any_of(
+            negotiated_star_detail.report.warnings.begin(),
+            negotiated_star_detail.report.warnings.end(),
+            [](const auto& warning) {
+                return warning.find("negotiated whole-net LCP location to LCP_STAR:b") != std::string::npos;
+            }),
+        "explicit LCP negotiation should report the committed replacement location");
+    for (const auto& trace : negotiated_star_detail.report.traces) {
+        if (trace.net != "STAR") continue;
+        for (const auto& segment : trace.segments) {
+            require(
+                segment.lcp_candidate_id.empty() || segment.lcp_candidate_id == "LCP_STAR:b",
+                "negotiated STAR branches must share the replacement LCP location");
+        }
+    }
 }

@@ -265,6 +265,8 @@ struct SolverConfig {
     double boundary_margin{-1.0};
     double boundary_clearance{0.0};
     bool dump_sa_btree{true};
+    // 在写入 detailed route 前协商整网 LCP 物理位置，避免 DP 位置不可实现时只留下失败罚分。
+    bool negotiate_lcp_locations{true};
     // 允许使用的金属层数（M1..Mn）；默认 1 层，便于论文复现与平面合法性实验。
     int routing_layers{1};
 };
@@ -459,6 +461,8 @@ struct RoutingEvaluationRequest {
     RoutingTreeSnapshot tree;
     PackingContourTrace packing_trace;
     unsigned int lcp_candidate_seed{};
+    // 仅 placement-aware 流程开启：允许在 detailed route 提交前为整网显式重选同一 LCP 位置。
+    bool allow_lcp_location_negotiation{};
     // 传入 RoutingContext::GridConfig.layer_count，统一限制 A*/obstacle/detailed reroute。
     int routing_layers{1};
 };
