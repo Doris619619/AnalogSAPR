@@ -306,8 +306,8 @@ M3             15.00       10.00       180    R180
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `module` | string | 器件名 |
-| `x` | float | Cell 原点在全局坐标系中的 x (μm) |
-| `y` | float | Cell 原点在全局坐标系中的 y (μm) |
+| `x` | float | 器件变换后 BB 左下角在全局坐标系中的 x (μm) |
+| `y` | float | 器件变换后 BB 左下角在全局坐标系中的 y (μm) |
 | `angle` | 0 \| 90 \| 180 \| 270 | 逆时针旋转角度 |
 | `orient` | R0 \| R90 \| R180 \| R270 \| MX \| MY \| MXR90 \| MYR90 | Cadence orient 码 |
 
@@ -325,6 +325,25 @@ M3             15.00       10.00       180    R180
 | MYR90 | Y 镜像 + 旋转 90° | rot=270°, x_reflection |
 
 GDSII 变换顺序：**reflect X（如果有）→ rotate CCW → translate**。`angle` 是 pre-mirror 旋转角。
+
+### 从 GDS 裁剪 case 时的 placement 规范化
+
+标准 SAPR IO 中，`placement.txt` 的 `x/y` 必须是器件 **变换后 BB 左下角**，不能直接写 GDS reference origin。GDSII cell 的 bbox 可能不是从 `(0,0)` 开始，`modules.txt` 注释中的 `ox/oy` 只用于从 GDS reference origin 规范化到 BB 左下角，以及在提取 pin 时把 pin 坐标转成 BB-relative。
+
+从 GDS reference origin `(gx, gy)` 生成标准 placement 时，应先取 cell-local bbox 四角：
+
+```text
+(ox, oy), (ox + w, oy), (ox + w, oy + h), (ox, oy + h)
+```
+
+再按 orient 执行 GDSII 变换，最后写入：
+
+```text
+placement.x = min(transformed_corner_x)
+placement.y = min(transformed_corner_y)
+```
+
+例如 `MY` 器件如果直接把 reference origin 当作 BB 左下角，镜像器件会被画到错误一侧，常见现象是相邻 mirror pair 在 layout 图中大面积重合。规范化之后，C++ transform、`render_layout.py` 和 B* tree 输出会共用同一套 bbox-left-bottom 语义。
 
 ---
 

@@ -145,7 +145,11 @@ void write_btree_space_node_json(
     write_json_string(out, tree_side);
     out << ", \"geometry_space\": ";
     write_json_string(out, geometry_space);
-    out << ", \"required_space\": " << space.required_space()
+    out << ", \"formula_required_space\": " << space.formula_required_space()
+        << ", \"allocated_space\": " << space.allocated_space
+        << ", \"coupling_extra_space\": " << space.coupling_extra_space
+        << ", \"final_required_space\": " << space.required_space()
+        << ", \"required_space\": " << space.required_space()
         << ", \"lcp_count\": " << space.linking_points.size()
         << ", \"lcp_ids\": ";
     write_json_string_array(out, lcp_ids_for_json(space));
@@ -190,7 +194,9 @@ std::string make_btree_trace_json(
         out << "    {\"id\": ";
         write_json_string(out, id);
         out << ", \"module\": ";
-        write_json_string(out, node.module);
+        write_json_string(out, node.kind == BStarNodeKind::Hierarchy ? node.hierarchy_group : node.module);
+        out << ", \"kind\": ";
+        write_json_string(out, node.kind == BStarNodeKind::Hierarchy ? "hierarchy" : "module");
         out << ", \"parent\": ";
         write_json_optional_string(out, node.parent);
         out << ", \"left\": ";

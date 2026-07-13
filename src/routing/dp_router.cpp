@@ -16,6 +16,7 @@ namespace {
 constexpr double kBendWeight = 3.0;
 constexpr double kMissingSegmentPenalty = 100000.0;
 constexpr double kShortConflictPenalty = 1000000.0;
+constexpr double kMultiTerminalMissingPenalty = 1000000.0;
 
 // 表示同一逻辑 wire segment 对应的一组 A* 候选路径。
 struct CandidateGroup {
@@ -139,6 +140,17 @@ void append_unique(std::vector<std::string>& values, const std::string& value) {
     if (std::find(values.begin(), values.end(), value) == values.end()) values.push_back(value);
 }
 
+void append_tree_node_modules(std::vector<std::string>& values, const std::string& module_field) {
+    if (module_field.empty()) return;
+    std::size_t start = 0;
+    while (start <= module_field.size()) {
+        const std::size_t end = module_field.find('|', start);
+        append_unique(values, module_field.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+}
+
 bool contains_value(const std::vector<std::string>& values, const std::string& value) {
     return std::find(values.begin(), values.end(), value) != values.end();
 }
@@ -193,7 +205,8 @@ AppendCandidateResult append_candidate_if_consistent(
     const RoutingContext& context) {
     AppendCandidateResult result;
     if (!candidate.path.success) {
-        result.reason = "path_fail";
+        result.reason =
+            candidate.path.message.find("multi_terminal_missing") != std::string::npos ? "multi_terminal_missing" : "path_fail";
         return result;
     }
     const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
@@ -462,7 +475,18 @@ std::unordered_set<std::string> collect_subtree_modules(
     std::unordered_set<std::string> modules;
     const auto found = nodes.find(id);
     if (found == nodes.end()) return modules;
-    modules.insert(found->second.module.empty() ? found->second.id : found->second.module);
+    if (found->second.module.empty()) {
+        modules.insert(found->second.id);
+    } else {
+        std::size_t start = 0;
+        while (start <= found->second.module.size()) {
+            const std::size_t end = found->second.module.find('|', start);
+            const std::string token = found->second.module.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            if (!token.empty()) modules.insert(token);
+            if (end == std::string::npos) break;
+            start = end + 1;
+        }
+    }
     if (found->second.left.has_value()) {
         const auto left = collect_subtree_modules(*found->second.left, nodes, cache);
         modules.insert(left.begin(), left.end());
@@ -544,7 +568,7 @@ std::vector<RoutingDpState> merge_child_states_for_node(
             if (trace_index_it != trace_index.index_by_node.end()) state.packing_step_index = trace_index_it->second;
             if (left != nullptr && !merge_child_state(state, *left, true)) continue;
             if (right != nullptr && !merge_child_state(state, *right, false)) continue;
-            append_unique(state.covered_terminals, node.module);
+            append_tree_node_modules(state.covered_terminals, node.module);
             merged.push_back(std::move(state));
         }
     }
@@ -555,7 +579,7 @@ std::vector<RoutingDpState> merge_child_states_for_node(
         if (trace_step != trace_index.step_by_node.end()) state.contour_y = trace_step->second->contour_y;
         const auto trace_index_it = trace_index.index_by_node.find(node.id);
         if (trace_index_it != trace_index.index_by_node.end()) state.packing_step_index = trace_index_it->second;
-        append_unique(state.covered_terminals, node.module);
+        append_tree_node_modules(state.covered_terminals, node.module);
         merged.push_back(std::move(state));
     }
     return merged;
@@ -590,11 +614,19 @@ void apply_segment_transition(
             failed.penalty += kMissingSegmentPenalty;
             append_unique(failed.covered_wire_segments, group.key);
             std::string message = "missing successful A* candidate for " + group.key;
+            bool has_multi_terminal_missing = false;
             for (const auto& candidate : group.candidates) {
                 if (!candidate_matches_group(candidate, group)) continue;
                 if (!candidate.path.message.empty()) {
                     message += " [" + candidate.lcp_candidate_id + ": " + candidate.path.message + "]";
+                    if (candidate.path.message.find("multi_terminal_missing") != std::string::npos) {
+                        has_multi_terminal_missing = true;
+                    }
                 }
+            }
+            if (has_multi_terminal_missing) {
+                failed.penalty += kMultiTerminalMissingPenalty;
+                append_unique(failed.failure_messages, "multi-terminal LCP candidate cannot cover all incident segments for " + group.key);
             }
             append_unique(failed.failure_messages, message);
             failed.choice_message = "missing " + group.key;

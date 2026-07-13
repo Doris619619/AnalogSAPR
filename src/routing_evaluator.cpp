@@ -714,6 +714,56 @@ bool candidate_has_lcp_binding(const routing::RouteCandidate& candidate) {
     return !candidate.lcp_id.empty() || !candidate.source_lcp_id.empty() || !candidate.target_lcp_id.empty();
 }
 
+std::unordered_map<std::string, std::string> lcp_bindings_for_candidate(const routing::RouteCandidate& candidate) {
+    std::unordered_map<std::string, std::string> bindings;
+    auto add = [&](const std::string& lcp_id, const std::string& location_id) {
+        if (!lcp_id.empty() && !location_id.empty()) bindings[lcp_id] = location_id;
+    };
+    add(candidate.lcp_id, candidate.lcp_candidate_id);
+    add(candidate.source_lcp_id, candidate.source_lcp_candidate_id);
+    add(candidate.target_lcp_id, candidate.target_lcp_candidate_id);
+    return bindings;
+}
+
+bool merge_lcp_binding(
+    std::unordered_map<std::string, std::string>& bindings,
+    const std::string& lcp_id,
+    const std::string& location_id,
+    std::string* conflict = nullptr) {
+    if (lcp_id.empty() || location_id.empty()) return true;
+    const auto found = bindings.find(lcp_id);
+    if (found == bindings.end()) {
+        bindings[lcp_id] = location_id;
+        return true;
+    }
+    if (found->second == location_id) return true;
+    if (conflict != nullptr) *conflict = "LCP " + lcp_id + " binds both " + found->second + " and " + location_id;
+    return false;
+}
+
+bool merge_lcp_bindings(
+    std::unordered_map<std::string, std::string>& bindings,
+    const routing::RouteCandidate& candidate,
+    std::string* conflict = nullptr) {
+    for (const auto& [lcp_id, location_id] : lcp_bindings_for_candidate(candidate)) {
+        if (!merge_lcp_binding(bindings, lcp_id, location_id, conflict)) return false;
+    }
+    return true;
+}
+
+bool candidate_matches_lcp_bindings(
+    const routing::RouteCandidate& candidate,
+    const std::unordered_map<std::string, std::string>& bindings) {
+    auto matches = [&](const std::string& lcp_id, const std::string& location_id) {
+        if (lcp_id.empty()) return true;
+        const auto found = bindings.find(lcp_id);
+        return found == bindings.end() || found->second == location_id;
+    };
+    return matches(candidate.lcp_id, candidate.lcp_candidate_id) &&
+           matches(candidate.source_lcp_id, candidate.source_lcp_candidate_id) &&
+           matches(candidate.target_lcp_id, candidate.target_lcp_candidate_id);
+}
+
 // 有 LCP 绑定时，alternative 必须保持同一 lcp_candidate_id，禁止按支路拆散 DP 绑定。
 bool same_lcp_location_binding(
     const routing::RouteCandidate& lhs,
@@ -1057,8 +1107,9 @@ DetailedLegalization legalize_detailed_candidate(
     }
     return DetailedLegalization{false, selected, {}, {}, false, false, std::move(failure_messages)};
 }
-
+/*
 // 表示整网在同一 LCP location 下合法化后的结果。
+*/
 struct LcpNetLegalization {
     bool success{};
     std::string chosen_lcp_candidate_id;
@@ -1068,57 +1119,11 @@ struct LcpNetLegalization {
 };
 
 // 返回候选上用于整网锁定的主 LCP id（优先 lcp_id，其次 source/target）。
-std::string primary_lcp_id(const routing::RouteCandidate& candidate) {
-    if (!candidate.lcp_id.empty()) return candidate.lcp_id;
-    if (!candidate.source_lcp_id.empty()) return candidate.source_lcp_id;
-    return candidate.target_lcp_id;
-}
-
 // 返回候选上与 primary_lcp_id 对应的 location candidate id。
-std::string primary_lcp_candidate_id(const routing::RouteCandidate& candidate) {
-    const std::string lcp_id = primary_lcp_id(candidate);
-    if (lcp_id.empty()) return {};
-    if (candidate.lcp_id == lcp_id) return candidate.lcp_candidate_id;
-    if (candidate.source_lcp_id == lcp_id) return candidate.source_lcp_candidate_id;
-    if (candidate.target_lcp_id == lcp_id) return candidate.target_lcp_candidate_id;
-    return candidate.lcp_candidate_id;
-}
-
 // 判断候选是否绑定到指定 LCP 的指定物理位置。
-bool candidate_matches_lcp_location(
-    const routing::RouteCandidate& candidate,
-    const std::string& lcp_id,
-    const std::string& location_id) {
-    if (lcp_id.empty() || location_id.empty()) return false;
-    if (candidate.lcp_id == lcp_id && candidate.lcp_candidate_id == location_id) return true;
-    if (candidate.source_lcp_id == lcp_id && candidate.source_lcp_candidate_id == location_id) return true;
-    if (candidate.target_lcp_id == lcp_id && candidate.target_lcp_candidate_id == location_id) return true;
-    return false;
-}
-
 // 收集该 net 在指定 LCP 下出现过的全部 location id，DP 选中的排在最前。
-std::vector<std::string> ordered_lcp_locations_for_net(
-    const RoutingEvaluation& evaluation,
-    const std::string& net,
-    const std::string& lcp_id,
-    const std::string& preferred_location) {
-    std::vector<std::string> locations;
-    auto append_unique = [&](const std::string& location_id) {
-        if (location_id.empty()) return;
-        if (std::find(locations.begin(), locations.end(), location_id) != locations.end()) return;
-        locations.push_back(location_id);
-    };
-    append_unique(preferred_location);
-    for (const auto& candidate : evaluation.candidates) {
-        if (candidate.net != net || !candidate.path.success) continue;
-        if (candidate.lcp_id == lcp_id) append_unique(candidate.lcp_candidate_id);
-        if (candidate.source_lcp_id == lcp_id) append_unique(candidate.source_lcp_candidate_id);
-        if (candidate.target_lcp_id == lcp_id) append_unique(candidate.target_lcp_candidate_id);
-    }
-    return locations;
-}
-
 // 在固定 LCP location 下为一条支路挑选候选：同 location 的路径优先，再同 location 下 A* reroute。
+#if 0
 DetailedLegalization legalize_branch_at_lcp_location(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation,
@@ -1205,6 +1210,8 @@ DetailedLegalization legalize_branch_at_lcp_location(
 }
 
 // 对带 LCP 的 net 整网合法化：所有支路共享同一 lcp_candidate_id，失败则整网换下一个 location。
+#endif
+
 LcpNetLegalization legalize_lcp_net(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation,
@@ -1214,66 +1221,54 @@ LcpNetLegalization legalize_lcp_net(
     if (selected_branches.empty()) return result;
 
     const std::string net = selected_branches.front().net;
-    const std::string lcp_id = primary_lcp_id(selected_branches.front());
-    const std::string preferred_location = primary_lcp_candidate_id(selected_branches.front());
-    if (lcp_id.empty() || preferred_location.empty()) {
-        result.failure_messages.push_back(net + ": LCP net is missing primary location binding");
+    std::unordered_map<std::string, std::string> selected_bindings;
+    for (const auto& branch : selected_branches) {
+        std::string conflict;
+        if (!merge_lcp_bindings(selected_bindings, branch, &conflict)) {
+            result.failure_messages.push_back(
+                net + ": selected branches disagree on LCP binding before detailed legalize: " + conflict);
+            return result;
+        }
+    }
+    if (selected_bindings.empty()) {
+        result.failure_messages.push_back(net + ": LCP net is missing physical location binding");
         return result;
     }
 
-    // 校验 selected 支路在进入 detailed 前已共享同一 LCP 绑定。
+    // Keep the DP-selected physical LCP binding stable through detailed routing.
     for (const auto& branch : selected_branches) {
-        if (primary_lcp_id(branch) != lcp_id || primary_lcp_candidate_id(branch) != preferred_location) {
-            result.failure_messages.push_back(
-                net + ": selected branches disagree on LCP binding before detailed legalize");
+        if (!candidate_matches_lcp_bindings(branch, selected_bindings)) {
+            result.failure_messages.push_back(net + ": selected branch is inconsistent with net LCP binding");
             return result;
         }
     }
 
-    const auto locations = ordered_lcp_locations_for_net(evaluation, net, lcp_id, preferred_location);
-    for (const auto& location_id : locations) {
-        std::vector<DetailedLegalization> branch_results;
-        std::vector<RouteSegment> tentative_occupied = occupied_routes;
-        std::vector<std::string> location_failures;
-        bool location_ok = true;
-        for (const auto& branch : selected_branches) {
-            auto legal = legalize_branch_at_lcp_location(
-                circuit,
-                evaluation,
-                branch,
-                lcp_id,
-                location_id,
-                tentative_occupied);
-            if (!legal.success) {
-                location_ok = false;
-                location_failures.insert(
-                    location_failures.end(),
-                    legal.failure_messages.begin(),
-                    legal.failure_messages.end());
-                location_failures.push_back(
-                    net + ": could not legalize " + branch.from_terminal + "->" + branch.to_terminal +
-                    " at " + lcp_id + "@" + location_id);
-                break;
-            }
-            tentative_occupied.insert(tentative_occupied.end(), legal.routes.begin(), legal.routes.end());
-            branch_results.push_back(std::move(legal));
-        }
-        if (!location_ok) {
+    std::vector<RouteSegment> tentative_occupied = occupied_routes;
+    for (const auto& branch : selected_branches) {
+        auto legal = legalize_detailed_candidate(circuit, evaluation, branch, tentative_occupied);
+        if (!legal.success) {
             result.failure_messages.insert(
                 result.failure_messages.end(),
-                location_failures.begin(),
-                location_failures.end());
-            continue;
+                legal.failure_messages.begin(),
+                legal.failure_messages.end());
+            result.failure_messages.push_back(
+                net + ": could not legalize " + branch.from_terminal + "->" + branch.to_terminal +
+                " with selected LCP bindings");
+            return result;
         }
-
-        result.success = true;
-        result.chosen_lcp_candidate_id = location_id;
-        result.switched_lcp_location = location_id != preferred_location;
-        result.branch_results = std::move(branch_results);
-        result.failure_messages.clear();
-        return result;
+        if (!candidate_matches_lcp_bindings(legal.candidate, selected_bindings)) {
+            result.failure_messages.push_back(net + ": legalization changed an LCP binding unexpectedly");
+            return result;
+        }
+        tentative_occupied.insert(tentative_occupied.end(), legal.routes.begin(), legal.routes.end());
+        result.branch_results.push_back(std::move(legal));
     }
+    result.success = true;
+    result.chosen_lcp_candidate_id = selected_bindings.begin()->second;
+    result.failure_messages.clear();
     return result;
+
+    // 校验 selected 支路在进入 detailed 前已共享同一 LCP 绑定。
 }
 
 // 将候选路径写入 detailed route，同时记录 route segment 到 LCP/space-node 的回溯映射。
@@ -1567,17 +1562,43 @@ int detailed_priority_rank(Priority priority) {
 }
 
 // 按论文 detailed routing 优先级排序 net route。
+bool module_in_symmetry_constraints(const Circuit& circuit, const std::string& module) {
+    for (const auto& pair : circuit.constraints.symmetry_pairs) {
+        if (pair.left == module || pair.right == module) return true;
+    }
+    for (const auto& self : circuit.constraints.symmetry_selfs) {
+        if (self.module == module) return true;
+    }
+    return false;
+}
+
+bool net_touches_symmetry_group(const Circuit& circuit, const std::string& net) {
+    const auto found = circuit.nets.find(net);
+    if (found == circuit.nets.end()) return false;
+    for (const auto& terminal : found->second.terminals) {
+        const auto pin = circuit.pins.find(terminal);
+        if (pin != circuit.pins.end() && module_in_symmetry_constraints(circuit, pin->second.module)) return true;
+    }
+    return false;
+}
+
+int detailed_net_rank(const Circuit& circuit, const std::string& net) {
+    if (net_touches_symmetry_group(circuit, net)) return 0;
+    const auto found = circuit.nets.find(net);
+    const Priority priority = found == circuit.nets.end() ? Priority::Normal : found->second.priority;
+    if (priority == Priority::Symmetry) return 0;
+    if (priority == Priority::Critical) return 1;
+    if (circuit.constraints.wire_widths.contains(net)) return 2;
+    return detailed_priority_rank(priority) + 1;
+}
+
 std::vector<const routing::NetRouteChoice*> ordered_detailed_routes(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation) {
     std::vector<const routing::NetRouteChoice*> routes;
     for (const auto& route : evaluation.global_routing.net_routes) routes.push_back(&route);
     std::stable_sort(routes.begin(), routes.end(), [&](const auto* left, const auto* right) {
-        const auto left_it = circuit.nets.find(left->net);
-        const auto right_it = circuit.nets.find(right->net);
-        const Priority left_priority = left_it == circuit.nets.end() ? Priority::Normal : left_it->second.priority;
-        const Priority right_priority = right_it == circuit.nets.end() ? Priority::Normal : right_it->second.priority;
-        return detailed_priority_rank(left_priority) < detailed_priority_rank(right_priority);
+        return detailed_net_rank(circuit, left->net) < detailed_net_rank(circuit, right->net);
     });
     return routes;
 }
@@ -1649,11 +1670,7 @@ std::vector<routing::RouteCandidate> order_candidates_for_detailed_routing(
     const std::vector<routing::RouteCandidate>& candidates) {
     auto ordered = order_candidates_by_topology(request, candidates);
     std::stable_sort(ordered.begin(), ordered.end(), [&](const auto& left, const auto& right) {
-        const auto left_it = circuit.nets.find(left.net);
-        const auto right_it = circuit.nets.find(right.net);
-        const Priority left_priority = left_it == circuit.nets.end() ? Priority::Normal : left_it->second.priority;
-        const Priority right_priority = right_it == circuit.nets.end() ? Priority::Normal : right_it->second.priority;
-        return detailed_priority_rank(left_priority) < detailed_priority_rank(right_priority);
+        return detailed_net_rank(circuit, left.net) < detailed_net_rank(circuit, right.net);
     });
     return ordered;
 }

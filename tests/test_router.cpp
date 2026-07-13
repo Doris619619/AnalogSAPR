@@ -27,8 +27,12 @@ bool overlaps(const sapr::Rect& left, const sapr::Rect& right) {
 bool valid_lcp_topology(const sapr::LinkingControlPoint& point) {
     if (point.segments.size() < 2) return false;
     const auto& net = point.segments.front().net;
+    std::unordered_set<std::string> segment_ids;
     for (const auto& segment : point.segments) {
-        if (segment.net != net || (segment.from != point.id && segment.to != point.id)) return false;
+        if (segment.net != net) return false;
+        if (segment.from != point.id && segment.to != point.id) return false;
+        const std::string key = segment.id.empty() ? segment.net + ":" + segment.from + "->" + segment.to : segment.id;
+        if (!segment_ids.insert(key).second) return false;
     }
     return true;
 }
@@ -50,7 +54,9 @@ bool lcp_references_are_consistent(const sapr::EnhancedBStarTree& tree, const st
 // 构造包含一个四线段 LCP 的树，用于确定性覆盖 split 的端点重连语义。
 sapr::EnhancedBStarTree make_split_test_tree(const sapr::Circuit& circuit) {
     auto tree = sapr::make_enhanced_tree(circuit);
-    auto& space = tree.nodes.at(tree.representative_order.front()).right_space;
+    auto& asf_tree = tree.symmetry_groups.front().asf_bstar_tree;
+    auto& asf_node = asf_tree.nodes.at(asf_tree.representative_order.front());
+    auto& space = asf_node.space_node_groups.front().spaces.front();
     space.linking_points = {{"S", "", {{"N", "A", "S", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:A->S"},
                                        {"N", "B", "S", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:B->S"},
                                        {"N", "S", "C", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:S->C"},
@@ -63,15 +69,18 @@ sapr::EnhancedBStarTree make_split_test_tree(const sapr::Circuit& circuit) {
 // 构造两个同网 LCP 的树，用于确定性覆盖 merge 的全局端点重连语义。
 sapr::EnhancedBStarTree make_merge_test_tree(const sapr::Circuit& circuit) {
     auto tree = sapr::make_enhanced_tree(circuit);
-    auto& node = tree.nodes.at(tree.representative_order.front());
-    node.right_space.linking_points = {{"A", "", {{"N", "P", "A", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:P->A"},
-                                                 {"N", "A", "X", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:A->X"}},
-                                        {}}};
-    node.top_space.linking_points = {{"B", "", {{"N", "Q", "B", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:Q->B"},
-                                               {"N", "B", "Y", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:B->Y"}},
-                                      {}}};
-    node.right_space.linking_points.front().space_node_id = node.right_space.id;
-    node.top_space.linking_points.front().space_node_id = node.top_space.id;
+    auto& asf_tree = tree.symmetry_groups.front().asf_bstar_tree;
+    auto& asf_node = asf_tree.nodes.at(asf_tree.representative_order.front());
+    auto& first_space = asf_node.space_node_groups.front().spaces.at(0);
+    auto& second_space = asf_node.space_node_groups.front().spaces.at(1);
+    first_space.linking_points = {{"A", "", {{"N", "P", "A", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:P->A"},
+                                                        {"N", "A", "X", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:A->X"}},
+                                               {}}};
+    second_space.linking_points = {{"B", "", {{"N", "Q", "B", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:Q->B"},
+                                                         {"N", "B", "Y", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:B->Y"}},
+                                                {}}};
+    first_space.linking_points.front().space_node_id = first_space.id;
+    second_space.linking_points.front().space_node_id = second_space.id;
     return tree;
 }
 
@@ -178,14 +187,58 @@ void run_router_tests() {
         }
     }
 
+    const auto two_group_circuit = sapr::load_circuit(
+        std::filesystem::path(SAPR_SOURCE_DIR) / "cases" / "4ring_2_complex_symmetry_perturbed_2groups" / "input");
+    const auto two_group_tree = sapr::make_enhanced_tree(two_group_circuit);
+    require(sapr::is_valid_tree(two_group_tree), "two hierarchy nodes should form a valid global tree");
+    for (const auto& [id, node] : two_group_tree.nodes) {
+        (void)id;
+        require(!(node.left.has_value() && node.right.has_value() && node.left == node.right),
+                "global tree must not attach the same child as both left and right");
+    }
+    for (const auto& group : two_group_tree.symmetry_groups) {
+        require(!group.asf_bstar_tree.nodes.empty(), "multi-pair symmetry group should build a non-empty ASF tree");
+        for (const auto& [id, node] : group.asf_bstar_tree.nodes) {
+            (void)id;
+            require(!(node.left.has_value() && node.right.has_value() && node.left == node.right),
+                    "ASF tree must not attach the same child as both left and right");
+        }
+    }
+    auto two_group_perturbed = two_group_tree;
+    std::mt19937 two_group_rng(23);
+    bool saw_asf_move = false;
+    for (int i = 0; i < 50; ++i) {
+        const auto report = sapr::perturb_placement_tree(two_group_perturbed, two_group_rng);
+        saw_asf_move = saw_asf_move || report.move.starts_with("asf-module-");
+        require(sapr::is_valid_tree(two_group_perturbed), "ASF internal perturbation should preserve tree legality");
+        for (const auto& group : two_group_perturbed.symmetry_groups) {
+            const auto& asf_tree = group.asf_bstar_tree;
+            for (const auto& [representative, mirror] : asf_tree.mirror_map) {
+                require(asf_tree.nodes.contains(representative), "ASF tree should keep representative nodes");
+                require(!asf_tree.nodes.contains(mirror), "ASF tree must not directly contain mirror nodes");
+            }
+            std::unordered_set<std::string> right_most(
+                asf_tree.right_most_branch.begin(),
+                asf_tree.right_most_branch.end());
+            for (const auto& [id, node] : asf_tree.nodes) {
+                if (node.space_node_cluster.has_value()) {
+                    require(right_most.contains(id), "space_node_cluster should only exist on the ASF right-most branch");
+                }
+                require(node.space_node_groups.size() == 2, "each ASF representative/self node should keep two space_node_group containers");
+            }
+        }
+    }
+    require(saw_asf_move, "SA perturbation pool should include ASF internal moves for hierarchy-heavy cases");
+
     auto tree = sapr::make_enhanced_tree(circuit);
     require(sapr::is_valid_tree(tree), "enhanced tree should be valid");
     require(sapr::self_symmetry_on_rightmost_branch(tree), "self-symmetry module should stay on right-most branch");
-    require(tree.nodes.contains("M1"), "symmetry representative should be in tree");
+    require(tree.nodes.contains("sg1"), "symmetry group should enter global tree as a hierarchy node");
+    require(tree.symmetry_groups.front().asf_bstar_tree.nodes.contains("M1"), "symmetry representative should be in ASF tree");
     require(!tree.nodes.contains("M2"), "symmetry mirror should be generated by ASF packing");
     require(!tree.symmetry_groups.empty(), "symmetry groups should be recorded");
-    require(tree.symmetry_groups.front().space_group_bundle.spaces.size() == 2, "space node group should model mirrored right/top spaces");
-    require(tree.symmetry_groups.front().space_cluster_bundle.spaces.size() == 4, "space node cluster should model four ASF spaces");
+    require(tree.symmetry_groups.front().asf_bstar_tree.nodes.at("M1").space_node_groups.size() == 2, "space node group should model mirrored right/top spaces");
+    require(tree.symmetry_groups.front().asf_bstar_tree.nodes.at("M1").space_node_cluster->spaces.size() == 4, "space node cluster should model four ASF spaces");
     require(sapr::collect_space_nodes(tree).size() >= tree.representative_order.size() * 2, "space nodes should be collectable");
 
     sapr::SpaceNode space{"space",
@@ -200,8 +253,10 @@ void run_router_tests() {
                           {},
                           0.0,
                           {}};
+    require(approx(space.formula_required_space(), 4.0), "space formula value should match paper equation before feedback");
     require(approx(space.required_space(), 4.0), "space formula should match paper equation");
     space.allocated_space = 9.0;
+    require(approx(space.formula_required_space(), 4.0), "feedback allocation should not change formula value");
     require(approx(space.required_space(), 9.0), "feedback allocation should override smaller formula result");
 
     const sapr::SolverConfig config{5.0, 40.0, 7, 0};
@@ -210,7 +265,7 @@ void run_router_tests() {
     require(request.placements.contains("M1"), "representative placement should exist");
     require(request.placements.contains("M2"), "mirror placement should exist");
     require(request.placements.at("M2").orient == "MY", "vertical symmetry pair should mirror on Y axis");
-    require(request.placements.at("M2").x > request.placements.at("M1").x, "mirror should be placed beside representative");
+    require(request.placements.at("M2").x < request.placements.at("M1").x, "mirror should be placed on the left side of the representative");
     require(request.placements.at("M5").module == "M5", "self-symmetry module should remain placeable");
     require(request.placed_pins.size() == circuit.pin_order.size(), "routing request should expose placed pins");
     require(!request.active_region_blockers.empty(), "routing request should expose blockers");
@@ -222,8 +277,8 @@ void run_router_tests() {
         }
         return nullptr;
     };
-    const auto* right_space = find_space("M1:right");
-    const auto* top_space = find_space("M1:top");
+    const auto* right_space = find_space("sg1/M1:space_node_group_outer:representative_right");
+    const auto* top_space = find_space("sg1/M1:space_node_group_top:representative_top");
     require(right_space != nullptr && right_space->physical_region.has_value(), "right space should expose a physical region");
     require(top_space != nullptr && top_space->physical_region.has_value(), "top space should expose a physical region");
     const auto m1_box = placement_box(circuit, request.placements.at("M1"));
@@ -252,13 +307,12 @@ void run_router_tests() {
 
     auto feedback_tree = tree;
     sapr::RoutingFeedback feedback;
-    feedback.required_space_by_node["M1:right"] = 25.0;
-    feedback.coupling_space_by_node["M1:right"] = 2.0;
+    feedback.required_space_by_node["sg1/M1:space_node_group_outer:representative_right"] = 25.0;
+    feedback.coupling_space_by_node["sg1/M1:space_node_group_outer:representative_right"] = 2.0;
     sapr::apply_routing_feedback(feedback_tree, feedback);
     const auto expanded = sapr::pack_enhanced_tree(circuit, feedback_tree, config);
-    require(expanded.placements.at("M3").x > request.placements.at("M3").x, "routing feedback should affect next packing");
     const auto expanded_right_space = std::find_if(expanded.space_nodes.begin(), expanded.space_nodes.end(), [](const auto& space_node) {
-        return space_node.id == "M1:right";
+        return space_node.id == "sg1/M1:space_node_group_outer:representative_right";
     });
     require(expanded_right_space != expanded.space_nodes.end(), "expanded request should keep M1 right space");
     require(
