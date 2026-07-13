@@ -158,6 +158,97 @@ double endpoint_pair_distance(
     const PhysicalLocationCandidate& right) {
     return std::abs(left.x - right.x) + std::abs(left.y - right.y) + left.penalty + right.penalty;
 }
+
+// 表示一个 LCP-LCP segment 两端物理位置的组合候选。
+struct LocationBinding {
+    std::unordered_map<std::string, PhysicalLocationCandidate> by_lcp;
+    double estimate{};
+};
+
+// 生成物理位置组合的去重键，避免 coverage 补齐时重复加入同一组 LCP 位置。
+std::string location_binding_key(
+    const LocationBinding& binding,
+    const std::string& first_lcp,
+    const std::string& second_lcp) {
+    return lcp_candidate_for_endpoint(binding.by_lcp, first_lcp) + "|" +
+           lcp_candidate_for_endpoint(binding.by_lcp, second_lcp);
+}
+
+// 为指定 LCP 物理位置查找代价最低的组合候选。
+std::optional<std::size_t> best_binding_for_location(
+    const std::vector<LocationBinding>& bindings,
+    const std::string& lcp_id,
+    const std::string& location_id) {
+    std::optional<std::size_t> best;
+    for (std::size_t index = 0; index < bindings.size(); ++index) {
+        if (lcp_candidate_for_endpoint(bindings[index].by_lcp, lcp_id) != location_id) continue;
+        if (!best.has_value() || bindings[index].estimate < bindings[*best].estimate) best = index;
+    }
+    return best;
+}
+
+// 在保留低代价组合的同时补齐两端 LCP location 覆盖，避免 multi-terminal root 被 top-K 剪枝误判不可达。
+std::vector<LocationBinding> select_coverage_aware_bindings(
+    const std::vector<LocationBinding>& sorted_bindings,
+    const LinkingControlPoint& first,
+    const LinkingControlPoint& second,
+    std::size_t base_cap,
+    std::size_t max_cap) {
+    std::vector<std::size_t> selected_indices;
+    std::vector<bool> required_indices;
+    std::unordered_map<std::string, std::size_t> selected_by_key;
+
+    const auto add_index = [&](std::size_t index, bool required) {
+        const std::string key = location_binding_key(sorted_bindings[index], first.id, second.id);
+        const auto found = selected_by_key.find(key);
+        if (found != selected_by_key.end()) {
+            if (required) required_indices[found->second] = true;
+            return;
+        }
+        selected_by_key[key] = selected_indices.size();
+        selected_indices.push_back(index);
+        required_indices.push_back(required);
+    };
+
+    const std::size_t low_cost_count = std::min(base_cap, sorted_bindings.size());
+    for (std::size_t index = 0; index < low_cost_count; ++index) add_index(index, false);
+
+    for (const auto& location : first.location_candidates) {
+        const auto best = best_binding_for_location(sorted_bindings, first.id, location.id);
+        if (best.has_value()) add_index(*best, true);
+    }
+    for (const auto& location : second.location_candidates) {
+        const auto best = best_binding_for_location(sorted_bindings, second.id, location.id);
+        if (best.has_value()) add_index(*best, true);
+    }
+
+    std::vector<std::size_t> required;
+    std::vector<std::size_t> optional;
+    for (std::size_t index = 0; index < selected_indices.size(); ++index) {
+        (required_indices[index] ? required : optional).push_back(selected_indices[index]);
+    }
+    const auto by_estimate = [&](std::size_t lhs, std::size_t rhs) {
+        if (sorted_bindings[lhs].estimate != sorted_bindings[rhs].estimate) {
+            return sorted_bindings[lhs].estimate < sorted_bindings[rhs].estimate;
+        }
+        return location_binding_key(sorted_bindings[lhs], first.id, second.id) <
+               location_binding_key(sorted_bindings[rhs], first.id, second.id);
+    };
+    std::sort(required.begin(), required.end(), by_estimate);
+    std::sort(optional.begin(), optional.end(), by_estimate);
+
+    std::vector<std::size_t> final_indices = required;
+    for (const auto index : optional) {
+        if (final_indices.size() >= max_cap) break;
+        final_indices.push_back(index);
+    }
+    std::sort(final_indices.begin(), final_indices.end(), by_estimate);
+
+    std::vector<LocationBinding> result;
+    result.reserve(final_indices.size());
+    for (const auto index : final_indices) result.push_back(sorted_bindings[index]);
+    return result;
+}
 // 鏌ユ壘 net 鐨?FLOW 绾︽潫銆?
 std::optional<FlowConstraint> flow_for_net(const Circuit& circuit, const std::string& net) {
     for (const auto& flow : circuit.constraints.flows) {
@@ -355,7 +446,8 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
         }
     }
 
-    constexpr std::size_t kMaxPairwiseCandidatesPerSegment = 32;
+    constexpr std::size_t kBasePairwiseCandidatesPerSegment = 32;
+    constexpr std::size_t kMaxPairwiseCandidatesPerSegment = 96;
     for (const auto& [_, segment] : segment_by_id) {
         std::vector<std::string> lcp_endpoints;
         if (lcp_by_id.contains(segment.from)) lcp_endpoints.push_back(segment.from);
@@ -382,10 +474,6 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
             continue;
         }
 
-        struct LocationBinding {
-            std::unordered_map<std::string, PhysicalLocationCandidate> by_lcp;
-            double estimate{};
-        };
         std::vector<LocationBinding> bindings;
         if (lcp_endpoints.size() == 1) {
             const auto& lcp = lcp_by_id.at(lcp_endpoints.front());
@@ -410,7 +498,12 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
             std::sort(bindings.begin(), bindings.end(), [](const auto& lhs, const auto& rhs) {
                 return lhs.estimate < rhs.estimate;
             });
-            if (bindings.size() > kMaxPairwiseCandidatesPerSegment) bindings.resize(kMaxPairwiseCandidatesPerSegment);
+            bindings = select_coverage_aware_bindings(
+                bindings,
+                first,
+                second,
+                kBasePairwiseCandidatesPerSegment,
+                kMaxPairwiseCandidatesPerSegment);
         }
 
         for (const auto& binding : bindings) {

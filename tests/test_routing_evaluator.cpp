@@ -422,6 +422,54 @@ sapr::RoutingEvaluationRequest make_lcp_pair_request(
     return request;
 }
 
+// 构造 root LCP 连接多个 leaf 的候选覆盖用例，确保 pairwise top-K 不会漏掉任一端物理位置。
+sapr::RoutingEvaluationRequest make_pairwise_coverage_request(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::RoutingEvaluationRequest request;
+    request.placements = placements;
+    request.placement_order = {"M"};
+
+    const auto make_lcp = [](const std::string& id, const std::string& space_id, double y) {
+        sapr::LinkingControlPoint lcp;
+        lcp.id = id;
+        lcp.space_node_id = space_id;
+        for (int index = 0; index < 40; ++index) {
+            const double x = id == "ROOT" ? 50.0 + static_cast<double>(index) : static_cast<double>(index);
+            lcp.location_candidates.push_back(
+                {x, y, id + ":loc" + std::to_string(index), "strict", false, 0.0, "coverage"});
+        }
+        return lcp;
+    };
+
+    auto leaf0 = make_lcp("LEAF0", "S_LEAF0", 0.0);
+    auto leaf1 = make_lcp("LEAF1", "S_LEAF1", 20.0);
+    auto root = make_lcp("ROOT", "S_ROOT", 10.0);
+    sapr::WireSegmentRef first{"N", "LEAF0", "ROOT", 1.0, 2.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:leaf0_root"};
+    sapr::WireSegmentRef second{"N", "LEAF1", "ROOT", 1.0, 2.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:leaf1_root"};
+    leaf0.segments.push_back(first);
+    leaf1.segments.push_back(second);
+    root.segments.push_back(first);
+    root.segments.push_back(second);
+
+    const auto add_space = [&](const sapr::LinkingControlPoint& point) {
+        sapr::SpaceNode space;
+        space.id = point.space_node_id;
+        space.owner = "M";
+        space.kind = sapr::SpaceNodeKind::Right;
+        space.linking_points.push_back(point);
+        request.space_nodes.push_back(space);
+    };
+    add_space(leaf0);
+    add_space(leaf1);
+    add_space(root);
+
+    request.linking_points = {leaf0, leaf1, root};
+    request.net_topologies.push_back({"N", {"M.A", "M.B"}, {leaf0, leaf1, root}, {first, second}});
+    (void)circuit;
+    return request;
+}
+
 // 构造一条 LCP-LCP selected candidate。
 sapr::RoutingEvaluation make_lcp_pair_evaluation(
     const sapr::Circuit& circuit,
@@ -1411,6 +1459,30 @@ void run_routing_evaluator_tests() {
     require(
         complete_first->covers_all_incident_segments,
         "LCP candidate should cover all incident segments only when every branch is reachable");
+
+    const auto pairwise_coverage_request = make_pairwise_coverage_request(drc_circuit, drc_placements);
+    const auto pairwise_coverage_eval = sapr::evaluate_routing(drc_circuit, pairwise_coverage_request);
+    const auto covered_locations = [&](const std::string& segment_id, const std::string& lcp_id) {
+        std::unordered_set<std::string> locations;
+        for (const auto& candidate : pairwise_coverage_eval.debug_candidates) {
+            if (candidate.segment_id != segment_id || !candidate.path.success) continue;
+            if (candidate.source_lcp_id == lcp_id) locations.insert(candidate.source_lcp_candidate_id);
+            if (candidate.target_lcp_id == lcp_id) locations.insert(candidate.target_lcp_candidate_id);
+        }
+        return locations;
+    };
+    require(
+        covered_locations("N:leaf0_root", "LEAF0").size() == 40,
+        "coverage-aware LCP pair selection should keep every source location for the first branch");
+    require(
+        covered_locations("N:leaf0_root", "ROOT").size() == 40,
+        "coverage-aware LCP pair selection should keep every root location for the first branch");
+    require(
+        covered_locations("N:leaf1_root", "LEAF1").size() == 40,
+        "coverage-aware LCP pair selection should keep every source location for the second branch");
+    require(
+        covered_locations("N:leaf1_root", "ROOT").size() == 40,
+        "coverage-aware LCP pair selection should keep every root location for the second branch");
 
     auto missing_segment_request = make_lcp_request(drc_circuit, drc_placements, true);
     missing_segment_request.tree.root = "M";
