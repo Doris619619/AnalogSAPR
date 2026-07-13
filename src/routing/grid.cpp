@@ -17,6 +17,7 @@ Grid::Grid(const GridConfig& config, double min_x, double min_y, double max_x, d
     }
 
     // 芯片左、下边界固定为 0，路由网格不得扩展到负坐标区域。
+
     const double low_x = std::max(0.0, std::min(min_x, max_x));
     const double low_y = std::max(0.0, std::min(min_y, max_y));
     const double high_x = std::max(min_x, max_x) + config_.margin;
