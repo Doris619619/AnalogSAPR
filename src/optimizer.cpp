@@ -1,4 +1,4 @@
-// 实现论文 placement-aware 增强 B*-tree contour packing、routing adapter 和模拟退火主循环。
+﻿// 瀹炵幇璁烘枃 placement-aware 澧炲己 B*-tree contour packing銆乺outing adapter 鍜屾ā鎷熼€€鐏富寰幆銆?
 #include "sapr/optimizer.hpp"
 
 #include <algorithm>
@@ -29,7 +29,7 @@
 namespace sapr {
 namespace {
 
-// 表示候选解在模拟退火中的完整评价。
+// 琛ㄧず鍊欓€夎В鍦ㄦā鎷熼€€鐏腑鐨勫畬鏁磋瘎浠枫€?
 struct CandidateState {
     EnhancedBStarTree tree;
     RoutingEvaluationRequest request;
@@ -37,7 +37,7 @@ struct CandidateState {
     double cost{};
 };
 
-// 表示 contour packing 已占用的 group bounding box。
+// 琛ㄧず contour packing 宸插崰鐢ㄧ殑 group bounding box銆?
 struct PackedRect {
     double x1{};
     double y1{};
@@ -74,7 +74,7 @@ void write_json_string_array(std::ostringstream& out, const std::vector<std::str
     out << ']';
 }
 
-// 将紧凑 JSON 格式化为缩进文本，提升 routing_debug.json 可读性。
+// 灏嗙揣鍑?JSON 鏍煎紡鍖栦负缂╄繘鏂囨湰锛屾彁鍗?routing_debug.json 鍙鎬с€?
 std::string pretty_print_json(const std::string& compact) {
     std::ostringstream out;
     int indent = 0;
@@ -114,7 +114,7 @@ std::string pretty_print_json(const std::string& compact) {
                 break;
             case '}':
             case ']': {
-                // 空容器保持 [] / {}，避免拆成多行。
+                // 绌哄鍣ㄤ繚鎸?[] / {}锛岄伩鍏嶆媶鎴愬琛屻€?
                 const char open = ch == '}' ? '{' : '[';
                 std::size_t prev = index;
                 while (prev > 0) {
@@ -156,8 +156,8 @@ std::string pretty_print_json(const std::string& compact) {
     return out.str();
 }
 
-// 收集 space node 内的 LCP 标识，供 enhanced B*-tree 调试图展示空间节点结构。
-// 将电流方向写成稳定字符串，供 B* 树可视化解释 LCP 拓扑。
+// 鏀堕泦 space node 鍐呯殑 LCP 鏍囪瘑锛屼緵 enhanced B*-tree 璋冭瘯鍥惧睍绀虹┖闂磋妭鐐圭粨鏋勩€?
+// 灏嗙數娴佹柟鍚戝啓鎴愮ǔ瀹氬瓧绗︿覆锛屼緵 B* 鏍戝彲瑙嗗寲瑙ｉ噴 LCP 鎷撴墤銆?
 std::string current_direction_name(CurrentDirection direction) {
     switch (direction) {
         case CurrentDirection::In: return "in";
@@ -167,7 +167,7 @@ std::string current_direction_name(CurrentDirection direction) {
     return "unknown";
 }
 
-// 写出可选矩形区域，供 debug JSON 标注 space node 物理通道。
+// 鍐欏嚭鍙€夌煩褰㈠尯鍩燂紝渚?debug JSON 鏍囨敞 space node 鐗╃悊閫氶亾銆?
 void write_optional_rect_json(std::ostringstream& out, const std::optional<Rect>& rect) {
     if (!rect.has_value()) {
         out << "null";
@@ -180,7 +180,7 @@ void write_optional_rect_json(std::ostringstream& out, const std::optional<Rect>
         << '}';
 }
 
-// 查找 LCP 所属 space node，供 debug JSON 输出物理通道。
+// 鏌ユ壘 LCP 鎵€灞?space node锛屼緵 debug JSON 杈撳嚭鐗╃悊閫氶亾銆?
 const SpaceNode* find_space_for_lcp(const RoutingEvaluationRequest& request, const std::string& space_node_id) {
     for (const auto& space : request.space_nodes) {
         if (space.id == space_node_id) return &space;
@@ -200,7 +200,7 @@ void write_wire_segment_json(std::ostringstream& out, const WireSegmentRef& segm
     out << '}';
 }
 
-// 写出一个 LCP 物理候选点，帮助排查 LCP 是否贴到 terminal pin 或 fallback 位置。
+// 鍐欏嚭涓€涓?LCP 鐗╃悊鍊欓€夌偣锛屽府鍔╂帓鏌?LCP 鏄惁璐村埌 terminal pin 鎴?fallback 浣嶇疆銆?
 void write_location_candidate_json(std::ostringstream& out, const PhysicalLocationCandidate& candidate) {
     out << "{\"id\": ";
     write_json_string(out, candidate.id);
@@ -218,7 +218,7 @@ void write_location_candidate_json(std::ostringstream& out, const PhysicalLocati
     out << '}';
 }
 
-// 写出带候选坐标的 LCP 拓扑，供 routing debug 对照 DP 和 detailed 选择。
+// 鍐欏嚭甯﹀€欓€夊潗鏍囩殑 LCP 鎷撴墤锛屼緵 routing debug 瀵圭収 DP 鍜?detailed 閫夋嫨銆?
 void write_debug_topologies_json(std::ostringstream& out, const RoutingEvaluationRequest& request) {
     out << "  \"lcp_topologies\": [\n";
     for (std::size_t topology_index = 0; topology_index < request.net_topologies.size(); ++topology_index) {
@@ -256,8 +256,7 @@ void write_debug_topologies_json(std::ostringstream& out, const RoutingEvaluatio
     out << "\n  ]";
 }
 
-// 写出 routing.txt 语义的一段最终金属线，便于和 PNG 上的异常线段互相定位。
-// 写出 space node 的论文公式值、feedback 下界和最终预留空间。
+// 鍐欏嚭 routing.txt 璇箟鐨勪竴娈垫渶缁堥噾灞炵嚎锛屼究浜庡拰 PNG 涓婄殑寮傚父绾挎浜掔浉瀹氫綅銆?
 void write_debug_space_nodes_json(std::ostringstream& out, const RoutingEvaluationRequest& request) {
     out << "  \"space_nodes\": [\n";
     for (std::size_t index = 0; index < request.space_nodes.size(); ++index) {
@@ -295,8 +294,8 @@ void write_route_segment_json(std::ostringstream& out, const RouteSegment& route
         << '}';
 }
 
-// 写出 A*/DP 候选摘要，用于比较 DP traceback 和 detailed legalize 后的实际选择。
-// 将 A*/DP 的文本消息归一成稳定失败类别。
+// 鍐欏嚭 A*/DP 鍊欓€夋憳瑕侊紝鐢ㄤ簬姣旇緝 DP traceback 鍜?detailed legalize 鍚庣殑瀹為檯閫夋嫨銆?
+// 灏?A*/DP 鐨勬枃鏈秷鎭綊涓€鎴愮ǔ瀹氬け璐ョ被鍒€?
 std::string route_candidate_failure_reason(const routing::RouteCandidate& candidate) {
     if (candidate.path.success) return "";
     if (candidate.path.message.find("multi_terminal_missing") != std::string::npos ||
@@ -348,7 +347,7 @@ void write_route_candidate_json(std::ostringstream& out, const routing::RouteCan
     out << "]}";
 }
 
-// 写出 DP 对候选的选择或拒绝事件，解释 path fail、LCP 绑定冲突和短路 penalty。
+// 鍐欏嚭 DP 瀵瑰€欓€夌殑閫夋嫨鎴栨嫆缁濅簨浠讹紝瑙ｉ噴 path fail銆丩CP 缁戝畾鍐茬獊鍜岀煭璺?penalty銆?
 void write_dp_candidate_event_json(std::ostringstream& out, const routing::RoutingDpCandidateEvent& event) {
     out << "{\"group_key\": ";
     write_json_string(out, event.group_key);
@@ -370,7 +369,7 @@ void write_dp_candidate_event_json(std::ostringstream& out, const routing::Routi
         << '}';
 }
 
-// 写出 detailed traceback 中出现的 pin/LCP 节点。
+// 鍐欏嚭 detailed traceback 涓嚭鐜扮殑 pin/LCP 鑺傜偣銆?
 void write_detailed_node_json(std::ostringstream& out, const DetailedRouteNode& node) {
     out << "{\"id\": ";
     write_json_string(out, node.id);
@@ -385,7 +384,7 @@ void write_detailed_node_json(std::ostringstream& out, const DetailedRouteNode& 
     out << '}';
 }
 
-// 写出 detailed route segment 到 LCP/space-node/DP state 的映射。
+// 鍐欏嚭 detailed route segment 鍒?LCP/space-node/DP state 鐨勬槧灏勩€?
 void write_detailed_segment_json(std::ostringstream& out, const DetailedRouteSegment& segment) {
     out << "{\"route_index\": " << segment.route_index
         << ", \"dp_state_id\": " << segment.dp_state_id
@@ -408,7 +407,7 @@ void write_detailed_segment_json(std::ostringstream& out, const DetailedRouteSeg
     out << '}';
 }
 
-// 写出单个 net 的 detailed traceback 摘要和警告。
+// 鍐欏嚭鍗曚釜 net 鐨?detailed traceback 鎽樿鍜岃鍛娿€?
 void write_detailed_trace_json(std::ostringstream& out, const DetailedRouteTrace& trace) {
     out << "{\"net\": ";
     write_json_string(out, trace.net);
@@ -427,15 +426,15 @@ void write_detailed_trace_json(std::ostringstream& out, const DetailedRouteTrace
     out << '}';
 }
 
-// 汇总一次 routing evaluation 和 detailed routing 的诊断信息。
-// 统计 request 中所有 LCP 物理候选数量。
+// 姹囨€讳竴娆?routing evaluation 鍜?detailed routing 鐨勮瘖鏂俊鎭€?
+// 缁熻 request 涓墍鏈?LCP 鐗╃悊鍊欓€夋暟閲忋€?
 std::size_t count_lcp_location_candidates(const RoutingEvaluationRequest& request) {
     std::size_t total = 0;
     for (const auto& point : request.linking_points) total += point.location_candidates.size();
     return total;
 }
 
-// 统计已通过 A* 与 multi-terminal 过滤的唯一 LCP 物理候选数量。
+// 缁熻宸查€氳繃 A* 涓?multi-terminal 杩囨护鐨勫敮涓€ LCP 鐗╃悊鍊欓€夋暟閲忋€?
 std::size_t count_reachable_lcp_locations(const RoutingEvaluation& evaluation) {
     std::unordered_set<std::string> reachable;
     const auto& candidates = evaluation.debug_candidates.empty() ? evaluation.candidates : evaluation.debug_candidates;
@@ -454,12 +453,57 @@ std::size_t count_reachable_lcp_locations(const RoutingEvaluation& evaluation) {
     return reachable.size();
 }
 
-// 判断本次评价是否因为 LCP traceback 失败而退回 direct routing。
-bool used_lcp_direct_fallback(const RoutingEvaluationRequest& request, const RoutingEvaluation& evaluation) {
-    return !request.linking_points.empty() && evaluation.bottom_up_dp.has_value() && !evaluation.bottom_up_dp->success;
+// 统计能够覆盖全部 incident segments 的 LCP 物理候选数量。
+std::size_t count_full_lcp_coverages(const std::vector<LcpCandidateCoverage>& coverages) {
+    return static_cast<std::size_t>(std::count_if(coverages.begin(), coverages.end(), [](const auto& coverage) {
+        return coverage.covers_all_incident_segments;
+    }));
 }
 
-// 按 net 统计没有任何成功 LCP candidate 的拓扑数量。
+// 统计仍缺少 incident segments 的 LCP 物理候选数量。
+std::size_t count_missing_lcp_coverages(const std::vector<LcpCandidateCoverage>& coverages) {
+    return static_cast<std::size_t>(std::count_if(coverages.begin(), coverages.end(), [](const auto& coverage) {
+        return !coverage.covers_all_incident_segments;
+    }));
+}
+
+// 返回第一条未全覆盖的 LCP 候选，供 summary 快速定位。
+std::string first_uncovered_lcp_location(const std::vector<LcpCandidateCoverage>& coverages) {
+    const auto found = std::find_if(coverages.begin(), coverages.end(), [](const auto& coverage) {
+        return !coverage.covers_all_incident_segments;
+    });
+    return found == coverages.end() ? std::string{} : found->lcp_id + "@" + found->candidate_id;
+}
+
+// 写出每个 LCP 物理候选点的 incident segment 覆盖诊断。
+void write_lcp_candidate_coverage_json(std::ostringstream& out, const std::vector<LcpCandidateCoverage>& coverages) {
+    out << "  \"lcp_candidate_coverage\": [";
+    for (std::size_t index = 0; index < coverages.size(); ++index) {
+        if (index != 0) out << ',';
+        const auto& coverage = coverages[index];
+        out << "{\"lcp_id\": ";
+        write_json_string(out, coverage.lcp_id);
+        out << ", \"candidate_id\": ";
+        write_json_string(out, coverage.candidate_id);
+        out << ", \"required_segments\": ";
+        write_json_string_array(out, coverage.required_segments);
+        out << ", \"reachable_segments\": ";
+        write_json_string_array(out, coverage.reachable_segments);
+        out << ", \"missing_segments\": ";
+        write_json_string_array(out, coverage.missing_segments);
+        out << ", \"covers_all_incident_segments\": "
+            << (coverage.covers_all_incident_segments ? "true" : "false")
+            << '}';
+    }
+    out << "]";
+}
+
+bool used_lcp_direct_fallback(const RoutingEvaluationRequest& request, const RoutingEvaluation& evaluation) {
+    return !evaluation.strict_lcp_dp_blocked_fallback &&
+           !request.linking_points.empty() && evaluation.bottom_up_dp.has_value() && !evaluation.bottom_up_dp->success;
+}
+
+// 鎸?net 缁熻娌℃湁浠讳綍鎴愬姛 LCP candidate 鐨勬嫇鎵戞暟閲忋€?
 std::size_t count_lcp_fallback_nets(const RoutingEvaluationRequest& request, const RoutingEvaluation& evaluation) {
     const auto& candidates = evaluation.debug_candidates.empty() ? evaluation.candidates : evaluation.debug_candidates;
     std::unordered_set<std::string> nets_with_successful_lcp;
@@ -481,8 +525,11 @@ std::string make_routing_debug_json(
     const DetailedRoutingResult& detailed,
     const Metrics& metrics) {
     std::ostringstream out;
+    const auto& debug_candidates = evaluation.debug_candidates.empty() ? evaluation.candidates : evaluation.debug_candidates;
+    const auto lcp_coverages = analyze_lcp_candidate_coverage(request, debug_candidates);
+    const std::string first_uncovered = first_uncovered_lcp_location(lcp_coverages);
     out << "{\n";
-    // summary 中 routing_cost/global_* 来自 global 阶段；final_penalty/detailed_cost 来自最终口径。
+    // summary 涓?routing_cost/global_* 鏉ヨ嚜 global 闃舵锛沠inal_penalty/detailed_cost 鏉ヨ嚜鏈€缁堝彛寰勩€?
     out << "  \"summary\": {"
         << "\"routing_cost\": " << evaluation.routing_cost
         << ", \"global_wirelength\": " << metrics.global_wirelength
@@ -503,6 +550,13 @@ std::string make_routing_debug_json(
         << ", \"phi_cost\": " << metrics.phi_cost
         << ", \"lcp_candidates_total\": " << count_lcp_location_candidates(request)
         << ", \"lcp_candidates_reachable\": " << count_reachable_lcp_locations(evaluation)
+        << ", \"lcp_locations_covering_all_segments\": " << count_full_lcp_coverages(lcp_coverages)
+        << ", \"lcp_locations_missing_segments\": " << count_missing_lcp_coverages(lcp_coverages)
+        << ", \"fallback_blocked_by_strict_lcp_dp\": "
+        << (evaluation.strict_lcp_dp_blocked_fallback ? "true" : "false")
+        << ", \"first_uncovered_lcp_location\": ";
+    write_json_string(out, first_uncovered);
+    out
         << ", \"lcp_nets_fallback_count\": " << count_lcp_fallback_nets(request, evaluation)
         << ", \"fallback_reason\": ";
     write_json_string(out, used_lcp_direct_fallback(request, evaluation) ? "no_multi_terminal_reachable_lcp_candidate" : "");
@@ -511,6 +565,8 @@ std::string make_routing_debug_json(
     write_debug_topologies_json(out, request);
     out << ",\n";
     write_debug_space_nodes_json(out, request);
+    out << ",\n";
+    write_lcp_candidate_coverage_json(out, lcp_coverages);
     out << ",\n  \"final_candidates\": [";
     for (std::size_t index = 0; index < evaluation.candidates.size(); ++index) {
         if (index != 0) out << ',';
@@ -556,7 +612,7 @@ std::string make_routing_debug_json(
     return pretty_print_json(out.str());
 }
 
-// 返回指定模块是否是对称 pair 的代表模块。
+// 杩斿洖鎸囧畾妯″潡鏄惁鏄绉?pair 鐨勪唬琛ㄦā鍧椼€?
 const SymmetryGroupNode* symmetry_group_for_hierarchy(const EnhancedBStarTree& tree, const std::string& hierarchy) {
     for (const auto& group : tree.symmetry_groups) {
         if (group.hierarchy_node_id == hierarchy) return &group;
@@ -564,12 +620,12 @@ const SymmetryGroupNode* symmetry_group_for_hierarchy(const EnhancedBStarTree& t
     return nullptr;
 }
 
-// 返回模块旋转后的尺寸。
+// 杩斿洖妯″潡鏃嬭浆鍚庣殑灏哄銆?
 std::pair<double, double> module_size(const Circuit& circuit, const std::string& module, int angle) {
     return placed_size(circuit.modules.at(module), {module, 0.0, 0.0, angle, "R0"});
 }
 
-// 返回代表节点在 packing 中占用的整体尺寸，包含对称镜像模块和轴间预留空间。
+// 杩斿洖浠ｈ〃鑺傜偣鍦?packing 涓崰鐢ㄧ殑鏁翠綋灏哄锛屽寘鍚绉伴暅鍍忔ā鍧楀拰杞撮棿棰勭暀绌洪棿銆?
 std::pair<double, double> occupied_size(
     const Circuit& circuit,
     const EnhancedBStarTree& tree,
@@ -586,7 +642,7 @@ std::pair<double, double> occupied_size(
     return {size.first + right_space, size.second + top_space};
 }
 
-// 返回 contour 在指定 x 区间内的最高 y。
+// 杩斿洖 contour 鍦ㄦ寚瀹?x 鍖洪棿鍐呯殑鏈€楂?y銆?
 double contour_height(const std::vector<PackedRect>& packed, double x, double width) {
     double result = 0.0;
     const double x2 = x + width;
@@ -596,7 +652,7 @@ double contour_height(const std::vector<PackedRect>& packed, double x, double wi
     return result;
 }
 
-// 将 angle 转成基础 Cadence orient 字符串。
+// 灏?angle 杞垚鍩虹 Cadence orient 瀛楃涓层€?
 std::string orient_for_angle(int angle) {
     switch ((angle % 360 + 360) % 360) {
         case 0: return "R0";
@@ -607,7 +663,7 @@ std::string orient_for_angle(int angle) {
     return "R0";
 }
 
-// 生成对称 pair 中镜像模块的 placement。
+// 鐢熸垚瀵圭О pair 涓暅鍍忔ā鍧楃殑 placement銆?
 struct AsfPackingResult {
     std::unordered_map<std::string, Placement> placements;
     std::vector<SpaceNode> space_nodes;
@@ -820,7 +876,7 @@ AsfPackingResult pack_asf_bstar_tree(const Circuit& circuit, const SymmetryGroup
     return result;
 }
 
-// 按原始模块顺序整理输出顺序，保证文件稳定。
+// 鎸夊師濮嬫ā鍧楅『搴忔暣鐞嗚緭鍑洪『搴忥紝淇濊瘉鏂囦欢绋冲畾銆?
 std::vector<std::string> ordered_placements(const Circuit& circuit, const RoutingEvaluationRequest& request) {
     std::vector<std::string> order;
     for (const auto& module : circuit.module_order) {
@@ -829,7 +885,7 @@ std::vector<std::string> ordered_placements(const Circuit& circuit, const Routin
     return order;
 }
 
-// 从增强 B*-tree 复制 routing evaluator 所需的轻量拓扑快照。
+// 浠庡寮?B*-tree 澶嶅埗 routing evaluator 鎵€闇€鐨勮交閲忔嫇鎵戝揩鐓с€?
 RoutingTreeSnapshot make_routing_tree_snapshot(const EnhancedBStarTree& tree) {
     RoutingTreeSnapshot snapshot;
     snapshot.root = tree.root;
@@ -849,8 +905,8 @@ RoutingTreeSnapshot make_routing_tree_snapshot(const EnhancedBStarTree& tree) {
     return snapshot;
 }
 
-// 返回已放置模块的 active blocker 近似全局矩形。
-// 收集指定 B*-tree node 子树中的代表模块，用于把 DP state 对齐到 packing contour step。
+// 杩斿洖宸叉斁缃ā鍧楃殑 active blocker 杩戜技鍏ㄥ眬鐭╁舰銆?
+// 鏀堕泦鎸囧畾 B*-tree node 瀛愭爲涓殑浠ｈ〃妯″潡锛岀敤浜庢妸 DP state 瀵归綈鍒?packing contour step銆?
 std::vector<std::string> subtree_modules_for_trace(const EnhancedBStarTree& tree, const std::string& id) {
     std::vector<std::string> modules;
     const auto found = tree.nodes.find(id);
@@ -938,7 +994,7 @@ bool segment_crosses_child_modules(
     return (left.contains(from) && right.contains(to)) || (left.contains(to) && right.contains(from));
 }
 
-// 根据 packing step 的 subtree 边界显式记录该 step 需要完成的 routing DP transition。
+// 鏍规嵁 packing step 鐨?subtree 杈圭晫鏄惧紡璁板綍璇?step 闇€瑕佸畬鎴愮殑 routing DP transition銆?
 void annotate_packing_time_segments(const EnhancedBStarTree& tree, RoutingEvaluationRequest& request) {
     const auto lcp_owner_by_id = lcp_owner_map_for_trace(request);
     for (auto& step : request.packing_trace.steps) {
@@ -968,7 +1024,7 @@ Rect placed_active_rect(const Module& module, const Placement& placement) {
     return routing::transform_active_to_global(module, placement);
 }
 
-// 返回当前 placement 下模块的外接矩形。
+// 杩斿洖褰撳墠 placement 涓嬫ā鍧楃殑澶栨帴鐭╁舰銆?
 Rect placed_module_rect(const Circuit& circuit, const std::unordered_map<std::string, Placement>& placements, const std::string& module) {
     const auto placement = placements.find(module);
     if (placement == placements.end() || !circuit.modules.contains(module)) return {0.0, 0.0, 0.0, 0.0};
@@ -976,7 +1032,7 @@ Rect placed_module_rect(const Circuit& circuit, const std::unordered_map<std::st
     return {placement->second.x, placement->second.y, placement->second.x + size.first, placement->second.y + size.second};
 }
 
-// 为每个 space node 生成当前 placement 下可采样的物理通道区域。
+// 涓烘瘡涓?space node 鐢熸垚褰撳墠 placement 涓嬪彲閲囨牱鐨勭墿鐞嗛€氶亾鍖哄煙銆?
 void assign_space_physical_regions(
     const Circuit& circuit,
     RoutingEvaluationRequest& request,
@@ -1001,7 +1057,7 @@ void assign_space_physical_regions(
     }
 }
 
-// 填充 routing request 中面向 DP/A* 的全局 pin、blocker 和 LCP 候选位置。
+// 濉厖 routing request 涓潰鍚?DP/A* 鐨勫叏灞€ pin銆乥locker 鍜?LCP 鍊欓€変綅缃€?
 void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& request) {
     for (const auto& module_id : request.placement_order) {
         const auto& placement = request.placements.at(module_id);
@@ -1042,8 +1098,8 @@ void populate_routing_context(const Circuit& circuit, RoutingEvaluationRequest& 
     }
 }
 
-// 计算当前 metrics 的论文归一化总代价。
-// 将 request 中已经生成或刷新的 LCP 写回 tree 的对应 space node。
+// 璁＄畻褰撳墠 metrics 鐨勮鏂囧綊涓€鍖栨€讳唬浠枫€?
+// 灏?request 涓凡缁忕敓鎴愭垨鍒锋柊鐨?LCP 鍐欏洖 tree 鐨勫搴?space node銆?
 void write_request_lcps_to_tree(EnhancedBStarTree& tree, const RoutingEvaluationRequest& request) {
     auto clear_space = [](SpaceNode& space) {
         space.linking_points.clear();
@@ -1095,13 +1151,13 @@ void write_request_lcps_to_tree(EnhancedBStarTree& tree, const RoutingEvaluation
     }
 }
 
-// 为初始 tree 生成一次持久化 LCP 拓扑，使 LCP 扰动进入 SA state。
+// 涓哄垵濮?tree 鐢熸垚涓€娆℃寔涔呭寲 LCP 鎷撴墤锛屼娇 LCP 鎵板姩杩涘叆 SA state銆?
 void initialize_tree_lcps(const Circuit& circuit, EnhancedBStarTree& tree, const SolverConfig& config) {
     const auto request = pack_enhanced_tree(circuit, tree, config);
     write_request_lcps_to_tree(tree, request);
 }
 
-// 根据当前 placement bbox 计算 row-width 溢出惩罚。
+// 鏍规嵁褰撳墠 placement bbox 璁＄畻 row-width 婧㈠嚭鎯╃綒銆?
 void apply_row_width_metrics(const Circuit& circuit, const RoutingEvaluationRequest& request, Metrics& metrics, const SolverConfig& config) {
     if (config.row_width <= 0.0 || request.placements.empty()) {
         metrics.row_width_overflow = 0.0;
@@ -1134,8 +1190,8 @@ double compute_phi_cost(Metrics& metrics, const Metrics& base, const SolverConfi
     return metrics.phi_cost;
 }
 
-// 评价一棵增强 B*-tree 对应的候选状态。
-// 判断当前候选是否已经得到可直接输出的合法 detailed routing。
+// 璇勪环涓€妫靛寮?B*-tree 瀵瑰簲鐨勫€欓€夌姸鎬併€?
+// 鍒ゆ柇褰撳墠鍊欓€夋槸鍚﹀凡缁忓緱鍒板彲鐩存帴杈撳嚭鐨勫悎娉?detailed routing銆?
 bool feedback_expands_space(
     const RoutingEvaluationRequest& request,
     const RoutingFeedback& feedback,
@@ -1155,7 +1211,7 @@ bool feedback_expands_space(
     return false;
 }
 
-// 在同一个 candidate 内执行有限轮 routing feedback -> re-pack 闭环。
+// 鍦ㄥ悓涓€涓?candidate 鍐呮墽琛屾湁闄愯疆 routing feedback -> re-pack 闂幆銆?
 CandidateState evaluate_candidate_with_feedback_loop(
     const Circuit& circuit,
     EnhancedBStarTree tree,
@@ -1192,7 +1248,7 @@ CandidateState evaluate_candidate(
     return evaluate_candidate_with_feedback_loop(circuit, std::move(tree), config, &base_metrics);
 }
 
-// 将候选状态转换为最终 Solution；可选附带 SA 进度与每轮 btree 可视化记录。
+// 灏嗗€欓€夌姸鎬佽浆鎹负鏈€缁?Solution锛涘彲閫夐檮甯?SA 杩涘害涓庢瘡杞?btree 鍙鍖栬褰曘€?
 Solution make_solution(
     const CandidateState& state,
     std::vector<SaProgressEntry> sa_progress = {},
@@ -1226,7 +1282,7 @@ Solution make_solution(
     return solution;
 }
 
-// 检查 FLOW 约束是否在当前临时路由中有可追踪的端点。
+// 妫€鏌?FLOW 绾︽潫鏄惁鍦ㄥ綋鍓嶄复鏃惰矾鐢变腑鏈夊彲杩借釜鐨勭鐐广€?
 int count_flow_violations(const Circuit& circuit, const RoutingEvaluationRequest& request, const std::vector<RouteSegment>& routes) {
     std::unordered_map<std::string, PlacedPin> pins;
     for (const auto& pin : request.placed_pins) pins[pin.key] = pin;
@@ -1248,7 +1304,7 @@ int count_flow_violations(const Circuit& circuit, const RoutingEvaluationRequest
     return violations;
 }
 
-// 检查当前 route 是否违反线宽范围。
+// 妫€鏌ュ綋鍓?route 鏄惁杩濆弽绾垮鑼冨洿銆?
 int count_current_density_violations(const Circuit& circuit, const std::vector<RouteSegment>& routes) {
     int violations = 0;
     for (const auto& route : routes) {
@@ -1315,7 +1371,7 @@ void translate_packing_request(RoutingEvaluationRequest& request, double offset)
     }
 }
 
-// 计算 space node 内 LCP 所需的最大线宽，用于 fallback 后扩大预留空间。
+// 璁＄畻 space node 鍐?LCP 鎵€闇€鐨勬渶澶х嚎瀹斤紝鐢ㄤ簬 fallback 鍚庢墿澶ч鐣欑┖闂淬€?
 double max_lcp_width_for_space(const SpaceNode& space) {
     double width = 1.0;
     for (const auto& point : space.linking_points) width = std::max(width, point.required_width());
@@ -1324,7 +1380,7 @@ double max_lcp_width_for_space(const SpaceNode& space) {
 
 }  // namespace
 
-// 按增强 B*-tree 和 ASF 对称组生成当前候选布局。
+// 鎸夊寮?B*-tree 鍜?ASF 瀵圭О缁勭敓鎴愬綋鍓嶅€欓€夊竷灞€銆?
 RoutingEvaluationRequest pack_enhanced_tree(
     const Circuit& circuit,
     const EnhancedBStarTree& tree,
@@ -1365,6 +1421,10 @@ RoutingEvaluationRequest pack_enhanced_tree(
                 translate_asf_result(local, x, y);
                 for (const auto& [module, placement] : local.placements) request.placements[module] = placement;
                 request.space_nodes.insert(request.space_nodes.end(), local.space_nodes.begin(), local.space_nodes.end());
+                request.packing_trace.steps.insert(
+                    request.packing_trace.steps.end(),
+                    local.trace.steps.begin(),
+                    local.trace.steps.end());
             }
         }
 
@@ -1417,6 +1477,7 @@ RoutingEvaluationRequest pack_enhanced_tree(
         resolve_boundary_margin(circuit, config, layout_width, layout_height));
     request.placement_order = ordered_placements(circuit, request);
     request.lcp_candidate_seed = config.seed;
+    request.strict_lcp_dp = config.strict_lcp_dp;
     request.routing_layers = config.routing_layers;
     assign_space_physical_regions(circuit, request, config);
     request.tree = make_routing_tree_snapshot(tree);
@@ -1425,7 +1486,7 @@ RoutingEvaluationRequest pack_enhanced_tree(
     return request;
 }
 
-// 使用 routing adapter 评价当前 placement candidate。
+// 浣跨敤 routing adapter 璇勪环褰撳墠 placement candidate銆?
 RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const RoutingEvaluationRequest& request) {
     RoutingFeedback feedback;
     const auto routing_evaluation = evaluate_routing(circuit, request);
@@ -1436,7 +1497,7 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     solution.placement_order = request.placement_order;
     solution.routes = feedback.routes;
     feedback.metrics = measure(circuit, solution);
-    // 先固化 global 阶段快照；最终 wirelength/bend/via 可被 detailed 覆盖，二者不得混写。
+    // 鍏堝浐鍖?global 闃舵蹇収锛涙渶缁?wirelength/bend/via 鍙 detailed 瑕嗙洊锛屼簩鑰呬笉寰楁贩鍐欍€?
     feedback.metrics.global_wirelength = routing_evaluation.global_routing.total_metrics.wirelength;
     feedback.metrics.global_bend_count = routing_evaluation.global_routing.total_metrics.bend_count;
     feedback.metrics.global_via_count = routing_evaluation.global_routing.total_metrics.via_count;
@@ -1477,7 +1538,10 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
         }
     }
     if (!request.linking_points.empty() && routing_evaluation.bottom_up_dp.has_value() && !routing_evaluation.bottom_up_dp->success) {
-        feedback.metrics.routing_warnings.push_back("LCP fallback: no_multi_terminal_reachable_lcp_candidate");
+        feedback.metrics.routing_warnings.push_back(
+            routing_evaluation.strict_lcp_dp_blocked_fallback
+                ? "LCP strict DP blocked fallback: no_multi_terminal_reachable_lcp_candidate"
+                : "LCP fallback: no_multi_terminal_reachable_lcp_candidate");
     }
     feedback.metrics.space_nodes_with_routes = detailed.space_nodes_with_routes;
     feedback.metrics.packing_trace_steps = static_cast<int>(request.packing_trace.steps.size());
@@ -1499,6 +1563,7 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
 
     int space_feedback_nodes = 0;
     const bool lcp_direct_fallback =
+        !routing_evaluation.strict_lcp_dp_blocked_fallback &&
         !request.linking_points.empty() && routing_evaluation.bottom_up_dp.has_value() && !routing_evaluation.bottom_up_dp->success;
     for (const auto& space : request.space_nodes) {
         const auto detailed_space = detailed.required_space_by_node.find(space.id);
@@ -1526,7 +1591,7 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     return feedback;
 }
 
-// 使用论文 placement 框架、SA 和 routing adapter 生成布局布线解。
+// 浣跨敤璁烘枃 placement 妗嗘灦銆丼A 鍜?routing adapter 鐢熸垚甯冨眬甯冪嚎瑙ｃ€?
 Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& config) {
     const auto errors = validate_circuit(circuit);
     if (!errors.empty()) {
@@ -1591,7 +1656,7 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
         const double logged_next_cost = next.cost;
         if (accept) current = std::move(next);
         if (current.cost < best.cost) best = current;
-        // 默认输出轻量 SA 进度，避免长评估时终端看起来像卡住。
+        // 榛樿杈撳嚭杞婚噺 SA 杩涘害锛岄伩鍏嶉暱璇勪及鏃剁粓绔湅璧锋潵鍍忓崱浣忋€?
         std::cerr << "[sa] " << (iteration + 1) << '/' << config.sa_iterations
                   << " move=" << perturbation.move
                   << " accept=" << (accept ? "true" : "false")
@@ -1631,7 +1696,7 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     return make_solution(best, std::move(sa_progress), std::move(sa_btree_iterations));
 }
 
-// 保持历史 CLI/API 名称，当前默认指向论文 placement-aware 求解流程。
+// 淇濇寔鍘嗗彶 CLI/API 鍚嶇О锛屽綋鍓嶉粯璁ゆ寚鍚戣鏂?placement-aware 姹傝В娴佺▼銆?
 Solution solve_baseline(const Circuit& circuit, const SolverConfig& config) {
     return solve_placement_aware(circuit, config);
 }

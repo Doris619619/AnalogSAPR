@@ -760,8 +760,8 @@ void run_routing_evaluator_tests() {
             approx(explicit_margin_request.packing_trace.steps.front().occupied_bbox.y1, 1.5),
         "packing trace root bbox should start at the explicit boundary margin");
     require(
-        request_for_dp.packing_trace.steps.size() == request_for_dp.tree.nodes.size(),
-        "packing trace should contain one step per representative tree node");
+        request_for_dp.packing_trace.steps.size() >= request_for_dp.tree.nodes.size(),
+        "packing trace should cover representative tree nodes and may include ASF internal steps");
     for (const auto& step : request_for_dp.packing_trace.steps) {
         require(step.occupied_bbox.x1 <= step.occupied_bbox.x2, "packing trace bbox x range should be valid");
         require(step.occupied_bbox.y1 <= step.occupied_bbox.y2, "packing trace bbox y range should be valid");
@@ -1355,6 +1355,18 @@ void run_routing_evaluator_tests() {
     require(missing_lcp_detail.traceback_failures > 0, "missing LCP location should become a traceback failure");
     require(missing_lcp_detail.routing_failure_penalty > 0.0, "traceback failures should add routing failure penalty");
 
+    auto strict_missing_lcp_request = make_lcp_request(drc_circuit, drc_placements, false);
+    strict_missing_lcp_request.tree.root = "M";
+    strict_missing_lcp_request.tree.nodes.push_back({"M", "M", std::nullopt, std::nullopt});
+    strict_missing_lcp_request.strict_lcp_dp = true;
+    const auto strict_missing_lcp_eval = sapr::evaluate_routing(drc_circuit, strict_missing_lcp_request);
+    require(
+        strict_missing_lcp_eval.strict_lcp_dp_blocked_fallback,
+        "strict LCP DP should report that direct fallback was blocked");
+    require(
+        strict_missing_lcp_eval.failed_nets > 0,
+        "strict LCP DP should not hide failed LCP topology behind direct routing");
+
     sapr::routing::RoutingContext lcp_context(drc_circuit, drc_placements);
     std::vector<sapr::routing::RouteCandidate> multi_location_candidates{
         make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:a", 1.0, 1.0),
@@ -1369,6 +1381,36 @@ void run_routing_evaluator_tests() {
     for (const auto& candidate : lcp_global.net_routes.front().selected_candidates) {
         require(candidate.lcp_candidate_id == selected_location, "all selected segments of one LCP should share one location");
     }
+
+    auto partial_left = make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:first", 5.0, 1.0);
+    partial_left.segment_id = "N:left";
+    const std::vector<sapr::routing::RouteCandidate> partial_lcp_candidates{partial_left};
+    const auto partial_coverage = sapr::analyze_lcp_candidate_coverage(lcp_request, partial_lcp_candidates);
+    const auto partial_first = std::find_if(partial_coverage.begin(), partial_coverage.end(), [](const auto& coverage) {
+        return coverage.lcp_id == "LCP1" && coverage.candidate_id == "LCP1:first";
+    });
+    require(partial_first != partial_coverage.end(), "LCP coverage report should include the physical candidate");
+    require(
+        !partial_first->covers_all_incident_segments,
+        "LCP candidate should not cover all incident segments when one branch is missing");
+    require(
+        std::find(partial_first->missing_segments.begin(), partial_first->missing_segments.end(), "N:right") !=
+            partial_first->missing_segments.end(),
+        "LCP coverage report should name the missing incident segment");
+
+    auto complete_left = make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:first", 5.0, 1.0);
+    complete_left.segment_id = "N:left";
+    auto complete_right = make_manual_lcp_candidate(lcp_context, "LCP1", "M.B", "LCP1:first", 5.0, 1.0);
+    complete_right.segment_id = "N:right";
+    const std::vector<sapr::routing::RouteCandidate> complete_lcp_candidates{complete_left, complete_right};
+    const auto complete_coverage = sapr::analyze_lcp_candidate_coverage(lcp_request, complete_lcp_candidates);
+    const auto complete_first = std::find_if(complete_coverage.begin(), complete_coverage.end(), [](const auto& coverage) {
+        return coverage.lcp_id == "LCP1" && coverage.candidate_id == "LCP1:first";
+    });
+    require(complete_first != complete_coverage.end(), "complete LCP coverage should include the physical candidate");
+    require(
+        complete_first->covers_all_incident_segments,
+        "LCP candidate should cover all incident segments only when every branch is reachable");
 
     auto missing_segment_request = make_lcp_request(drc_circuit, drc_placements, true);
     missing_segment_request.tree.root = "M";

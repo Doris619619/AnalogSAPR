@@ -1,4 +1,4 @@
-// 定义模拟电路、约束、增强 B*-tree、布局布线结果和评价指标的公共数据模型。
+﻿// 瀹氫箟妯℃嫙鐢佃矾銆佺害鏉熴€佸寮?B*-tree銆佸竷灞€甯冪嚎缁撴灉鍜岃瘎浠锋寚鏍囩殑鍏叡鏁版嵁妯″瀷銆?
 #pragma once
 
 #include <cstddef>
@@ -9,32 +9,32 @@
 
 namespace sapr {
 
-// 表示线网的布线优先级。
+// 琛ㄧず绾跨綉鐨勫竷绾夸紭鍏堢骇銆?
 enum class Priority { Critical, Symmetry, Normal };
 
-// 表示对称约束的轴方向。
+// 琛ㄧず瀵圭О绾︽潫鐨勮酱鏂瑰悜銆?
 enum class Axis { Vertical, Horizontal };
 
-// 表示增强 B*-tree 中预留布线空间的论文语义。
+// 琛ㄧず澧炲己 B*-tree 涓鐣欏竷绾跨┖闂寸殑璁烘枃璇箟銆?
 enum class SpaceNodeKind { Right, Top, Group, Cluster };
 
-// 表示 LCP 线段相对 FLOW 约束的逻辑电流方向。
+// 琛ㄧず LCP 绾挎鐩稿 FLOW 绾︽潫鐨勯€昏緫鐢垫祦鏂瑰悜銆?
 enum class CurrentDirection { Unknown, In, Out };
 
-// 表示二维轴对齐矩形。
+// 琛ㄧず浜岀淮杞村榻愮煩褰€?
 struct Rect {
     double x1{};
     double y1{};
     double x2{};
     double y2{};
 
-    // 返回矩形宽度。
+    // 杩斿洖鐭╁舰瀹藉害銆?
     [[nodiscard]] double width() const { return x2 - x1; }
-    // 返回矩形高度。
+    // 杩斿洖鐭╁舰楂樺害銆?
     [[nodiscard]] double height() const { return y2 - y1; }
 };
 
-// 表示一个待放置器件。
+// 琛ㄧず涓€涓緟鏀剧疆鍣ㄤ欢銆?
 struct Module {
     std::string id;
     double width{};
@@ -45,7 +45,7 @@ struct Module {
     std::string info;
 };
 
-// 表示器件上的一个引脚。
+// 琛ㄧず鍣ㄤ欢涓婄殑涓€涓紩鑴氥€?
 struct Pin {
     std::string module;
     std::string name;
@@ -53,18 +53,18 @@ struct Pin {
     double y{};
     std::string layer;
 
-    // 返回全局唯一的 module.pin 键。
+    // 杩斿洖鍏ㄥ眬鍞竴鐨?module.pin 閿€?
     [[nodiscard]] std::string key() const { return module + "." + name; }
 };
 
-// 表示一个多端线网。
+// 琛ㄧず涓€涓绔嚎缃戙€?
 struct Net {
     std::string name;
     Priority priority{Priority::Normal};
     std::vector<std::string> terminals;
 };
 
-// 表示一对器件的对称约束。
+// 琛ㄧず涓€瀵瑰櫒浠剁殑瀵圭О绾︽潫銆?
 struct SymmetryPair {
     std::string name;
     Axis axis{Axis::Vertical};
@@ -72,28 +72,28 @@ struct SymmetryPair {
     std::string right;
 };
 
-// 表示器件自身的对称约束。
+// 琛ㄧず鍣ㄤ欢鑷韩鐨勫绉扮害鏉熴€?
 struct SymmetrySelf {
     std::string name;
     Axis axis{Axis::Vertical};
     std::string module;
 };
 
-// 表示线网上的电流流向约束。
+// 琛ㄧず绾跨綉涓婄殑鐢垫祦娴佸悜绾︽潫銆?
 struct FlowConstraint {
     std::string net;
     std::string out_pin;
     std::string in_pin;
 };
 
-// 表示线网允许的线宽范围。
+// 琛ㄧず绾跨綉鍏佽鐨勭嚎瀹借寖鍥淬€?
 struct WireWidthConstraint {
     std::string net;
     double min_width{};
     double max_width{};
 };
 
-// 汇总电路的全部约束。
+// 姹囨€荤數璺殑鍏ㄩ儴绾︽潫銆?
 struct Constraints {
     std::vector<SymmetryPair> symmetry_pairs;
     std::vector<SymmetrySelf> symmetry_selfs;
@@ -101,7 +101,7 @@ struct Constraints {
     std::vector<FlowConstraint> flows;
 };
 
-// 表示完整的算法输入，并保存稳定的原始顺序。
+// 琛ㄧず瀹屾暣鐨勭畻娉曡緭鍏ワ紝骞朵繚瀛樼ǔ瀹氱殑鍘熷椤哄簭銆?
 struct Circuit {
     std::unordered_map<std::string, Module> modules;
     std::unordered_map<std::string, Pin> pins;
@@ -112,7 +112,7 @@ struct Circuit {
     std::vector<std::string> net_order;
 };
 
-// 表示一个器件的放置结果。
+// 琛ㄧず涓€涓櫒浠剁殑鏀剧疆缁撴灉銆?
 struct Placement {
     std::string module;
     double x{};
@@ -121,7 +121,7 @@ struct Placement {
     std::string orient{"R0"};
 };
 
-// 表示一条中心线布线段。
+// 琛ㄧず涓€鏉′腑蹇冪嚎甯冪嚎娈点€?
 struct RouteSegment {
     std::string net;
     std::string layer;
@@ -132,8 +132,8 @@ struct RouteSegment {
     double width{};
 };
 
-// 表示当前解的基础评价指标和论文约束违例统计。
-// wirelength/bend/via/penalty 为最终口径（优先 detailed）；global_* 保留 global 阶段快照，避免与最终值混用。
+// 琛ㄧず褰撳墠瑙ｇ殑鍩虹璇勪环鎸囨爣鍜岃鏂囩害鏉熻繚渚嬬粺璁°€?
+// wirelength/bend/via/penalty 涓烘渶缁堝彛寰勶紙浼樺厛 detailed锛夛紱global_* 淇濈暀 global 闃舵蹇収锛岄伩鍏嶄笌鏈€缁堝€兼贩鐢ㄣ€?
 struct Metrics {
     double area{};
     double wirelength{};
@@ -145,7 +145,7 @@ struct Metrics {
     double normalized_bend{};
     double normalized_via{};
     double penalty{};
-    // global 阶段原始几何与惩罚（写入 metrics 前不被 detailed 覆盖）。
+    // global 闃舵鍘熷鍑犱綍涓庢儵缃氾紙鍐欏叆 metrics 鍓嶄笉琚?detailed 瑕嗙洊锛夈€?
     double global_wirelength{};
     int global_bend_count{};
     int global_via_count{};
@@ -181,7 +181,7 @@ struct Metrics {
     std::vector<std::string> routing_warnings;
 };
 
-// 记录 SA 单轮轻量进度，字段与终端 `[sa]` 日志对齐。
+// 璁板綍 SA 鍗曡疆杞婚噺杩涘害锛屽瓧娈典笌缁堢 `[sa]` 鏃ュ織瀵归綈銆?
 struct SaProgressEntry {
     int iteration{};
     int sa_iterations{};
@@ -193,7 +193,7 @@ struct SaProgressEntry {
     double temperature{};
 };
 
-// 记录 SA 单轮候选树可视化所需的扰动与接受信息。
+// 璁板綍 SA 鍗曡疆鍊欓€夋爲鍙鍖栨墍闇€鐨勬壈鍔ㄤ笌鎺ュ彈淇℃伅銆?
 struct SaBtreeIterationTrace {
     int iteration{};
     int sa_iterations{};
@@ -204,13 +204,13 @@ struct SaBtreeIterationTrace {
     double current_cost_before{};
     double temperature{};
     std::string btree_trace_json;
-    // 保存本轮候选解的布局布线文本输出所需数据，用于逐轮渲染 layout。
+    // 淇濆瓨鏈疆鍊欓€夎В鐨勫竷灞€甯冪嚎鏂囨湰杈撳嚭鎵€闇€鏁版嵁锛岀敤浜庨€愯疆娓叉煋 layout銆?
     std::unordered_map<std::string, Placement> placements;
     std::vector<std::string> placement_order;
     std::vector<RouteSegment> routes;
 };
 
-// 汇总布局和布线结果，并可保存求解时的路由评价快照。
+// 姹囨€诲竷灞€鍜屽竷绾跨粨鏋滐紝骞跺彲淇濆瓨姹傝В鏃剁殑璺敱璇勪环蹇収銆?
 struct Solution {
     std::unordered_map<std::string, Placement> placements;
     std::vector<std::string> placement_order;
@@ -235,12 +235,12 @@ struct Solution {
     std::optional<std::string> btree_trace_json;
     std::optional<std::string> routing_debug_json;
     std::vector<std::string> routing_warnings;
-    // 与 btree_trace.json 并列写出的 SA 轻量进度（sa_trace.json）。
+    // 涓?btree_trace.json 骞跺垪鍐欏嚭鐨?SA 杞婚噺杩涘害锛坰a_trace.json锛夈€?
     std::vector<SaProgressEntry> sa_progress;
     std::vector<SaBtreeIterationTrace> sa_btree_iterations;
 };
 
-// 配置求解器的确定性参数和论文代价函数权重。
+// 閰嶇疆姹傝В鍣ㄧ殑纭畾鎬у弬鏁板拰璁烘枃浠ｄ环鍑芥暟鏉冮噸銆?
 struct SolverConfig {
     double spacing{5.0};
     double row_width{40.0};
@@ -259,11 +259,13 @@ struct SolverConfig {
     double boundary_margin{-1.0};
     double boundary_clearance{0.0};
     bool dump_sa_btree{true};
-    // 允许使用的金属层数（M1..Mn）；默认 1 层，便于论文复现与平面合法性实验。
+    // 仅用于论文 LCP/对称布线诊断；DP 失败时禁止含 LCP net 退回普通 greedy 布线。
+    bool strict_lcp_dp{false};
+    // 鍏佽浣跨敤鐨勯噾灞炲眰鏁帮紙M1..Mn锛夛紱榛樿 1 灞傦紝渚夸簬璁烘枃澶嶇幇涓庡钩闈㈠悎娉曟€у疄楠屻€?
     int routing_layers{1};
 };
 
-// 表示一次 SA 扰动的调试摘要，供命令行诊断搜索状态是否真实变化。
+// 琛ㄧず涓€娆?SA 鎵板姩鐨勮皟璇曟憳瑕侊紝渚涘懡浠よ璇婃柇鎼滅储鐘舵€佹槸鍚︾湡瀹炲彉鍖栥€?
 struct PerturbationReport {
     std::string move;
     bool changed{};
@@ -272,7 +274,7 @@ struct PerturbationReport {
     std::size_t lcp_after{};
 };
 
-// 表示 linking-control point 连接的一条逻辑线段。
+// 琛ㄧず linking-control point 杩炴帴鐨勪竴鏉￠€昏緫绾挎銆?
 struct WireSegmentRef {
     std::string net;
     std::string from;
@@ -284,7 +286,7 @@ struct WireSegmentRef {
     std::string id;
 };
 
-// 表示 linking-control point 在所属 space node 内的候选物理位置。
+// 琛ㄧず linking-control point 鍦ㄦ墍灞?space node 鍐呯殑鍊欓€夌墿鐞嗕綅缃€?
 struct PhysicalLocationCandidate {
     double x{};
     double y{};
@@ -297,18 +299,18 @@ struct PhysicalLocationCandidate {
     bool inside_space_region{};
 };
 
-// 表示增强 B*-tree 中的拓扑控制点。
+// 琛ㄧず澧炲己 B*-tree 涓殑鎷撴墤鎺у埗鐐广€?
 struct LinkingControlPoint {
     std::string id;
     std::string space_node_id;
     std::vector<WireSegmentRef> segments;
     std::vector<PhysicalLocationCandidate> location_candidates;
 
-    // 返回该控制点需要的最大线宽。
+    // 杩斿洖璇ユ帶鍒剁偣闇€瑕佺殑鏈€澶х嚎瀹姐€?
     [[nodiscard]] double required_width() const;
 };
 
-// 表示器件右侧、上侧或对称组内的预留布线空间。
+// 琛ㄧず鍣ㄤ欢鍙充晶銆佷笂渚ф垨瀵圭О缁勫唴鐨勯鐣欏竷绾跨┖闂淬€?
 struct SpaceNode {
     std::string id;
     std::string owner;
@@ -319,13 +321,12 @@ struct SpaceNode {
     double coupling_extra_space{};
     std::optional<Rect> physical_region;
 
-    // 按论文公式计算该空间节点需要预留的宽度。
     // 按论文公式返回 LCP 本身需要的 routing resource，不包含 feedback 下界。
     [[nodiscard]] double formula_required_space() const;
     [[nodiscard]] double required_space() const;
 };
 
-// 表示 ASF 对称组中的一组镜像或轴间 space node。
+// 琛ㄧず ASF 瀵圭О缁勪腑鐨勪竴缁勯暅鍍忔垨杞撮棿 space node銆?
 struct SpaceNodeGroup {
     std::string name;
     std::vector<SpaceNode> spaces;
@@ -338,7 +339,7 @@ struct SpaceNodeCluster {
 
 enum class BStarNodeKind { Module, Hierarchy };
 
-// 表示增强 B*-tree 的一个器件节点。
+// 琛ㄧず澧炲己 B*-tree 鐨勪竴涓櫒浠惰妭鐐广€?
 struct BStarNode {
     std::string id;
     BStarNodeKind kind{BStarNodeKind::Module};
@@ -375,7 +376,7 @@ struct AsfBStarTree {
     std::vector<std::string> right_most_branch;
 };
 
-// 表示一个 ASF-B*-tree 对称组在主树中的层次约束摘要。
+// 琛ㄧず涓€涓?ASF-B*-tree 瀵圭О缁勫湪涓绘爲涓殑灞傛绾︽潫鎽樿銆?
 struct SymmetryGroupNode {
     std::string name;
     Axis axis{Axis::Vertical};
@@ -384,7 +385,7 @@ struct SymmetryGroupNode {
     std::vector<std::string> stored_modules;
 };
 
-// 表示一条 net 在增强 B*-tree 中的 LCP 拓扑摘要。
+// 琛ㄧず涓€鏉?net 鍦ㄥ寮?B*-tree 涓殑 LCP 鎷撴墤鎽樿銆?
 struct NetTopology {
     std::string net;
     std::vector<std::string> pins;
@@ -392,7 +393,7 @@ struct NetTopology {
     std::vector<WireSegmentRef> segments;
 };
 
-// 表示 routing evaluator 所需的轻量 B*-tree 节点快照。
+// 琛ㄧず routing evaluator 鎵€闇€鐨勮交閲?B*-tree 鑺傜偣蹇収銆?
 struct RoutingTreeNodeRef {
     std::string id;
     std::string module;
@@ -400,13 +401,13 @@ struct RoutingTreeNodeRef {
     std::optional<std::string> right;
 };
 
-// 表示当前 placement candidate 对应的 B*-tree 拓扑快照。
+// 琛ㄧず褰撳墠 placement candidate 瀵瑰簲鐨?B*-tree 鎷撴墤蹇収銆?
 struct RoutingTreeSnapshot {
     std::optional<std::string> root;
     std::vector<RoutingTreeNodeRef> nodes;
 };
 
-// 表示路由评价时已经展开到全局坐标的引脚。
+// 琛ㄧず璺敱璇勪环鏃跺凡缁忓睍寮€鍒板叏灞€鍧愭爣鐨勫紩鑴氥€?
 struct PlacedPin {
     std::string key;
     std::string module;
@@ -416,8 +417,8 @@ struct PlacedPin {
     std::string layer;
 };
 
-// 表示一次候选布局的路由侧评价输入。
-// 表示一次 contour packing 中某个 B*-tree node 的中间状态。
+// 琛ㄧず涓€娆″€欓€夊竷灞€鐨勮矾鐢变晶璇勪环杈撳叆銆?
+// 琛ㄧず涓€娆?contour packing 涓煇涓?B*-tree node 鐨勪腑闂寸姸鎬併€?
 struct PackingContourStep {
     std::string tree_node;
     std::string module;
@@ -437,7 +438,7 @@ struct PackingContourStep {
     std::vector<std::string> cross_child_wire_segments;
 };
 
-// 表示当前候选布局的 contour packing 过程快照。
+// 琛ㄧず褰撳墠鍊欓€夊竷灞€鐨?contour packing 杩囩▼蹇収銆?
 struct PackingContourTrace {
     std::vector<PackingContourStep> steps;
 };
@@ -453,11 +454,13 @@ struct RoutingEvaluationRequest {
     RoutingTreeSnapshot tree;
     PackingContourTrace packing_trace;
     unsigned int lcp_candidate_seed{};
-    // 传入 RoutingContext::GridConfig.layer_count，统一限制 A*/obstacle/detailed reroute。
+    // strict 模式下，含 LCP topology 的 net 必须由 bottom-up DP traceback 接管。
+    bool strict_lcp_dp{};
+    // 浼犲叆 RoutingContext::GridConfig.layer_count锛岀粺涓€闄愬埗 A*/obstacle/detailed reroute銆?
     int routing_layers{1};
 };
 
-// 表示路由 adapter 返回给 placement/SA 的反馈。
+// 琛ㄧず璺敱 adapter 杩斿洖缁?placement/SA 鐨勫弽棣堛€?
 struct RoutingFeedback {
     std::vector<RouteSegment> routes;
     Metrics metrics;
@@ -468,7 +471,7 @@ struct RoutingFeedback {
     std::optional<std::string> routing_debug_json;
 };
 
-// 表示 detailed routing 回溯中的一个拓扑节点。
+// 琛ㄧず detailed routing 鍥炴函涓殑涓€涓嫇鎵戣妭鐐广€?
 struct DetailedRouteNode {
     std::string id;
     std::string kind;
@@ -478,7 +481,7 @@ struct DetailedRouteNode {
     std::string layer;
 };
 
-// 表示 detailed routing 输出线段与 LCP/space-node 拓扑的映射关系。
+// 琛ㄧず detailed routing 杈撳嚭绾挎涓?LCP/space-node 鎷撴墤鐨勬槧灏勫叧绯汇€?
 struct DetailedRouteSegment {
     std::size_t route_index{};
     int dp_state_id{-1};
@@ -492,7 +495,7 @@ struct DetailedRouteSegment {
     std::string space_node_id;
 };
 
-// 表示一条 net 的 top-down detailed routing 回溯摘要。
+// 琛ㄧず涓€鏉?net 鐨?top-down detailed routing 鍥炴函鎽樿銆?
 struct DetailedRouteTrace {
     std::string net;
     std::vector<DetailedRouteNode> nodes;
@@ -500,19 +503,19 @@ struct DetailedRouteTrace {
     std::vector<std::string> warnings;
 };
 
-// 汇总 detailed routing 的可解释报告。
+// 姹囨€?detailed routing 鐨勫彲瑙ｉ噴鎶ュ憡銆?
 struct DetailedRoutingReport {
     std::vector<DetailedRouteTrace> traces;
     std::vector<std::string> warnings;
     std::vector<std::string> coupling_pairs;
     std::vector<std::string> design_rule_segments;
-    // 记录详细布线阶段违反 FLOW 方向的 net 或 segment。
+    // 璁板綍璇︾粏甯冪嚎闃舵杩濆弽 FLOW 鏂瑰悜鐨?net 鎴?segment銆?
     std::vector<std::string> flow_segments;
-    // 记录详细布线阶段违反 WIRE_WIDTH/current-density 代理约束的 segment。
+    // 璁板綍璇︾粏甯冪嚎闃舵杩濆弽 WIRE_WIDTH/current-density 浠ｇ悊绾︽潫鐨?segment銆?
     std::vector<std::string> current_density_segments;
 };
 
-// 表示 top-down performance-aware detailed routing 的输出。
+// 琛ㄧず top-down performance-aware detailed routing 鐨勮緭鍑恒€?
 struct DetailedRoutingResult {
     std::vector<RouteSegment> routes;
     DetailedRoutingReport report;
@@ -536,7 +539,7 @@ struct DetailedRoutingResult {
     bool used_global_fallback{};
 };
 
-// 表示当前阶段的增强 B*-tree 拓扑。
+// 琛ㄧず褰撳墠闃舵鐨勫寮?B*-tree 鎷撴墤銆?
 struct EnhancedBStarTree {
     std::optional<std::string> root;
     std::unordered_map<std::string, BStarNode> nodes;
