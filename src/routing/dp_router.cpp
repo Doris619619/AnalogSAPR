@@ -772,9 +772,15 @@ RoutingDpResult run_bottom_up_routing_dp(
 
     auto root_found = result_by_node.find(*request.tree.root);
     if (root_found == result_by_node.end() || root_found->second.states.empty()) return result;
-    result.best_state = root_found->second.states.front();
+    const auto successful = std::find_if(
+        root_found->second.states.begin(),
+        root_found->second.states.end(),
+        [&](const RoutingDpState& state) {
+            return is_successful_root_state(state, required_segments, required_lcps);
+        });
+    result.success = successful != root_found->second.states.end();
+    result.best_state = result.success ? *successful : root_found->second.states.front();
     result.traceback_candidates = traceback_candidates_from_state(result.best_state);
-    result.success = is_successful_root_state(result.best_state, required_segments, required_lcps);
     if (!result.success) {
         append_success_check_failures(result.best_state, required_segments, required_lcps);
     }

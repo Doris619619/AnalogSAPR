@@ -1588,6 +1588,30 @@ void run_routing_evaluator_tests() {
         !missing_segment_dp.best_state.failure_messages.empty(),
         "missing required wire segment should be recorded in DP failure messages");
 
+    auto expensive_left = make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:a", 9.0, 1.0);
+    expensive_left.segment_id = "N:left";
+    expensive_left.path.metrics.wirelength = 200000.0;
+    auto cheap_incomplete_left = make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:b", 1.0, 2.0);
+    cheap_incomplete_left.segment_id = "N:left";
+    auto expensive_complete_right = make_manual_lcp_candidate(lcp_context, "LCP1", "M.B", "LCP1:a", 1.0, 3.0);
+    expensive_complete_right.segment_id = "N:right";
+    const std::vector<sapr::routing::RouteCandidate> root_selection_candidates{
+        expensive_left,
+        cheap_incomplete_left,
+        expensive_complete_right,
+    };
+    const auto root_selection_dp = sapr::routing::run_bottom_up_routing_dp(
+        drc_circuit,
+        missing_segment_request,
+        lcp_context,
+        root_selection_candidates);
+    require(
+        root_selection_dp.success,
+        "bottom-up DP should select a complete root state even when an incomplete state has lower cost");
+    require(
+        root_selection_dp.best_state.lcp_location_by_id.at("LCP1") == "LCP1:a",
+        "successful root state should retain the complete LCP physical binding");
+
     auto coupling_eval = make_line_evaluation(drc_circuit, drc_placements, 1.0);
     auto coupling_candidate = coupling_eval.global_routing.net_routes.front().selected_candidates.front();
     coupling_candidate.net = "P";
