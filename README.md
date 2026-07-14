@@ -178,8 +178,9 @@ IO/
     ├── *_layout.png       # 全层合并布局布线图
     ├── *_layout_M*.png    # 多层时按层分图（可选）
     ├── metrics.json       # 指标与 routing_evaluation 摘要
-    ├── routing_debug.json # 布线诊断详情
-    └── routing_debug.json # 每次 run 自动生成的 routing 诊断快照
+    ├── sa_trace.json      # SA 每轮代价/接受记录
+    ├── analysis/          # SA 诊断图（代价曲线、温度接受率、扰动统计）
+    └── routing_debug.json # 布线诊断详情
 ```
 
 ---

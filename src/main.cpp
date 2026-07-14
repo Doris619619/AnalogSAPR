@@ -78,7 +78,8 @@ void print_usage() {
               << "           [--debug-search]\n"
               << "           [--render-dpi 200] [--render-name name]\n"
               << "           [--dump-btree] [--no-dump-btree] [--render-btree-name name]\n"
-              << "           [--no-dump-sa-btree] [--dump-sa-btree-json-only]\n";
+              << "           [--no-dump-sa-btree] [--dump-sa-btree-json-only]\n"
+              << "           [--no-sa-analysis]\n";
 }
 
 std::string shell_quote(const std::string& value) {
@@ -118,6 +119,15 @@ std::filesystem::path sa_trace_xlsx_script_path() {
     const auto source_candidate = std::filesystem::path("tools") / "export_sa_trace_xlsx.py";
     if (std::filesystem::exists(source_candidate)) return source_candidate;
     const auto build_candidate = std::filesystem::path("..") / "tools" / "export_sa_trace_xlsx.py";
+    if (std::filesystem::exists(build_candidate)) return build_candidate;
+    return source_candidate;
+}
+
+// 定位 SA 诊断图绘制脚本。
+std::filesystem::path sa_analysis_script_path() {
+    const auto source_candidate = std::filesystem::path("tools") / "plot_sa_analysis.py";
+    if (std::filesystem::exists(source_candidate)) return source_candidate;
+    const auto build_candidate = std::filesystem::path("..") / "tools" / "plot_sa_analysis.py";
     if (std::filesystem::exists(build_candidate)) return build_candidate;
     return source_candidate;
 }
@@ -319,6 +329,29 @@ int export_sa_trace_xlsx(const std::filesystem::path& trace_json, const std::fil
     return status;
 }
 
+// 默认在 output/analysis/ 写出 SA 诊断图；失败仅告警，不影响主流程。
+int export_sa_analysis_plots(
+    const std::filesystem::path& trace_json,
+    const std::filesystem::path& output,
+    const std::string& render_name) {
+    const auto script = sa_analysis_script_path();
+    if (!std::filesystem::exists(script)) {
+        std::cerr << "warning: SA analysis plot script not found; skip analysis/\n";
+        return 1;
+    }
+    const auto analysis_dir = output / "analysis";
+    std::ostringstream command;
+    command << python_command() << ' ' << shell_quote(script)
+            << " --trace " << shell_quote(trace_json)
+            << " --output-dir " << shell_quote(analysis_dir);
+    if (!render_name.empty()) command << " --name " << shell_quote(render_name);
+    const int status = std::system(command.str().c_str());
+    if (status != 0) {
+        std::cerr << "warning: failed to generate SA analysis plots; sa_trace.json is still available\n";
+    }
+    return status;
+}
+
 // 将终端打印的基础指标与 routing_evaluation 摘要写入 output/metrics.json（与 png、btree 同级）。
 // routing_cost/global_* 固定为 global 阶段；顶层与 final_penalty/detailed_* 为最终口径。
 std::filesystem::path write_metrics_json(const sapr::Solution& solution, const sapr::Metrics& metrics,
@@ -453,6 +486,8 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     // json-only 优先于 no-dump：仍收集并写出每轮文本，但跳过 PNG。
     const bool dump_sa_btree_json_only = has_option(args, "--dump-sa-btree-json-only");
     config.dump_sa_btree = dump_sa_btree_json_only || !has_option(args, "--no-dump-sa-btree");
+    // SA 诊断图默认开启；--no-sa-analysis 可关闭。
+    const bool dump_sa_analysis = !has_option(args, "--no-sa-analysis");
     const bool dump_routing_eval = has_option(args, "--dump-routing-eval");
     const int render_dpi = option_int(args, "--render-dpi", 200);
     if (render_dpi <= 0) throw std::runtime_error("invalid value for --render-dpi: must be positive");
@@ -473,6 +508,9 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     if (!solution.sa_progress.empty()) {
         const auto sa_trace_path = write_sa_trace_json(solution, output);
         export_sa_trace_xlsx(sa_trace_path, output);
+        if (dump_sa_analysis) {
+            export_sa_analysis_plots(sa_trace_path, output, render_name);
+        }
     }
     if (solution.routing_debug_json.has_value()) {
         write_routing_debug_json(solution, output);
