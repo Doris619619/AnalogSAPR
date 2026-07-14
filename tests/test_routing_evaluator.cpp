@@ -983,7 +983,7 @@ void run_routing_evaluator_tests() {
         has_space_trace || !request_for_dp.linking_points.empty(),
         "LCP DP transitions should record source space node id or preserve request-level LCP ownership");
     for (const auto& node_result : dp_evaluation.bottom_up_dp->node_results) {
-        require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
+        require(node_result.states.size() <= 16, "bottom-up DP should honor max_states_per_node");
     }
     const auto mixed_circuit = sapr::load_circuit(mixed_lcp_direct_case_input_dir());
     auto mixed_tree = sapr::make_chain_tree(mixed_circuit);

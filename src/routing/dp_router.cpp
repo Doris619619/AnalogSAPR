@@ -416,7 +416,50 @@ std::unordered_map<std::string, std::string> make_lcp_space_map(const RoutingEva
     return result;
 }
 
-// 按代价剪枝并重新编号状态。
+/* 将字符串集合排序后编码为稳定签名，供 DP state 等价性和 binding 多样性判断复用。 */
+std::string sorted_value_signature(std::vector<std::string> values) {
+    std::sort(values.begin(), values.end());
+    std::string signature;
+    for (const auto& value : values) {
+        signature += std::to_string(value.size()) + ":" + value + ";";
+    }
+    return signature;
+}
+
+/* 编码 state 已绑定的 LCP 物理位置，区分会影响后续拓扑连接的一致性决策。 */
+std::string state_binding_signature(const RoutingDpState& state) {
+    std::vector<std::string> values;
+    values.reserve(state.lcp_location_by_id.size());
+    for (const auto& [lcp_id, location_id] : state.lcp_location_by_id) {
+        values.push_back(lcp_id + "=" + location_id);
+    }
+    return sorted_value_signature(std::move(values));
+}
+
+/* 编码对后续 DP transition 等价的状态信息，用于删除重复的高代价 state。 */
+std::string state_semantic_signature(const RoutingDpState& state) {
+    return state_binding_signature(state) + "#" +
+           sorted_value_signature(state.covered_wire_segments) + "#" +
+           sorted_value_signature(state.failure_messages);
+}
+
+/* 将 state 的全部 LCP binding 加入已保留集合，供后续多样性选择计算新增决策数。 */
+void append_state_bindings(const RoutingDpState& state, std::unordered_set<std::string>& bindings) {
+    for (const auto& [lcp_id, location_id] : state.lcp_location_by_id) {
+        bindings.insert(lcp_id + "=" + location_id);
+    }
+}
+
+/* 统计 state 相对已保留 beam 能提供的新增 LCP binding 决策数量。 */
+int binding_novelty(const RoutingDpState& state, const std::unordered_set<std::string>& bindings) {
+    int result = 0;
+    for (const auto& [lcp_id, location_id] : state.lcp_location_by_id) {
+        if (!bindings.contains(lcp_id + "=" + location_id)) ++result;
+    }
+    return result;
+}
+
+/* 在固定 beam 上限内保留语义不同的 LCP binding，避免纯成本截断删除后续唯一可行的物理位置。 */
 void prune_states(std::vector<RoutingDpState>& states, int max_states, int& pruned_states) {
     std::sort(states.begin(), states.end(), [](const auto& left, const auto& right) {
         if (left.cost != right.cost) return left.cost < right.cost;
@@ -425,9 +468,74 @@ void prune_states(std::vector<RoutingDpState>& states, int max_states, int& prun
         }
         return left.selected_candidates.size() < right.selected_candidates.size();
     });
-    if (max_states > 0 && states.size() > static_cast<std::size_t>(max_states)) {
-        pruned_states += static_cast<int>(states.size() - static_cast<std::size_t>(max_states));
-        states.resize(static_cast<std::size_t>(max_states));
+
+    std::unordered_set<std::string> seen_semantics;
+    std::vector<RoutingDpState> unique_states;
+    unique_states.reserve(states.size());
+    for (auto& state : states) {
+        if (seen_semantics.insert(state_semantic_signature(state)).second) {
+            unique_states.push_back(std::move(state));
+        } else {
+            ++pruned_states;
+        }
+    }
+
+    if (max_states > 0 && unique_states.size() > static_cast<std::size_t>(max_states)) {
+        std::vector<bool> selected(unique_states.size(), false);
+        std::unordered_set<std::string> retained_bindings;
+        std::vector<RoutingDpState> retained;
+        retained.reserve(static_cast<std::size_t>(max_states));
+
+        const auto first = std::find_if(unique_states.begin(), unique_states.end(), [](const RoutingDpState& state) {
+            return state.failure_messages.empty();
+        });
+        const std::size_t first_index = first == unique_states.end()
+                                            ? 0
+                                            : static_cast<std::size_t>(std::distance(unique_states.begin(), first));
+        selected[first_index] = true;
+        append_state_bindings(unique_states[first_index], retained_bindings);
+        retained.push_back(std::move(unique_states[first_index]));
+
+        while (retained.size() < static_cast<std::size_t>(max_states)) {
+            std::optional<std::size_t> best_index;
+            for (std::size_t index = 0; index < unique_states.size(); ++index) {
+                if (selected[index]) continue;
+                if (!best_index.has_value()) {
+                    best_index = index;
+                    continue;
+                }
+                const auto& candidate = unique_states[index];
+                const auto& best = unique_states[*best_index];
+                const bool candidate_healthy = candidate.failure_messages.empty();
+                const bool best_healthy = best.failure_messages.empty();
+                if (candidate_healthy != best_healthy) {
+                    if (candidate_healthy) best_index = index;
+                    continue;
+                }
+                const int candidate_novelty = binding_novelty(candidate, retained_bindings);
+                const int best_novelty = binding_novelty(best, retained_bindings);
+                if (candidate_novelty != best_novelty) {
+                    if (candidate_novelty > best_novelty) best_index = index;
+                    continue;
+                }
+                if (candidate.covered_wire_segments.size() != best.covered_wire_segments.size()) {
+                    if (candidate.covered_wire_segments.size() > best.covered_wire_segments.size()) best_index = index;
+                    continue;
+                }
+                if (candidate.cost < best.cost) best_index = index;
+            }
+            if (!best_index.has_value()) break;
+            selected[*best_index] = true;
+            append_state_bindings(unique_states[*best_index], retained_bindings);
+            retained.push_back(std::move(unique_states[*best_index]));
+        }
+        pruned_states += static_cast<int>(unique_states.size() - retained.size());
+        std::sort(retained.begin(), retained.end(), [](const auto& left, const auto& right) {
+            return left.cost < right.cost;
+        });
+        states = std::move(retained);
+    } else {
+        states = std::move(unique_states);
     }
     for (std::size_t index = 0; index < states.size(); ++index) states[index].id = static_cast<int>(index);
 }
