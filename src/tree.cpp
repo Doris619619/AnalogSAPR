@@ -457,7 +457,7 @@ std::size_t reachable_count(const EnhancedBStarTree& tree) {
     return seen.size();
 }
 
-// 将 routing feedback 写入单个 space node，作为下一轮 required_space 的下界。
+// 给匹配的 space node 写入 routing resource 反馈；基础预留与耦合附加空间保持分离。
 bool update_space_node(SpaceNode& space, const RoutingFeedback& feedback) {
     const auto found = feedback.required_space_by_node.find(space.id);
     const auto coupling_found = feedback.coupling_space_by_node.find(space.id);
@@ -837,13 +837,67 @@ bool is_valid_lcp(const LinkingControlPoint& point) {
     return true;
 }
 
-// 修改 LCP id 时同步更新其 incident segment 的端点。
-void retarget_lcp_segments(LinkingControlPoint& point, const std::string& old_id, const std::string& new_id) {
-    point.id = new_id;
-    for (auto& segment : point.segments) {
-        if (segment.from == old_id) segment.from = new_id;
-        if (segment.to == old_id) segment.to = new_id;
+// 以端点为准更新线段标识，避免拓扑端点改变后仍复用旧的 segment id。
+void refresh_segment_id(WireSegmentRef& segment) {
+    segment.id = segment.net + ":" + segment.from + "->" + segment.to;
+}
+
+// 将线段中引用的一个 LCP 端点替换为另一个 LCP，并同步其标识。
+void replace_lcp_endpoint(WireSegmentRef& segment, const std::string& from_id, const std::string& to_id) {
+    bool changed = false;
+    if (segment.from == from_id) {
+        segment.from = to_id;
+        changed = true;
     }
+    if (segment.to == from_id) {
+        segment.to = to_id;
+        changed = true;
+    }
+    if (changed) refresh_segment_id(segment);
+}
+
+// 移除合并后被折叠的自环及重复线段，保持每个 LCP 的线段集合可解释。
+void normalize_lcp_segments(LinkingControlPoint& point) {
+    std::unordered_set<std::string> seen;
+    auto& segments = point.segments;
+    segments.erase(
+        std::remove_if(segments.begin(), segments.end(), [&](const WireSegmentRef& segment) {
+            if (segment.from == point.id && segment.to == point.id) return true;
+            const std::string key = segment.net + ":" + segment.from + "->" + segment.to;
+            return !seen.insert(key).second;
+        }),
+        segments.end());
+}
+
+// 检查整棵树中 LCP 的归属、标识和局部线段拓扑是否一致。
+bool has_valid_lcp_topology(EnhancedBStarTree& tree) {
+    std::unordered_set<std::string> point_ids;
+    for (auto* space : collect_mutable_spaces(tree)) {
+        for (const auto& point : space->linking_points) {
+            if (point.space_node_id != space->id || !point_ids.insert(point.id).second || !is_valid_lcp(point)) return false;
+        }
+    }
+    return true;
+}
+
+// 在候选树中按稳定 id 定位 LCP，避免 vector 扩容或删除导致槽位失效。
+LinkingControlPoint* find_lcp_by_id(EnhancedBStarTree& tree, const std::string& id) {
+    for (auto* space : collect_mutable_spaces(tree)) {
+        for (auto& point : space->linking_points) {
+            if (point.id == id) return &point;
+        }
+    }
+    return nullptr;
+}
+
+// 返回候选树中指定 id 的 LCP 所在 space node。
+SpaceNode* find_lcp_space(EnhancedBStarTree& tree, const std::string& id) {
+    for (auto* space : collect_mutable_spaces(tree)) {
+        for (const auto& point : space->linking_points) {
+            if (point.id == id) return space;
+        }
+    }
+    return nullptr;
 }
 
 // 判断 space node 是否具备可落点的基本身份信息。
@@ -851,7 +905,7 @@ bool can_materialize_space(const SpaceNode& space) {
     return !space.id.empty() && !space.owner.empty();
 }
 
-// 将 LCP 移动到目标 space node，并同步 space_node_id。
+// 将一个 LCP 移入新的 space node，并维护归属 id。
 void move_lcp_to_space(LinkingControlPoint& point, SpaceNode& target) {
     point.space_node_id = target.id;
     target.linking_points.push_back(std::move(point));
@@ -909,20 +963,33 @@ bool perturb_lcp_split(EnhancedBStarTree& tree, std::mt19937& rng) {
     if (splittable.empty()) return false;
     std::uniform_int_distribution<std::size_t> slot_dist(0, splittable.size() - 1);
     const auto slot = splittable[slot_dist(rng)];
-    auto& point = slot.space->linking_points[slot.index];
-    const auto original = point;
-    const std::string old_id = point.id;
-    const std::size_t half = point.segments.size() / 2;
-    LinkingControlPoint split = point;
-    split.segments.assign(point.segments.begin() + static_cast<std::ptrdiff_t>(half), point.segments.end());
-    point.segments.erase(point.segments.begin() + static_cast<std::ptrdiff_t>(half), point.segments.end());
-    retarget_lcp_segments(point, old_id, old_id + ":split:a");
-    retarget_lcp_segments(split, old_id, old_id + ":split:b");
-    if (!is_valid_lcp(point) || !is_valid_lcp(split)) {
-        point = original;
-        return false;
+    const auto original_id = slot.space->linking_points[slot.index].id;
+    const auto target_space_id = slot.space->id;
+    EnhancedBStarTree candidate = tree;
+    auto* space = find_lcp_space(candidate, original_id);
+    if (space == nullptr || space->id != target_space_id) return false;
+    auto* point = find_lcp_by_id(candidate, original_id);
+    if (point == nullptr) return false;
+
+    std::unordered_set<std::string> point_ids;
+    for (auto* candidate_space : collect_mutable_spaces(candidate)) {
+        for (const auto& candidate_point : candidate_space->linking_points) point_ids.insert(candidate_point.id);
     }
-    slot.space->linking_points.push_back(std::move(split));
+    std::string split_id = original_id + ":split";
+    for (int suffix = 2; point_ids.contains(split_id); ++suffix) split_id = original_id + ":split" + std::to_string(suffix);
+
+    const std::size_t half = point->segments.size() / 2;
+    LinkingControlPoint split = *point;
+    split.id = split_id;
+    split.space_node_id = space->id;
+    split.segments.assign(point->segments.begin() + static_cast<std::ptrdiff_t>(half), point->segments.end());
+    point->segments.erase(point->segments.begin() + static_cast<std::ptrdiff_t>(half), point->segments.end());
+    for (auto& segment : split.segments) replace_lcp_endpoint(segment, original_id, split.id);
+    normalize_lcp_segments(*point);
+    normalize_lcp_segments(split);
+    space->linking_points.push_back(std::move(split));
+    if (!has_valid_lcp_topology(candidate)) return false;
+    tree = std::move(candidate);
     return true;
 }
 
@@ -940,18 +1007,29 @@ bool perturb_lcp_merge(EnhancedBStarTree& tree, std::mt19937& rng) {
         const auto& second_point = second.space->linking_points[second.index];
         if (first_point.segments.empty() || second_point.segments.empty()) continue;
         if (first_point.segments.front().net != second_point.segments.front().net) continue;
-        LinkingControlPoint merged = first_point;
-        const std::string first_id = first_point.id;
-        const std::string second_id = second_point.id;
-        const std::string merged_id = first_id + ":merge:" + second_id;
-        const auto second_segments = second_point.segments;
-        merged.segments.insert(merged.segments.end(), second_segments.begin(), second_segments.end());
-        retarget_lcp_segments(merged, first_id, merged_id);
-        retarget_lcp_segments(merged, second_id, merged_id);
-        const bool valid = is_valid_lcp(merged);
-        if (!valid) return false;
-        first.space->linking_points[first.index] = std::move(merged);
-        second.space->linking_points.erase(second.space->linking_points.begin() + static_cast<std::ptrdiff_t>(second.index));
+        const std::string retained_id = first_point.id;
+        const std::string removed_id = second_point.id;
+        EnhancedBStarTree candidate = tree;
+        for (auto* candidate_space : collect_mutable_spaces(candidate)) {
+            for (auto& point : candidate_space->linking_points) {
+                for (auto& segment : point.segments) replace_lcp_endpoint(segment, removed_id, retained_id);
+            }
+        }
+        auto* retained = find_lcp_by_id(candidate, retained_id);
+        auto* removed = find_lcp_by_id(candidate, removed_id);
+        auto* removed_space = find_lcp_space(candidate, removed_id);
+        if (retained == nullptr || removed == nullptr || removed_space == nullptr) return false;
+        retained->segments.insert(retained->segments.end(), removed->segments.begin(), removed->segments.end());
+        for (auto* candidate_space : collect_mutable_spaces(candidate)) {
+            for (auto& point : candidate_space->linking_points) normalize_lcp_segments(point);
+        }
+        const auto remove_at = std::find_if(
+            removed_space->linking_points.begin(), removed_space->linking_points.end(),
+            [&](const LinkingControlPoint& point) { return point.id == removed_id; });
+        if (remove_at == removed_space->linking_points.end()) return false;
+        removed_space->linking_points.erase(remove_at);
+        if (!has_valid_lcp_topology(candidate)) return false;
+        tree = std::move(candidate);
         return true;
     }
     return false;
@@ -967,7 +1045,9 @@ PerturbationReport perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937&
     const bool has_asf_tree = std::any_of(tree.symmetry_groups.begin(), tree.symmetry_groups.end(), [](const auto& group) {
         return !group.asf_bstar_tree.nodes.empty();
     });
-    std::uniform_int_distribution<int> move_dist(0, has_tree_lcp ? 8 : (has_asf_tree ? 5 : 2));
+    // 无 ASF 的普通树仍只提供 7 类既有扰动，避免新增 ASF 预留编号改变同 seed 的抽样序列。
+    const int max_move = has_tree_lcp ? (has_asf_tree ? 8 : 6) : (has_asf_tree ? 5 : 2);
+    std::uniform_int_distribution<int> move_dist(0, max_move);
     const int move = move_dist(rng);
     const auto movable = movable_nodes(tree);
     if (move == 0 && movable.size() > 1) {
@@ -988,8 +1068,11 @@ PerturbationReport perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937&
         if (!targets.empty()) {
             std::uniform_int_distribution<std::size_t> target_dist(0, targets.size() - 1);
             std::uniform_int_distribution<int> side_dist(0, 1);
+            // 在修改树前按固定顺序消费随机数，保证同 seed 不受 C++ 参数求值顺序影响。
+            const auto target = targets[target_dist(rng)];
+            const bool as_left = side_dist(rng) == 0;
             detach_node_preserving_children(tree, id);
-            insert_node_at_child(tree, targets[target_dist(rng)], id, side_dist(rng) == 0);
+            insert_node_at_child(tree, target, id, as_left);
             report.move = "module-delete-insert";
             report.changed = true;
         }

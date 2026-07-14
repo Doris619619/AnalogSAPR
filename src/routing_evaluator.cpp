@@ -1276,12 +1276,44 @@ struct LcpNetLegalization {
     std::vector<std::string> failure_messages;
 };
 
-// 杩斿洖鍊欓€変笂鐢ㄤ簬鏁寸綉閿佸畾鐨勪富 LCP id锛堜紭鍏?lcp_id锛屽叾娆?source/target锛夈€?
-// 杩斿洖鍊欓€変笂涓?primary_lcp_id 瀵瑰簲鐨?location candidate id銆?
-// 鍒ゆ柇鍊欓€夋槸鍚︾粦瀹氬埌鎸囧畾 LCP 鐨勬寚瀹氱墿鐞嗕綅缃€?
-// 鏀堕泦璇?net 鍦ㄦ寚瀹?LCP 涓嬪嚭鐜拌繃鐨勫叏閮?location id锛孌P 閫変腑鐨勬帓鍦ㄦ渶鍓嶃€?
-// 鍦ㄥ浐瀹?LCP location 涓嬩负涓€鏉℃敮璺寫閫夊€欓€夛細鍚?location 鐨勮矾寰勪紭鍏堬紝鍐嶅悓 location 涓?A* reroute銆?
-#if 0
+// 返回候选上用于整网锁定的主 LCP id（优先 lcp_id，其次 source/target）。
+// 返回候选上与 primary_lcp_id 对应的 location candidate id。
+// 判断候选是否绑定到指定 LCP 的指定物理位置。
+// 收集该 net 在指定 LCP 下出现过的全部 location id，DP 选中的排在最前。
+// 在固定 LCP location 下为一条支路挑选候选：同 location 的路径优先，再同 location 下 A* reroute。
+// 判断候选是否绑定到指定 LCP 的指定物理位置。
+bool candidate_matches_lcp_location(
+    const routing::RouteCandidate& candidate,
+    const std::string& lcp_id,
+    const std::string& location_id) {
+    if (lcp_id.empty() || location_id.empty()) return false;
+    return (candidate.lcp_id == lcp_id && candidate.lcp_candidate_id == location_id) ||
+           (candidate.source_lcp_id == lcp_id && candidate.source_lcp_candidate_id == location_id) ||
+           (candidate.target_lcp_id == lcp_id && candidate.target_lcp_candidate_id == location_id);
+}
+
+// 收集指定 net/LCP 可选位置；DP 首选位置始终排在第一位。
+std::vector<std::string> ordered_lcp_locations_for_net(
+    const RoutingEvaluation& evaluation,
+    const std::string& net,
+    const std::string& lcp_id,
+    const std::string& preferred_location) {
+    std::vector<std::string> locations;
+    auto append_unique = [&](const std::string& location_id) {
+        if (location_id.empty() || std::find(locations.begin(), locations.end(), location_id) != locations.end()) return;
+        locations.push_back(location_id);
+    };
+    append_unique(preferred_location);
+    for (const auto& candidate : evaluation.candidates) {
+        if (candidate.net != net || !candidate.path.success) continue;
+        if (candidate.lcp_id == lcp_id) append_unique(candidate.lcp_candidate_id);
+        if (candidate.source_lcp_id == lcp_id) append_unique(candidate.source_lcp_candidate_id);
+        if (candidate.target_lcp_id == lcp_id) append_unique(candidate.target_lcp_candidate_id);
+    }
+    return locations;
+}
+
+// 在固定 LCP location 下为一条支路挑选候选：同位置路径优先，再尝试同位置 reroute。
 DetailedLegalization legalize_branch_at_lcp_location(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation,
@@ -1367,14 +1399,13 @@ DetailedLegalization legalize_branch_at_lcp_location(
     return DetailedLegalization{false, selected, {}, {}, false, false, std::move(failure_messages)};
 }
 
-// 瀵瑰甫 LCP 鐨?net 鏁寸綉鍚堟硶鍖栵細鎵€鏈夋敮璺叡浜悓涓€ lcp_candidate_id锛屽け璐ュ垯鏁寸綉鎹笅涓€涓?location銆?
-#endif
-
+// 对带 LCP 的整网在提交 detailed route 前协商单一物理位置；多 LCP net 保持严格绑定。
 LcpNetLegalization legalize_lcp_net(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation,
     const std::vector<routing::RouteCandidate>& selected_branches,
-    const std::vector<RouteSegment>& occupied_routes) {
+    const std::vector<RouteSegment>& occupied_routes,
+    bool allow_location_negotiation) {
     LcpNetLegalization result;
     if (selected_branches.empty()) return result;
 
@@ -1393,7 +1424,34 @@ LcpNetLegalization legalize_lcp_net(
         return result;
     }
 
-    // Keep the DP-selected physical LCP binding stable through detailed routing.
+    // 单 LCP net 在提交 detailed route 前显式协商整网位置；多 LCP net 仍保持严格绑定，避免组合搜索失控。
+    if (allow_location_negotiation && selected_bindings.size() == 1) {
+        const auto& [lcp_id, preferred_location] = *selected_bindings.begin();
+        for (const auto& location_id : ordered_lcp_locations_for_net(evaluation, net, lcp_id, preferred_location)) {
+            std::vector<DetailedLegalization> branch_results;
+            std::vector<RouteSegment> tentative_occupied = occupied_routes;
+            bool location_ok = true;
+            for (const auto& branch : selected_branches) {
+                auto legal = legalize_branch_at_lcp_location(
+                    circuit, evaluation, branch, lcp_id, location_id, tentative_occupied);
+                if (!legal.success) {
+                    location_ok = false;
+                    break;
+                }
+                tentative_occupied.insert(tentative_occupied.end(), legal.routes.begin(), legal.routes.end());
+                branch_results.push_back(std::move(legal));
+            }
+            if (!location_ok) continue;
+
+            result.success = true;
+            result.chosen_lcp_candidate_id = location_id;
+            result.switched_lcp_location = location_id != preferred_location;
+            result.branch_results = std::move(branch_results);
+            return result;
+        }
+    }
+
+    // 未启用协商或多 LCP 网时，保持 DP 选定的物理 LCP 绑定直到 detailed route 结束。
     for (const auto& branch : selected_branches) {
         if (!candidate_matches_lcp_bindings(branch, selected_bindings)) {
             result.failure_messages.push_back(net + ": selected branch is inconsistent with net LCP binding");
@@ -2085,7 +2143,8 @@ DetailedRoutingResult run_detailed_routing(
         });
 
         if (is_lcp_net) {
-            auto net_legal = legalize_lcp_net(circuit, evaluation, group, result.routes);
+            auto net_legal = legalize_lcp_net(
+                circuit, evaluation, group, result.routes, request.allow_lcp_location_negotiation);
             if (!net_legal.success) {
                 for (const auto& failure : net_legal.failure_messages) {
                     trace.warnings.push_back(failure);
@@ -2102,7 +2161,7 @@ DetailedRoutingResult run_detailed_routing(
             }
             if (net_legal.switched_lcp_location) {
                 const std::string message =
-                    group.front().net + ": detailed routing switched whole-net LCP location to " +
+                    group.front().net + ": negotiated whole-net LCP location to " +
                     net_legal.chosen_lcp_candidate_id;
                 trace.warnings.push_back(message);
                 result.report.warnings.push_back(message);

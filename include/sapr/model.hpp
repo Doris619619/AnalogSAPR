@@ -186,11 +186,17 @@ struct SaProgressEntry {
     int iteration{};
     int sa_iterations{};
     std::string move;
+    // 标记本轮记录的扰动是否真实改变了候选树，便于识别空扰动。
+    bool changed{};
     bool accept{};
     double next_cost{};
     double current_cost{};
     double best_cost{};
     double temperature{};
+    // 本轮候选解内部 routing feedback 闭环的收敛摘要。
+    int routing_feedback_iterations{};
+    bool routing_feedback_converged{};
+    int space_feedback_nodes{};
 };
 
 // 璁板綍 SA 鍗曡疆鍊欓€夋爲鍙鍖栨墍闇€鐨勬壈鍔ㄤ笌鎺ュ彈淇℃伅銆?
@@ -261,7 +267,9 @@ struct SolverConfig {
     bool dump_sa_btree{true};
     // 仅用于论文 LCP/对称布线诊断；DP 失败时禁止含 LCP net 退回普通 greedy 布线。
     bool strict_lcp_dp{false};
-    // 鍏佽浣跨敤鐨勯噾灞炲眰鏁帮紙M1..Mn锛夛紱榛樿 1 灞傦紝渚夸簬璁烘枃澶嶇幇涓庡钩闈㈠悎娉曟€у疄楠屻€?
+    // 在写入 detailed route 前协商整网 LCP 物理位置，避免 DP 位置不可实现时只留下失败罚分。
+    bool negotiate_lcp_locations{true};
+    // 允许使用的金属层数（M1..Mn）；默认 1 层，便于论文复现与平面合法性实验。
     int routing_layers{1};
 };
 
@@ -456,7 +464,9 @@ struct RoutingEvaluationRequest {
     unsigned int lcp_candidate_seed{};
     // strict 模式下，含 LCP topology 的 net 必须由 bottom-up DP traceback 接管。
     bool strict_lcp_dp{};
-    // 浼犲叆 RoutingContext::GridConfig.layer_count锛岀粺涓€闄愬埗 A*/obstacle/detailed reroute銆?
+    // 仅 placement-aware 流程开启：允许在 detailed route 提交前为整网显式重选同一 LCP 位置。
+    bool allow_lcp_location_negotiation{};
+    // 传入 RoutingContext::GridConfig.layer_count，统一限制 A*/obstacle/detailed reroute。
     int routing_layers{1};
 };
 
@@ -464,7 +474,9 @@ struct RoutingEvaluationRequest {
 struct RoutingFeedback {
     std::vector<RouteSegment> routes;
     Metrics metrics;
+    // 不含 coupling_extra_space 的基础 routing 预留宽度，写回 SpaceNode::allocated_space。
     std::unordered_map<std::string, double> required_space_by_node;
+    // 独立于基础预留宽度的耦合附加空间，写回 SpaceNode::coupling_extra_space。
     std::unordered_map<std::string, double> coupling_space_by_node;
     double routing_cost{};
     std::size_t routing_candidate_count{};

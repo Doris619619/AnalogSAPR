@@ -1,0 +1,34 @@
+{
+  "sa_iterations": 20,
+  "recorded": 20,
+  "summary": {
+    "converged_count": 20,
+    "not_converged_count": 0,
+    "max_routing_feedback_iterations": 2,
+    "final_routing_feedback_converged": true,
+    "final_routing_feedback_iterations": 1,
+    "final_space_feedback_nodes": 12
+  },
+  "iterations": [
+    {"index": 1, "move": "lcp-delete-insert", "accept": false, "routing_feedback_iterations": 2, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 2, "move": "module-delete-insert", "accept": true, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 3, "move": "module-rotate", "accept": false, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 4, "move": "lcp-delete-insert", "accept": false, "routing_feedback_iterations": 2, "routing_feedback_converged": true, "space_feedback_nodes": 10},
+    {"index": 5, "move": "lcp-swap", "accept": false, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 6, "move": "lcp-swap", "accept": true, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 7, "move": "module-rotate", "accept": false, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 8, "move": "lcp-delete-insert", "accept": false, "routing_feedback_iterations": 2, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 9, "move": "module-delete-insert", "accept": false, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 10, "move": "module-rotate", "accept": false, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 11, "move": "module-swap", "accept": true, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 12, "move": "module-rotate", "accept": false, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 13, "move": "module-delete-insert", "accept": false, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 14, "move": "lcp-delete-insert", "accept": false, "routing_feedback_iterations": 2, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 15, "move": "module-swap", "accept": true, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 16, "move": "module-swap", "accept": false, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 17, "move": "module-delete-insert", "accept": false, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 18, "move": "module-delete-insert", "accept": false, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 10},
+    {"index": 19, "move": "module-swap", "accept": true, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 12},
+    {"index": 20, "move": "module-delete-insert", "accept": false, "routing_feedback_iterations": 1, "routing_feedback_converged": true, "space_feedback_nodes": 10}
+  ]
+}

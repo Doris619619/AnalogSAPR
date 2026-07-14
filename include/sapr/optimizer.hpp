@@ -5,6 +5,12 @@
 
 namespace sapr {
 
+// 在模拟退火前按网表和增强 B*-tree 创建并持久化初始 LCP 拓扑。
+void initialize_lcp_topology(
+    const Circuit& circuit,
+    EnhancedBStarTree& tree,
+    const SolverConfig& config = {});
+
 // 按增强 B*-tree 和 ASF 对称组生成当前候选布局。
 RoutingEvaluationRequest pack_enhanced_tree(
     const Circuit& circuit,

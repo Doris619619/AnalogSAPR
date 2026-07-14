@@ -15,6 +15,8 @@ int main() {
         run_router_tests();
         std::cout << "[test] routing evaluator\n";
         run_routing_evaluator_tests();
+        std::cout << "[test] lcp binding\n";
+        run_lcp_binding_tests();
         std::cout << "All tests passed\n";
         return 0;
     } catch (const std::exception& error) {
