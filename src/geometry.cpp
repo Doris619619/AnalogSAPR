@@ -1,11 +1,11 @@
-// Placement geometry transformations shared by packing and routing.
+/* 文件职责：实现 packing 与 routing 共用的 placement 几何变换。 */
 #include "sapr/geometry.hpp"
 
 #include <stdexcept>
 
 namespace sapr {
 
-// Transform a local point with the full Cadence orientation.
+/* 按完整 Cadence orient 将局部点变换为全局坐标。 */
 std::pair<double, double> transform_placed_point(
     const Module& module,
     double local_x,
@@ -35,12 +35,12 @@ std::pair<double, double> transform_placed_point(
     return {placement.x + x, placement.y + y};
 }
 
-// Transform a pin through the shared local point path.
+/* 复用局部点变换路径计算引脚全局坐标。 */
 std::pair<double, double> placed_pin(const Module& module, const Pin& pin, const Placement& placement) {
     return transform_placed_point(module, pin.x, pin.y, placement);
 }
 
-// Return the transformed module size for the full orientation.
+/* 按完整 orientation 返回器件的变换后尺寸。 */
 std::pair<double, double> placed_size(const Module& module, const Placement& placement) {
     if (placement.orient == "MX" || placement.orient == "MY") return {module.width, module.height};
     if (placement.orient == "MXR90" || placement.orient == "MYR90") return {module.height, module.width};

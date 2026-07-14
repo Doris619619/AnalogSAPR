@@ -1,4 +1,4 @@
-// Routing placement transformations using shared geometry rules.
+/* 文件职责：按共用 placement 几何规则实现 routing 坐标变换。 */
 #include "sapr/routing/transform.hpp"
 
 #include <algorithm>
@@ -10,7 +10,7 @@
 namespace sapr::routing {
 namespace {
 
-// Transform rectangle corners and normalize the resulting global bounding box.
+/* 变换局部矩形四角并归一化为全局轴对齐外接框。 */
 Rect transform_rect_to_global(const Module& module, const Rect& rect, const Placement& placement) {
     const Rect normalized = normalize_rect(rect);
     const std::array<Point, 4> corners = {
@@ -43,23 +43,23 @@ Rect transform_rect_to_global(const Module& module, const Rect& rect, const Plac
 
 }  // namespace
 
-// Transform a local point through the shared placement geometry implementation.
+/* 复用共用 placement 几何实现变换局部点。 */
 Point transform_local_point_to_global(const Module& module, const Point& local_point, const Placement& placement) {
     const auto [x, y] = transform_placed_point(module, local_point.x, local_point.y, placement);
     return Point{x, y};
 }
 
-// Transform a pin through the shared local point path.
+/* 复用局部点路径变换 routing 引脚。 */
 Point transform_pin_to_global(const Module& module, const Pin& pin, const Placement& placement) {
     return transform_local_point_to_global(module, Point{pin.x, pin.y}, placement);
 }
 
-// Transform the active region to a global axis-aligned rectangle.
+/* 将 active region 变换为全局轴对齐矩形。 */
 Rect transform_active_to_global(const Module& module, const Placement& placement) {
     return transform_rect_to_global(module, module.active, placement);
 }
 
-// Transform the full module bounding box to global coordinates.
+/* 将完整器件外接框变换为全局坐标。 */
 Rect transform_module_bbox_to_global(const Module& module, const Placement& placement) {
     return transform_rect_to_global(module, Rect{0.0, 0.0, module.width, module.height}, placement);
 }
