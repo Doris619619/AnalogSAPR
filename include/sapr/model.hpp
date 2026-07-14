@@ -244,6 +244,9 @@ struct Solution {
     // 与 btree_trace.json 并列写出的 SA 轻量进度（sa_trace.json）。
     std::vector<SaProgressEntry> sa_progress;
     std::vector<SaBtreeIterationTrace> sa_btree_iterations;
+    // 记录 SA 是否因收敛准则提前结束，避免输出将计划迭代数误认为实际迭代数。
+    bool sa_terminated_early{};
+    std::string sa_termination_reason;
 };
 
 // 配置求解器的确定性参数和论文代价函数权重。
@@ -254,6 +257,10 @@ struct SolverConfig {
     int sa_iterations{250};
     double initial_temperature{5.0};
     double cooling_rate{0.96};
+    // 最优代价改善不超过该阈值时计为无显著改善；设为非正值可关闭提前停止。
+    double sa_convergence_tolerance{1e-6};
+    // 连续无显著改善达到该轮数后提前停止；设为非正值可关闭提前停止。
+    int sa_convergence_patience{20};
     double area_weight{1.0};
     double wirelength_weight{1.0};
     double bend_weight{0.2};
@@ -267,8 +274,8 @@ struct SolverConfig {
     bool dump_sa_btree{true};
     // 在写入 detailed route 前协商整网 LCP 物理位置，避免 DP 位置不可实现时只留下失败罚分。
     bool negotiate_lcp_locations{true};
-    // 允许使用的金属层数（M1..Mn）；默认 1 层，便于论文复现与平面合法性实验。
-    int routing_layers{1};
+    // 允许使用的金属层数（M1..Mn）；默认两层以对齐论文实验设置并避免单层短路。
+    int routing_layers{2};
 };
 
 // 表示一次 SA 扰动的调试摘要，供命令行诊断搜索状态是否真实变化。

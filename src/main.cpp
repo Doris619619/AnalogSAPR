@@ -72,7 +72,8 @@ void print_usage() {
               << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n"
               << "           [--boundary-margin value] [--boundary-clearance 0]\n"
               << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
-              << "           [--cooling-rate 0.96] [--routing-layers 1]\n"
+              << "           [--cooling-rate 0.96] [--routing-layers 2]\n"
+              << "           [--sa-convergence-tolerance 1e-6] [--sa-convergence-patience 20]\n"
               << "           [--dump-routing-eval]\n"
               << "           [--debug-search]\n"
               << "           [--render-dpi 200] [--render-name name]\n"
@@ -214,6 +215,8 @@ std::filesystem::path write_sa_trace_json(const sapr::Solution& solution, const 
     out << "  \"sa_iterations\": " << (solution.sa_progress.empty() ? 0 : solution.sa_progress.front().sa_iterations)
         << ",\n";
     out << "  \"recorded\": " << solution.sa_progress.size() << ",\n";
+    out << "  \"terminated_early\": " << (solution.sa_terminated_early ? "true" : "false") << ",\n";
+    out << "  \"termination_reason\": \"" << json_escape(solution.sa_termination_reason) << "\",\n";
     out << "  \"iterations\": [\n";
     for (std::size_t index = 0; index < solution.sa_progress.size(); ++index) {
         const auto& entry = solution.sa_progress[index];
@@ -432,6 +435,16 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     config.sa_iterations = option_int(args, "--sa-iterations", config.sa_iterations);
     config.initial_temperature = option_double(args, "--initial-temperature", config.initial_temperature);
     config.cooling_rate = option_double(args, "--cooling-rate", config.cooling_rate);
+    config.sa_convergence_tolerance =
+        option_double(args, "--sa-convergence-tolerance", config.sa_convergence_tolerance);
+    config.sa_convergence_patience =
+        option_int(args, "--sa-convergence-patience", config.sa_convergence_patience);
+    if (config.sa_convergence_tolerance < 0.0) {
+        throw std::runtime_error("--sa-convergence-tolerance must be non-negative");
+    }
+    if (config.sa_convergence_patience < 0) {
+        throw std::runtime_error("--sa-convergence-patience must be non-negative");
+    }
     config.routing_layers = option_int(args, "--routing-layers", config.routing_layers);
     if (config.routing_layers < 1 || config.routing_layers > 7) {
         throw std::runtime_error("invalid value for --routing-layers: must be in [1, 7]");

@@ -116,9 +116,10 @@ OK
 
 未指定 `--boundary-margin` 时，程序按最大线宽的一半、边界 clearance 和两倍有效网格步长自动估算；该参数独立于器件间 `--spacing`。
 
-布线金属层数默认仅 `M1`（`--routing-layers 1`），避免高层逃逸掩盖 placement/拓扑问题。需要有限 via 或恢复旧多层行为时：
+布线金属层数默认使用 `M1`、`M2`（`--routing-layers 2`），与论文实验设置一致，并避免单层布线因不可绕开的交叉而产生短路。需要进行严格的平面合法性调试时可显式指定单层；需要更多层时：
 
 ```powershell
+.\build\sapr.exe run --input input --output output --routing-layers 1
 .\build\sapr.exe run --input input --output output --routing-layers 3
 .\build\sapr.exe run --input input --output output --routing-layers 7
 ```

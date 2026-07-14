@@ -1,0 +1,11 @@
+{
+  "sa_iterations": 5,
+  "recorded": 3,
+  "terminated_early": true,
+  "termination_reason": "best-cost improvement stayed within 0.000001 for 2 consecutive iterations",
+  "iterations": [
+    {"index": 1, "total": 5, "move": "module-rotate", "changed": true, "accept": true, "next_cost": 200002.22261578011, "current_cost": 200002.22261578011, "best_cost": 200002.22261578011, "temperature": 5},
+    {"index": 2, "total": 5, "move": "module-rotate", "changed": true, "accept": false, "next_cost": 17700003.002895247, "current_cost": 200002.22261578011, "best_cost": 200002.22261578011, "temperature": 4.7999999999999998},
+    {"index": 3, "total": 5, "move": "lcp-swap", "changed": true, "accept": false, "next_cost": 202425.47857585581, "current_cost": 200002.22261578011, "best_cost": 200002.22261578011, "temperature": 4.6079999999999997}
+  ]
+}

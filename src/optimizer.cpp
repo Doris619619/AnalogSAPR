@@ -1574,6 +1574,9 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     sa_progress.reserve(static_cast<std::size_t>(config.sa_iterations));
     std::vector<SaBtreeIterationTrace> sa_btree_iterations;
     if (config.dump_sa_btree) sa_btree_iterations.reserve(static_cast<std::size_t>(config.sa_iterations));
+    int stagnant_iterations = 0;
+    bool sa_terminated_early = false;
+    std::string sa_termination_reason;
     for (int iteration = 0; iteration < config.sa_iterations; ++iteration) {
         // 同一 SA 温度轮内重采样，避免不可执行的 LCP 操作消耗一次退火迭代。
         constexpr int max_perturbation_attempts = 8;
@@ -1613,7 +1616,16 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
         const bool next_feedback_converged = next.feedback.metrics.routing_feedback_converged;
         const int next_space_feedback_nodes = next.feedback.metrics.space_feedback_nodes;
         if (accept) current = std::move(next);
-        if (current.cost < best.cost) best = current;
+        const double best_improvement = best.cost - current.cost;
+        if (best_improvement > config.sa_convergence_tolerance) {
+            best = current;
+            stagnant_iterations = 0;
+        } else {
+            if (current.cost < best.cost) best = current;
+            if (config.sa_convergence_tolerance > 0.0 && config.sa_convergence_patience > 0) {
+                ++stagnant_iterations;
+            }
+        }
         // 默认输出轻量 SA 进度，避免长评估时终端看起来像卡住。
         std::cerr << "[sa] " << (iteration + 1) << '/' << config.sa_iterations
                   << " move=" << perturbation.move
@@ -1652,10 +1664,22 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
                       << " row_overflow=" << current.feedback.metrics.row_width_overflow
                       << '\n';
         }
+        if (config.sa_convergence_tolerance > 0.0 && config.sa_convergence_patience > 0 &&
+            stagnant_iterations >= config.sa_convergence_patience) {
+            sa_terminated_early = true;
+            sa_termination_reason = "best-cost improvement stayed within " +
+                std::to_string(config.sa_convergence_tolerance) + " for " +
+                std::to_string(config.sa_convergence_patience) + " consecutive iterations";
+            std::cerr << "[sa] early-stop: " << sa_termination_reason << '\n' << std::flush;
+            break;
+        }
         temperature *= config.cooling_rate;
     }
 
-    return make_solution(best, std::move(sa_progress), std::move(sa_btree_iterations));
+    auto solution = make_solution(best, std::move(sa_progress), std::move(sa_btree_iterations));
+    solution.sa_terminated_early = sa_terminated_early;
+    solution.sa_termination_reason = std::move(sa_termination_reason);
+    return solution;
 }
 
 // 保持历史 CLI/API 名称，当前默认指向论文 placement-aware 求解流程。
