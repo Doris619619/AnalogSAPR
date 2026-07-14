@@ -315,7 +315,7 @@ def transform_point(x: float, y: float, module: Module, placement: Placement) ->
     elif orient == "MXR90":
         gx, gy = y, x
     elif orient == "MYR90":
-        gx, gy = y, x
+        gx, gy = module.height - y, module.width - x
     else:
         angle = (placement.angle % 360 + 360) % 360
         if angle == 0:

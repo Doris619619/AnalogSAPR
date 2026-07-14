@@ -663,6 +663,17 @@ std::string orient_for_angle(int angle) {
     return "R0";
 }
 
+// 返回 representative 绕垂直对称轴镜像后应使用的完整 Cadence orient。
+std::string vertical_mirror_orient_for_angle(int angle) {
+    switch ((angle % 360 + 360) % 360) {
+        case 0: return "MY";
+        case 90: return "MXR90";
+        case 180: return "MX";
+        case 270: return "MYR90";
+    }
+    return "MY";
+}
+
 // 鐢熸垚瀵圭О pair 涓暅鍍忔ā鍧楃殑 placement銆?
 struct AsfPackingResult {
     std::unordered_map<std::string, Placement> placements;
@@ -696,6 +707,53 @@ std::pair<double, double> asf_node_occupied_size(const Circuit& circuit, const A
 Rect placement_rect(const Circuit& circuit, const Placement& placement) {
     const auto size = placed_size(circuit.modules.at(placement.module), placement);
     return {placement.x, placement.y, placement.x + size.first, placement.y + size.second};
+}
+
+// 验证 ASF 局部坐标系中每个 pair 的 bbox 和同名引脚关于 x=0 垂直镜像。
+bool validate_asf_vertical_symmetry(
+    const Circuit& circuit,
+    const AsfBStarTree& asf,
+    const std::unordered_map<std::string, Placement>& placements,
+    std::string& error) {
+    constexpr double kTolerance = 1e-8;
+    const auto same = [](double left, double right) { return std::abs(left - right) <= kTolerance; };
+    for (const auto& [representative, mirror] : asf.mirror_map) {
+        const auto rep_placement = placements.find(representative);
+        const auto mirror_placement = placements.find(mirror);
+        if (rep_placement == placements.end() || mirror_placement == placements.end()) {
+            error = "missing ASF pair placement for " + representative + " and " + mirror;
+            return false;
+        }
+        const Rect rep_box = placement_rect(circuit, rep_placement->second);
+        const Rect mirror_box = placement_rect(circuit, mirror_placement->second);
+        if (!same(rep_box.x1, -mirror_box.x2) || !same(rep_box.x2, -mirror_box.x1) ||
+            !same(rep_box.y1, mirror_box.y1) || !same(rep_box.y2, mirror_box.y2)) {
+            error = "bbox mismatch for " + representative + " and " + mirror;
+            return false;
+        }
+
+        std::unordered_map<std::string, const Pin*> mirror_pins;
+        for (const auto& terminal : circuit.pin_order) {
+            const auto& pin = circuit.pins.at(terminal);
+            if (pin.module == mirror) mirror_pins[pin.name] = &pin;
+        }
+        for (const auto& terminal : circuit.pin_order) {
+            const auto& pin = circuit.pins.at(terminal);
+            if (pin.module != representative) continue;
+            const auto matched = mirror_pins.find(pin.name);
+            if (matched == mirror_pins.end()) {
+                error = "missing mirror pin " + mirror + "." + pin.name;
+                return false;
+            }
+            const auto [rep_x, rep_y] = placed_pin(circuit.modules.at(representative), pin, rep_placement->second);
+            const auto [mirror_x, mirror_y] = placed_pin(circuit.modules.at(mirror), *matched->second, mirror_placement->second);
+            if (!same(rep_x, -mirror_x) || !same(rep_y, mirror_y)) {
+                error = "pin mismatch for " + representative + "." + pin.name;
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 void translate_rect(Rect& rect, double dx, double dy) {
@@ -797,7 +855,12 @@ AsfPackingResult pack_asf_bstar_tree(const Circuit& circuit, const SymmetryGroup
         const auto rep_size = module_size(circuit, id, node.angle);
         if (node.mirror_module.has_value()) {
             const auto mirror_size = module_size(circuit, *node.mirror_module, node.angle);
-            Placement mirror{*node.mirror_module, -x - mirror_size.first, y, node.angle, "MY"};
+            Placement mirror{
+                *node.mirror_module,
+                -x - mirror_size.first,
+                y,
+                node.angle,
+                vertical_mirror_orient_for_angle(node.angle)};
             (void)rep_size;
             result.placements[*node.mirror_module] = mirror;
         }
@@ -839,6 +902,11 @@ AsfPackingResult pack_asf_bstar_tree(const Circuit& circuit, const SymmetryGroup
 
     const double axis_clearance = std::max(1.0, config.spacing);
     place_node(*asf.root, axis_clearance, 0.0);
+
+    std::string symmetry_error;
+    if (!validate_asf_vertical_symmetry(circuit, asf, result.placements, symmetry_error)) {
+        throw std::runtime_error("symmetry_transform_mismatch: " + symmetry_error);
+    }
 
     bool first = true;
     Rect bbox{};

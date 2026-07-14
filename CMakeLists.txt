@@ -47,6 +47,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_executable(sapr_tests
         tests/test_main.cpp
         tests/test_constraints.cpp
@@ -82,6 +83,10 @@ if(BUILD_TESTING)
     add_test(NAME sapr_render_smoke COMMAND ${CMAKE_COMMAND}
         -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
         -DBINARY_DIR=${CMAKE_BINARY_DIR}
+        -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}
         -P ${CMAKE_SOURCE_DIR}/tests/render_smoke.cmake
+    )
+    add_test(NAME sapr_render_transform
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/verify_render_layout_transform.py
     )
 endif()

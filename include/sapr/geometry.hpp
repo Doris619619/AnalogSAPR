@@ -1,4 +1,4 @@
-// 声明放置后的器件和引脚几何变换接口。
+// Placement geometry transformation interface.
 #pragma once
 
 #include <utility>
@@ -7,11 +7,17 @@
 
 namespace sapr {
 
-// 计算引脚经过器件旋转和平移后的全局坐标。
+// Transform a module BB-local point to global placement coordinates.
+std::pair<double, double> transform_placed_point(
+    const Module& module,
+    double local_x,
+    double local_y,
+    const Placement& placement);
+
+// Transform a module pin to global placement coordinates.
 std::pair<double, double> placed_pin(const Module& module, const Pin& pin, const Placement& placement);
 
-// 返回器件旋转后的宽度和高度。
+// Return the module size after placement transformation.
 std::pair<double, double> placed_size(const Module& module, const Placement& placement);
 
 }  // namespace sapr
-
