@@ -1,0 +1,9 @@
+# 4ring_2_complex_no_symmetry_perturbed
+# This case deliberately has no SYMMETRY_PAIR or SYMMETRY_SELF constraints.
+# It preserves the perturbed reference placement, connectivity, and wire-width rules.
+# SYMMETRY_PAIR / SYMMETRY_SELF / FLOW / WIRE_WIDTH
+
+WIRE_WIDTH     VDD    0.05  1.0
+WIRE_WIDTH     GND    0.05  1.0
+WIRE_WIDTH     LOI+   0.05  1.0
+WIRE_WIDTH     LOI-   0.05  1.0
