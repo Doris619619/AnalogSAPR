@@ -31,6 +31,7 @@ constexpr double kDetailedViaWeight = 5.0;
 struct DetailedTopologyIndex {
     std::unordered_map<std::string, LinkingControlPoint> lcp_by_id;
     std::unordered_map<std::string, std::string> lcp_space_by_id;
+    std::unordered_map<std::string, std::string> space_owner_by_id;
     std::unordered_set<std::string> lcp_without_location;
     std::unordered_set<std::string> topology_segment_keys;
     std::vector<WireSegmentRef> topology_segments;
@@ -617,6 +618,7 @@ DetailedTopologyIndex build_detailed_topology_index(const RoutingEvaluationReque
         }
     }
     for (const auto& space : request.space_nodes) {
+        index.space_owner_by_id[space.id] = space.owner;
         for (const auto& point : space.linking_points) {
             index.lcp_by_id.try_emplace(point.id, point);
             index.lcp_space_by_id[point.id] = space.id;
@@ -1885,16 +1887,128 @@ std::vector<routing::RouteCandidate> order_candidates_by_topology(
 
 // 鏍规嵁褰撳墠 placement 鎵ц甯冪嚎涓婁笅鏂囨瀯寤恒€佸€欓€夎矾寰勭敓鎴愬拰鍏ㄥ眬璺緞閫夋嫨銆?
 // 鍒ゆ柇涓€涓?net 鐨?detailed traceback 鏄惁鑳戒粠 FLOW out pin 杩借釜鍒?in pin銆?
-// 鍏堜繚鐣欏悓涓€ net 鍐呯殑 topology segment 椤哄簭锛屽啀鎸夎鏂囪姹傝 symmetry/critical net 浼樺厛 detailed routing銆?
+/*
+ * 根据 packing contour trace 建立 detailed routing 的逆序回溯索引。
+ * 论文要求从增强 B*-tree 叶子开始按 packing 逆序回溯；wire segment 的 packing
+ * 归属优先使用 DP 已记录的 local/cross-child segment，未记录时才回退到 LCP
+ * space owner 或端点模块，避免直接网络失去排序依据。
+ */
+struct DetailedPackingTraceOrder {
+    std::unordered_map<std::string, int> segment_rank_by_id;
+    std::unordered_map<std::string, int> module_rank;
+};
+
+/* 构建 wire segment 与模块在 contour packing 中最后出现的索引。 */
+DetailedPackingTraceOrder build_detailed_packing_trace_order(const RoutingEvaluationRequest& request) {
+    DetailedPackingTraceOrder order;
+    for (std::size_t index = 0; index < request.packing_trace.steps.size(); ++index) {
+        const auto& step = request.packing_trace.steps[index];
+        const int rank = static_cast<int>(index);
+        const auto record_module = [&](const std::string& module) {
+            if (module.empty()) return;
+            const auto found = order.module_rank.find(module);
+            if (found == order.module_rank.end() || found->second < rank) order.module_rank[module] = rank;
+        };
+        record_module(step.module);
+        for (const auto& module : step.subtree_modules) record_module(module);
+        const auto record_segment = [&](const std::string& segment_id) {
+            if (segment_id.empty()) return;
+            const auto found = order.segment_rank_by_id.find(segment_id);
+            if (found == order.segment_rank_by_id.end() || found->second < rank) {
+                order.segment_rank_by_id[segment_id] = rank;
+            }
+        };
+        for (const auto& segment_id : step.local_wire_segments) record_segment(segment_id);
+        for (const auto& segment_id : step.cross_child_wire_segments) record_segment(segment_id);
+    }
+    return order;
+}
+
+/* 返回 terminal 所属模块在 packing trace 中的逆序回溯优先级。 */
+int packing_rank_for_terminal(
+    const Circuit& circuit,
+    const DetailedPackingTraceOrder& order,
+    const std::string& terminal) {
+    const auto pin = circuit.pins.find(terminal);
+    if (pin == circuit.pins.end()) return -1;
+    const auto module = order.module_rank.find(pin->second.module);
+    return module == order.module_rank.end() ? -1 : module->second;
+}
+
+/* 返回 candidate 应在 detailed routing 中回溯的 packing 索引，较大值表示更靠近叶子。 */
+int detailed_packing_rank(
+    const Circuit& circuit,
+    const DetailedTopologyIndex& topology_index,
+    const DetailedPackingTraceOrder& order,
+    const routing::RouteCandidate& candidate) {
+    const auto segment = order.segment_rank_by_id.find(candidate.segment_id);
+    if (segment != order.segment_rank_by_id.end()) return segment->second;
+
+    int rank = std::max(
+        packing_rank_for_terminal(circuit, order, candidate.from_terminal),
+        packing_rank_for_terminal(circuit, order, candidate.to_terminal));
+    for (const auto& space_id : space_nodes_for_candidate(topology_index, candidate)) {
+        const auto owner_id = topology_index.space_owner_by_id.find(space_id);
+        if (owner_id == topology_index.space_owner_by_id.end()) continue;
+        const auto owner_rank = order.module_rank.find(owner_id->second);
+        if (owner_rank != order.module_rank.end()) rank = std::max(rank, owner_rank->second);
+    }
+    return rank;
+}
+
+/*
+ * 仅在成功的 bottom-up DP traceback 中按论文规定应用逆 packing 顺序。
+ * 对称网和关键网仍优先；同一 net 保持连续，防止多端 LCP 的物理位置绑定被拆散。
+ */
 std::vector<routing::RouteCandidate> order_candidates_for_detailed_routing(
     const Circuit& circuit,
     const RoutingEvaluationRequest& request,
-    const std::vector<routing::RouteCandidate>& candidates) {
+    const DetailedTopologyIndex& topology_index,
+    const std::vector<routing::RouteCandidate>& candidates,
+    bool use_dp_traceback) {
     auto ordered = order_candidates_by_topology(request, candidates);
-    std::stable_sort(ordered.begin(), ordered.end(), [&](const auto& left, const auto& right) {
-        return detailed_net_rank(circuit, left.net) < detailed_net_rank(circuit, right.net);
+    // 论文的 top-down detailed routing 仅回溯成功构造的 DP 子问题；fallback 没有合法 traceback，保留原顺序。
+    if (!use_dp_traceback) {
+        std::stable_sort(ordered.begin(), ordered.end(), [&](const auto& left, const auto& right) {
+            return detailed_net_rank(circuit, left.net) < detailed_net_rank(circuit, right.net);
+        });
+        return ordered;
+    }
+    const auto packing_order = build_detailed_packing_trace_order(request);
+
+    struct NetCandidateGroup {
+        std::string net;
+        int priority_rank{};
+        int packing_rank{-1};
+        std::vector<routing::RouteCandidate> candidates;
+    };
+    std::vector<NetCandidateGroup> groups;
+    std::unordered_map<std::string, std::size_t> group_index_by_net;
+    for (const auto& candidate : ordered) {
+        const auto [found, inserted] = group_index_by_net.emplace(candidate.net, groups.size());
+        if (inserted) groups.push_back({candidate.net, detailed_net_rank(circuit, candidate.net), -1, {}});
+        auto& group = groups[found->second];
+        group.packing_rank = std::max(
+            group.packing_rank,
+            detailed_packing_rank(circuit, topology_index, packing_order, candidate));
+        group.candidates.push_back(candidate);
+    }
+    for (auto& group : groups) {
+        std::stable_sort(group.candidates.begin(), group.candidates.end(), [&](const auto& left, const auto& right) {
+            return detailed_packing_rank(circuit, topology_index, packing_order, left) >
+                   detailed_packing_rank(circuit, topology_index, packing_order, right);
+        });
+    }
+    std::stable_sort(groups.begin(), groups.end(), [](const auto& left, const auto& right) {
+        if (left.priority_rank != right.priority_rank) return left.priority_rank < right.priority_rank;
+        return left.packing_rank > right.packing_rank;
     });
-    return ordered;
+
+    std::vector<routing::RouteCandidate> result;
+    for (const auto& group : groups) {
+        result.insert(result.end(), group.candidates.begin(), group.candidates.end());
+    }
+    return result;
 }
 
 bool has_flow_path(
@@ -2045,9 +2159,14 @@ DetailedRoutingResult run_detailed_routing(
     DetailedRoutingResult result;
     const auto topology_index = build_detailed_topology_index(request);
     std::unordered_set<std::string> routed_space_nodes;
-    const auto selected_candidates =
-        order_candidates_for_detailed_routing(circuit, request, selected_candidates_for_detailed_routing(evaluation));
     const bool has_dp_traceback = evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->success;
+    const auto selected_candidates =
+        order_candidates_for_detailed_routing(
+            circuit,
+            request,
+            topology_index,
+            selected_candidates_for_detailed_routing(evaluation),
+            has_dp_traceback);
     const int dp_state_id = has_dp_traceback ? evaluation.bottom_up_dp->best_state.id : -1;
     const std::string tree_node = has_dp_traceback ? evaluation.bottom_up_dp->best_state.tree_node : std::string{};
     if (evaluation.bottom_up_dp.has_value() && !evaluation.bottom_up_dp->success) {

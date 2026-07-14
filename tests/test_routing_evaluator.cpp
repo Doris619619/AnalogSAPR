@@ -272,6 +272,60 @@ sapr::RoutingEvaluation make_priority_evaluation(
     };
 }
 
+/* 构造两个普通网络分别归属根节点和叶节点的最小电路，用于验证逆 packing 回溯顺序。 */
+sapr::Circuit make_reverse_packing_order_test_circuit() {
+    sapr::Circuit circuit;
+    for (const auto& module : {std::string{"ROOT"}, std::string{"LEAF"}}) {
+        circuit.modules.emplace(module, sapr::Module{module, 12.0, 12.0, sapr::Rect{5.0, 5.0, 6.0, 6.0}, 0.0, 0.0, ""});
+        circuit.module_order.push_back(module);
+        circuit.pins.emplace(module + ".A", sapr::Pin{module, "A", 0.0, 1.0, "M1"});
+        circuit.pins.emplace(module + ".B", sapr::Pin{module, "B", 9.0, 1.0, "M1"});
+        circuit.pin_order.push_back(module + ".A");
+        circuit.pin_order.push_back(module + ".B");
+    }
+    circuit.nets.emplace("ROOT_NET", sapr::Net{"ROOT_NET", sapr::Priority::Normal, {"ROOT.A", "ROOT.B"}});
+    circuit.nets.emplace("LEAF_NET", sapr::Net{"LEAF_NET", sapr::Priority::Normal, {"LEAF.A", "LEAF.B"}});
+    circuit.net_order = {"ROOT_NET", "LEAF_NET"};
+    return circuit;
+}
+
+/* 构造根节点网络先出现、叶节点网络后出现的候选，检验 detailed routing 是否反向提交。 */
+sapr::RoutingEvaluation make_reverse_packing_order_evaluation(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::routing::RoutingContext context(circuit, placements);
+    const auto root = make_horizontal_candidate(context, "ROOT_NET", "ROOT.A", "ROOT.B", 1.0);
+    const auto leaf = make_horizontal_candidate(context, "LEAF_NET", "LEAF.A", "LEAF.B", 4.0);
+    sapr::routing::GlobalRoutingResult global;
+    for (const auto& candidate : {root, leaf}) {
+        sapr::routing::NetRouteChoice choice;
+        choice.net = candidate.net;
+        choice.selected_candidates.push_back(candidate);
+        global.net_routes.push_back(std::move(choice));
+    }
+    global.total_metrics.wirelength = 18.0;
+    sapr::routing::RoutingDpResult dp_result;
+    dp_result.success = true;
+    dp_result.traceback_candidates = {root, leaf};
+    return sapr::RoutingEvaluation{
+        std::move(context), {root, leaf}, std::move(global), std::move(dp_result), 18.0, 0, true};
+}
+
+/* 构造前序 packing trace：ROOT 先被打包，LEAF 后被打包，因此 detailed routing 必须先回溯 LEAF。 */
+sapr::RoutingEvaluationRequest make_reverse_packing_order_request(
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::RoutingEvaluationRequest request;
+    request.placements = placements;
+    request.placement_order = {"ROOT", "LEAF"};
+    request.packing_trace.steps.push_back(
+        {"ROOT_NODE", "ROOT", 0.0, 0.0, sapr::Rect{}, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         std::optional<std::string>{"LEAF_NODE"}, std::nullopt, {"ROOT"}, {}, {}});
+    request.packing_trace.steps.push_back(
+        {"LEAF_NODE", "LEAF", 0.0, 0.0, sapr::Rect{}, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         std::nullopt, std::nullopt, {"LEAF"}, {}, {}});
+    return request;
+}
+
 sapr::RoutingEvaluationRequest make_lcp_request(
     const sapr::Circuit& circuit,
     const std::unordered_map<std::string, sapr::Placement>& placements,
@@ -1337,6 +1391,36 @@ void run_routing_evaluator_tests() {
     require(priority_detail.routes[0].net == "SYM", "symmetry net should be detailed-routed before other priorities");
     require(priority_detail.routes[1].net == "CRT", "critical net should be detailed-routed after symmetry net");
     require(priority_detail.routes[2].net == "NOR", "normal net should be detailed-routed after priority nets");
+
+    const auto reverse_packing_circuit = make_reverse_packing_order_test_circuit();
+    const std::unordered_map<std::string, sapr::Placement> reverse_packing_placements{
+        {"ROOT", sapr::Placement{"ROOT", 0.0, 0.0, 0, "R0"}},
+        {"LEAF", sapr::Placement{"LEAF", 0.0, 0.0, 0, "R0"}},
+    };
+    const auto reverse_packing_request = make_reverse_packing_order_request(reverse_packing_placements);
+    const auto reverse_packing_evaluation =
+        make_reverse_packing_order_evaluation(reverse_packing_circuit, reverse_packing_placements);
+    const auto reverse_packing_detail =
+        sapr::run_detailed_routing(reverse_packing_circuit, reverse_packing_request, reverse_packing_evaluation);
+    require(reverse_packing_detail.traceback_failures == 0, "reverse packing order test should keep both routes legal");
+    require(reverse_packing_detail.routes.size() >= 2, "reverse packing order test should emit both selected routes");
+    require(
+        reverse_packing_detail.routes[0].net == "LEAF_NET" &&
+            reverse_packing_detail.routes[1].net == "ROOT_NET",
+        "detailed routing should trace back leaf-owned routes before root-owned routes");
+    auto reverse_packing_fallback_evaluation =
+        make_reverse_packing_order_evaluation(reverse_packing_circuit, reverse_packing_placements);
+    reverse_packing_fallback_evaluation.bottom_up_dp.reset();
+    reverse_packing_fallback_evaluation.used_bottom_up_dp = false;
+    const auto reverse_packing_fallback_detail = sapr::run_detailed_routing(
+        reverse_packing_circuit,
+        reverse_packing_request,
+        reverse_packing_fallback_evaluation);
+    require(
+        reverse_packing_fallback_detail.routes.size() >= 2 &&
+            reverse_packing_fallback_detail.routes[0].net == "ROOT_NET" &&
+            reverse_packing_fallback_detail.routes[1].net == "LEAF_NET",
+        "detailed routing fallback must keep the pre-existing priority order without a DP traceback");
 
     auto lcp_request = make_lcp_request(drc_circuit, drc_placements, true);
     auto lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
