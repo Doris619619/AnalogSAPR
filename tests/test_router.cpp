@@ -52,6 +52,25 @@ bool lcp_references_are_consistent(const sapr::EnhancedBStarTree& tree, const st
     return true;
 }
 
+bool automatic_lcp_endpoints_are_resolved(const sapr::EnhancedBStarTree& tree) {
+    std::unordered_set<std::string> point_ids;
+    std::vector<sapr::WireSegmentRef> segments;
+    for (const auto& space : sapr::collect_space_nodes(tree)) {
+        for (const auto& point : space.linking_points) {
+            point_ids.insert(point.id);
+            segments.insert(segments.end(), point.segments.begin(), point.segments.end());
+        }
+    }
+    const auto is_lcp_endpoint = [](const std::string& endpoint) {
+        return endpoint.find(":leaf:") != std::string::npos || endpoint.ends_with(":root");
+    };
+    for (const auto& segment : segments) {
+        if (is_lcp_endpoint(segment.from) && !point_ids.contains(segment.from)) return false;
+        if (is_lcp_endpoint(segment.to) && !point_ids.contains(segment.to)) return false;
+    }
+    return true;
+}
+
 // 构造包含一个四线段 LCP 的树，用于确定性覆盖 split 的端点重连语义。
 sapr::EnhancedBStarTree make_split_test_tree(const sapr::Circuit& circuit) {
     auto tree = sapr::make_enhanced_tree(circuit);
@@ -234,12 +253,22 @@ void run_router_tests() {
         }
     }
     auto two_group_perturbed = two_group_tree;
+    sapr::initialize_lcp_topology(two_group_circuit, two_group_perturbed, sapr::SolverConfig{});
     std::mt19937 two_group_rng(23);
     bool saw_asf_move = false;
     for (int i = 0; i < 50; ++i) {
+        const auto lcp_count_before_move = sapr::count_tree_lcps(two_group_perturbed);
         const auto report = sapr::perturb_placement_tree(two_group_perturbed, two_group_rng);
         saw_asf_move = saw_asf_move || report.move.starts_with("asf-module-");
         require(sapr::is_valid_tree(two_group_perturbed), "ASF internal perturbation should preserve tree legality");
+        if (report.move.starts_with("asf-module-")) {
+            require(
+                sapr::count_tree_lcps(two_group_perturbed) == lcp_count_before_move,
+                "ASF perturbation should migrate cluster LCPs instead of dropping them");
+            require(
+                automatic_lcp_endpoints_are_resolved(two_group_perturbed),
+                "ASF perturbation should preserve every LCP segment endpoint reference");
+        }
         for (const auto& group : two_group_perturbed.symmetry_groups) {
             const auto& asf_tree = group.asf_bstar_tree;
             for (const auto& [representative, mirror] : asf_tree.mirror_map) {
