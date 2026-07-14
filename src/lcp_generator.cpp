@@ -631,6 +631,30 @@ void add_space_region_candidates(
             name,
             "space_grid");
     }
+    const std::vector<std::pair<std::string, std::pair<double, double>>> boundary_anchors{
+        {"space_left_mid", {region.x1, (region.y1 + region.y2) / 2.0}},
+        {"space_right_mid", {region.x2, (region.y1 + region.y2) / 2.0}},
+        {"space_bottom_mid", {(region.x1 + region.x2) / 2.0, region.y1}},
+        {"space_top_mid", {(region.x1 + region.x2) / 2.0, region.y2}},
+        {"space_lower_left", {region.x1, region.y1}},
+        {"space_upper_right", {region.x2, region.y2}},
+    };
+    for (const auto& [name, point] : boundary_anchors) {
+        add_classified_candidate(
+            candidates,
+            seen,
+            lcp,
+            space_region,
+            blockers,
+            point.first,
+            point.second,
+            lcp.point.id + ":" + name,
+            "relaxed",
+            false,
+            15.0,
+            name,
+            "space_boundary");
+    }
 
     std::mt19937 rng(stable_candidate_seed(lcp));
     std::uniform_real_distribution<double> x_dist(sample.x1, sample.x2);

@@ -63,6 +63,7 @@ bool same_point(const GridPoint& lhs, const GridPoint& rhs) {
 }
 
 // 检查路由中心线是否仍位于芯片左、下边界内。
+
 bool metal_inside_chip_boundary(const GridPoint& point, const Grid& grid, double wire_width) {
     (void)wire_width;
     const Point location = grid.grid_to_point(point);

@@ -76,6 +76,6 @@ RoutingDpResult run_bottom_up_routing_dp(
     const RoutingEvaluationRequest& request,
     const RoutingContext& context,
     const std::vector<RouteCandidate>& candidates,
-    int max_states_per_node = 8);
+    int max_states_per_node = 16);
 
 }  // namespace sapr::routing

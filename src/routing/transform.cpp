@@ -1,15 +1,16 @@
-// 文件职责：实现器件局部坐标到全局 placement 坐标的转换。
+/* 文件职责：按共用 placement 几何规则实现 routing 坐标变换。 */
 #include "sapr/routing/transform.hpp"
 
 #include <algorithm>
 #include <array>
-#include <stdexcept>
 #include <utility>
+
+#include "sapr/geometry.hpp"
 
 namespace sapr::routing {
 namespace {
 
-// 将局部矩形四角变换后重新包围成全局轴对齐矩形。
+/* 变换局部矩形四角并归一化为全局轴对齐外接框。 */
 Rect transform_rect_to_global(const Module& module, const Rect& rect, const Placement& placement) {
     const Rect normalized = normalize_rect(rect);
     const std::array<Point, 4> corners = {
@@ -42,55 +43,23 @@ Rect transform_rect_to_global(const Module& module, const Rect& rect, const Plac
 
 }  // namespace
 
-// 将局部点先镜像、再旋转、最后平移到全局坐标。
+/* 复用共用 placement 几何实现变换局部点。 */
 Point transform_local_point_to_global(const Module& module, const Point& local_point, const Placement& placement) {
-    double x = local_point.x;
-    double y = local_point.y;
-    if (placement.orient == "MX") {
-        y = module.height - y;
-    } else if (placement.orient == "MY") {
-        x = module.width - x;
-    } else if (placement.orient == "MXR90") {
-        x = y;
-        y = local_point.x;
-    } else if (placement.orient == "MYR90") {
-        const double reflected_x = module.width - x;
-        x = local_point.y;
-        y = module.width - reflected_x;
-    } else {
-        switch ((placement.angle % 360 + 360) % 360) {
-            case 0:
-                break;
-            case 90:
-                x = module.height - local_point.y;
-                y = local_point.x;
-                break;
-            case 180:
-                x = module.width - local_point.x;
-                y = module.height - local_point.y;
-                break;
-            case 270:
-                x = local_point.y;
-                y = module.width - local_point.x;
-                break;
-            default:
-                throw std::runtime_error("only 0/90/180/270 rotations are supported");
-        }
-    }
-    return Point{x + placement.x, y + placement.y};
+    const auto [x, y] = transform_placed_point(module, local_point.x, local_point.y, placement);
+    return Point{x, y};
 }
 
-// 将 pin 坐标从器件局部坐标转换为全局坐标。
+/* 复用局部点路径变换 routing 引脚。 */
 Point transform_pin_to_global(const Module& module, const Pin& pin, const Placement& placement) {
     return transform_local_point_to_global(module, Point{pin.x, pin.y}, placement);
 }
 
-// 将器件 active region 转换为全局坐标矩形。
+/* 将 active region 变换为全局轴对齐矩形。 */
 Rect transform_active_to_global(const Module& module, const Placement& placement) {
     return transform_rect_to_global(module, module.active, placement);
 }
 
-// 将器件外接框转换为全局坐标矩形。
+/* 将完整器件外接框变换为全局坐标。 */
 Rect transform_module_bbox_to_global(const Module& module, const Placement& placement) {
     return transform_rect_to_global(module, Rect{0.0, 0.0, module.width, module.height}, placement);
 }
