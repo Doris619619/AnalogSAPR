@@ -1094,10 +1094,12 @@ std::optional<std::vector<RouteSegment>> legal_candidate_routes(
     const routing::RouteCandidate& candidate,
     const std::vector<RouteSegment>& occupied_routes,
     std::string* failure_reason = nullptr) {
-    if (!candidate.path.success || candidate.path.points.size() < 2) {
+    if (!candidate.path.success || candidate.path.points.empty()) {
         if (failure_reason != nullptr) *failure_reason = "candidate path failed";
         return std::nullopt;
     }
+    // LCP 与引脚落在同一网格点时，A* 正确返回单点路径；该连接无需写入金属线段。
+    if (candidate.path.points.size() == 1) return std::vector<RouteSegment>{};
     auto routes = detailed_path_segments(circuit, evaluation, candidate);
     if (!route_segments_connect_path_endpoints(
             routes,

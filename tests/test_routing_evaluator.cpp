@@ -1438,6 +1438,18 @@ void run_routing_evaluator_tests() {
     require(lcp_detail.required_space_by_node.at("S1") >= 3.0, "required space should include route width and spacing");
     require(lcp_detail.detailed_cost > 0.0, "detailed routing should report local detailed cost");
 
+    // LCP 与引脚重合时，单点 A* 路径是合法的零长度连接，不应导致整网 detailed traceback 失败。
+    auto zero_length_lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
+    auto& zero_length_candidate = zero_length_lcp_eval.global_routing.net_routes.front().selected_candidates.front();
+    zero_length_candidate.path.points = {
+        zero_length_lcp_eval.context.grid().snap_to_grid(sapr::routing::Point{0.0, 1.0}, 0),
+    };
+    zero_length_candidate.path.metrics = {};
+    const auto zero_length_lcp_detail = sapr::run_detailed_routing(drc_circuit, lcp_request, zero_length_lcp_eval);
+    require(
+        zero_length_lcp_detail.traceback_failures == 0,
+        "single-point LCP candidate should be accepted as a zero-length detailed connection");
+
     const auto lcp_pair_request = make_lcp_pair_request(drc_circuit, drc_placements);
     const auto lcp_pair_eval = make_lcp_pair_evaluation(drc_circuit, drc_placements);
     const auto lcp_pair_detail = sapr::run_detailed_routing(drc_circuit, lcp_pair_request, lcp_pair_eval);
