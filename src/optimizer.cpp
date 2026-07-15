@@ -369,6 +369,32 @@ void write_dp_candidate_event_json(std::ostringstream& out, const routing::Routi
         << '}';
 }
 
+// 写出最终 bottom-up DP 状态，供 strict LCP-DP 失败时定位未覆盖 terminal 与绑定冲突。
+void write_dp_result_json(std::ostringstream& out, const std::optional<routing::RoutingDpResult>& result) {
+    if (!result.has_value()) {
+        out << "null";
+        return;
+    }
+    const auto& dp = *result;
+    out << "{\"success\": " << (dp.success ? "true" : "false")
+        << ", \"dp_nodes\": " << dp.dp_nodes
+        << ", \"dp_states\": " << dp.dp_states
+        << ", \"dp_pruned_states\": " << dp.dp_pruned_states
+        << ", \"traceback_candidate_count\": " << dp.traceback_candidates.size()
+        << ", \"best_state\": {\"id\": " << dp.best_state.id
+        << ", \"tree_node\": ";
+    write_json_string(out, dp.best_state.tree_node);
+    out << ", \"covered_terminals\": ";
+    write_json_string_array(out, dp.best_state.covered_terminals);
+    out << ", \"covered_wire_segments\": ";
+    write_json_string_array(out, dp.best_state.covered_wire_segments);
+    out << ", \"selected_transitions\": ";
+    write_json_string_array(out, dp.best_state.selected_transitions);
+    out << ", \"failure_messages\": ";
+    write_json_string_array(out, dp.best_state.failure_messages);
+    out << "}}";
+}
+
 // 鍐欏嚭 detailed traceback 涓嚭鐜扮殑 pin/LCP 鑺傜偣銆?
 void write_detailed_node_json(std::ostringstream& out, const DetailedRouteNode& node) {
     out << "{\"id\": ";
@@ -562,6 +588,9 @@ std::string make_routing_debug_json(
     write_json_string(out, used_lcp_direct_fallback(request, evaluation) ? "no_multi_terminal_reachable_lcp_candidate" : "");
     out
         << "},\n";
+    out << "  \"bottom_up_dp\": ";
+    write_dp_result_json(out, evaluation.bottom_up_dp);
+    out << ",\n";
     write_debug_topologies_json(out, request);
     out << ",\n";
     write_debug_space_nodes_json(out, request);
