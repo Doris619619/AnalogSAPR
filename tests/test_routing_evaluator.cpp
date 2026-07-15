@@ -176,17 +176,24 @@ sapr::RoutingEvaluation make_line_evaluation(
 // 构造带 LCP 拓扑的最小 detailed routing request。
 sapr::Circuit make_priority_test_circuit() {
     sapr::Circuit circuit;
-    circuit.modules.emplace("M", sapr::Module{"M", 12.0, 12.0, sapr::Rect{5.0, 5.0, 6.0, 6.0}, 0.0, 0.0, ""});
-    circuit.module_order.push_back("M");
-    const std::vector<std::pair<std::string, double>> pins{
-        {"A", 0.0}, {"B", 9.0}, {"C", 0.0}, {"D", 9.0}, {"E", 0.0}, {"F", 9.0},
-    };
-    for (const auto& [pin, x] : pins) circuit.pins.emplace("M." + pin, sapr::Pin{"M", pin, x, 1.0, "M1"});
-    circuit.pin_order = {"M.A", "M.B", "M.C", "M.D", "M.E", "M.F"};
-    circuit.nets.emplace("SYM", sapr::Net{"SYM", sapr::Priority::Symmetry, {"M.A", "M.B"}});
-    circuit.nets.emplace("CRT", sapr::Net{"CRT", sapr::Priority::Critical, {"M.C", "M.D"}});
-    circuit.nets.emplace("NOR", sapr::Net{"NOR", sapr::Priority::Normal, {"M.E", "M.F"}});
-    circuit.net_order = {"SYM", "CRT", "NOR"};
+    for (const auto& module : {std::string{"S"}, std::string{"S_MIRROR"}, std::string{"P"}}) {
+        circuit.modules.emplace(module, sapr::Module{module, 12.0, 12.0, sapr::Rect{5.0, 5.0, 6.0, 6.0}, 0.0, 0.0, ""});
+        circuit.module_order.push_back(module);
+    }
+    for (const auto& pin : {std::string{"A"}, std::string{"B"}, std::string{"C"}, std::string{"D"}}) {
+        const double x = (pin == "A" || pin == "C") ? 0.0 : 9.0;
+        for (const auto& module : {std::string{"S"}, std::string{"P"}}) {
+            circuit.pins.emplace(module + "." + pin, sapr::Pin{module, pin, x, 1.0, "M1"});
+            circuit.pin_order.push_back(module + "." + pin);
+        }
+    }
+    circuit.constraints.symmetry_pairs.push_back({"sg", sapr::Axis::Vertical, "S", "S_MIRROR"});
+    circuit.constraints.wire_widths["SYM_CRT"] = {"SYM_CRT", 0.05, 1.0};
+    circuit.nets.emplace("SYM_CRT", sapr::Net{"SYM_CRT", sapr::Priority::Critical, {"S.A", "S.B"}});
+    circuit.nets.emplace("SYM_NOR", sapr::Net{"SYM_NOR", sapr::Priority::Normal, {"S.C", "S.D"}});
+    circuit.nets.emplace("PLAIN_CRT", sapr::Net{"PLAIN_CRT", sapr::Priority::Critical, {"P.A", "P.B"}});
+    circuit.nets.emplace("PLAIN_NOR", sapr::Net{"PLAIN_NOR", sapr::Priority::Normal, {"P.C", "P.D"}});
+    circuit.net_order = {"SYM_CRT", "SYM_NOR", "PLAIN_CRT", "PLAIN_NOR"};
     return circuit;
 }
 
@@ -248,25 +255,26 @@ sapr::RoutingEvaluation make_priority_evaluation(
         candidate.path.metrics.wirelength = 9.0;
         return candidate;
     };
-    const auto normal = make_candidate("NOR", "M.E", "M.F", 1.0);
-    const auto critical = make_candidate("CRT", "M.C", "M.D", 4.0);
-    const auto symmetry = make_candidate("SYM", "M.A", "M.B", 7.0);
+    const auto symmetric_critical = make_candidate("SYM_CRT", "S.A", "S.B", 1.0);
+    const auto symmetric_normal = make_candidate("SYM_NOR", "S.C", "S.D", 3.0);
+    const auto plain_critical = make_candidate("PLAIN_CRT", "P.A", "P.B", 7.0);
+    const auto plain_normal = make_candidate("PLAIN_NOR", "P.C", "P.D", 9.0);
 
     sapr::routing::GlobalRoutingResult global;
-    for (const auto& candidate : {normal, critical, symmetry}) {
+    for (const auto& candidate : {plain_normal, plain_critical, symmetric_normal, symmetric_critical}) {
         sapr::routing::NetRouteChoice choice;
         choice.net = candidate.net;
         choice.selected_candidates.push_back(candidate);
         global.net_routes.push_back(std::move(choice));
     }
-    global.total_metrics.wirelength = 27.0;
+    global.total_metrics.wirelength = 36.0;
 
     return sapr::RoutingEvaluation{
         std::move(context),
-        {normal, critical, symmetry},
+        {plain_normal, plain_critical, symmetric_normal, symmetric_critical},
         std::move(global),
         std::nullopt,
-        27.0,
+        36.0,
         0,
         false,
     };
@@ -1306,7 +1314,13 @@ void run_routing_evaluator_tests() {
 
     auto active_crossing_eval = make_line_evaluation(drc_circuit, drc_placements, 5.0);
     const auto active_crossing_detail = sapr::run_detailed_routing(drc_circuit, drc_request, active_crossing_eval);
-    require(active_crossing_detail.design_rule_violations > 0, "active crossing route should count as DRC");
+    require(active_crossing_detail.design_rule_violations == 0, "active crossing candidate should be legalized before final DRC");
+    require(
+        std::any_of(
+            active_crossing_detail.report.warnings.begin(),
+            active_crossing_detail.report.warnings.end(),
+            [](const auto& warning) { return warning.find("detailed routing used A* reroute fallback") != std::string::npos; }),
+        "active crossing candidate should use A* reroute fallback");
 
     // M2 从 active 上方跨过不应记为 active-region DRC；障碍也只应落在 M1。
     const auto multi_layer_active_config = sapr::routing::make_grid_config_for_routing_layers(2);
@@ -1380,17 +1394,20 @@ void run_routing_evaluator_tests() {
 
     const auto priority_circuit = make_priority_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> priority_placements{
-        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+        {"S", sapr::Placement{"S", 0.0, 0.0, 0, "R0"}},
+        {"S_MIRROR", sapr::Placement{"S_MIRROR", 20.0, 0.0, 0, "R0"}},
+        {"P", sapr::Placement{"P", 40.0, 0.0, 0, "R0"}},
     };
     sapr::RoutingEvaluationRequest priority_request;
     priority_request.placements = priority_placements;
-    priority_request.placement_order = {"M"};
+    priority_request.placement_order = {"S", "S_MIRROR", "P"};
     const auto priority_eval = make_priority_evaluation(priority_circuit, priority_placements);
     const auto priority_detail = sapr::run_detailed_routing(priority_circuit, priority_request, priority_eval);
-    require(priority_detail.routes.size() >= 3, "priority detailed routing should emit one route per selected candidate");
-    require(priority_detail.routes[0].net == "SYM", "symmetry net should be detailed-routed before other priorities");
-    require(priority_detail.routes[1].net == "CRT", "critical net should be detailed-routed after symmetry net");
-    require(priority_detail.routes[2].net == "NOR", "normal net should be detailed-routed after priority nets");
+    require(priority_detail.routes.size() >= 4, "priority detailed routing should emit one route per selected candidate");
+    require(priority_detail.routes[0].net == "SYM_CRT", "symmetric critical net should be routed first");
+    require(priority_detail.routes[1].net == "SYM_NOR", "symmetric normal net should follow symmetric critical net");
+    require(priority_detail.routes[2].net == "PLAIN_CRT", "plain critical net should follow symmetric nets");
+    require(priority_detail.routes[3].net == "PLAIN_NOR", "plain normal net should be routed last");
 
     const auto reverse_packing_circuit = make_reverse_packing_order_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> reverse_packing_placements{
@@ -1431,6 +1448,18 @@ void run_routing_evaluator_tests() {
     require(lcp_detail.required_space_by_node.contains("S1"), "LCP detailed route should report required routing space");
     require(lcp_detail.required_space_by_node.at("S1") >= 3.0, "required space should include route width and spacing");
     require(lcp_detail.detailed_cost > 0.0, "detailed routing should report local detailed cost");
+
+    // LCP 与引脚重合时，单点 A* 路径是合法的零长度连接，不应导致整网 detailed traceback 失败。
+    auto zero_length_lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
+    auto& zero_length_candidate = zero_length_lcp_eval.global_routing.net_routes.front().selected_candidates.front();
+    zero_length_candidate.path.points = {
+        zero_length_lcp_eval.context.grid().snap_to_grid(sapr::routing::Point{0.0, 1.0}, 0),
+    };
+    zero_length_candidate.path.metrics = {};
+    const auto zero_length_lcp_detail = sapr::run_detailed_routing(drc_circuit, lcp_request, zero_length_lcp_eval);
+    require(
+        zero_length_lcp_detail.traceback_failures == 0,
+        "single-point LCP candidate should be accepted as a zero-length detailed connection");
 
     const auto lcp_pair_request = make_lcp_pair_request(drc_circuit, drc_placements);
     const auto lcp_pair_eval = make_lcp_pair_evaluation(drc_circuit, drc_placements);

@@ -961,6 +961,11 @@ bool same_grid_point(const routing::GridPoint& lhs, const routing::GridPoint& rh
     return lhs.ix == rhs.ix && lhs.iy == rhs.iy && lhs.layer == rhs.layer;
 }
 
+// 判断候选金属线段是否违反 active-region DRC；在 detailed 合法化前用于触发重布线。
+bool routes_violate_active_regions(
+    const RoutingEvaluationRequest& request,
+    const std::vector<RouteSegment>& routes);
+
 std::optional<std::vector<RouteSegment>> legal_routes_without_short(
     std::vector<RouteSegment> routes,
     const std::vector<RouteSegment>& occupied_routes) {
@@ -1084,14 +1089,17 @@ bool route_segments_connect_path_endpoints(
 // 鐢熸垚鍊欓€夌殑 detailed 绾挎锛屽苟鎷掔粷鍘嬬缉鍚庢棤娉曡繛鎺ュ師濮嬭矾寰勮捣缁堢偣鐨勭粨鏋溿€?
 std::optional<std::vector<RouteSegment>> legal_candidate_routes(
     const Circuit& circuit,
+    const RoutingEvaluationRequest& request,
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate,
     const std::vector<RouteSegment>& occupied_routes,
     std::string* failure_reason = nullptr) {
-    if (!candidate.path.success || candidate.path.points.size() < 2) {
+    if (!candidate.path.success || candidate.path.points.empty()) {
         if (failure_reason != nullptr) *failure_reason = "candidate path failed";
         return std::nullopt;
     }
+    // LCP 与引脚落在同一网格点时，A* 正确返回单点路径；该连接无需写入金属线段。
+    if (candidate.path.points.size() == 1) return std::vector<RouteSegment>{};
     auto routes = detailed_path_segments(circuit, evaluation, candidate);
     if (!route_segments_connect_path_endpoints(
             routes,
@@ -1099,6 +1107,10 @@ std::optional<std::vector<RouteSegment>> legal_candidate_routes(
             candidate.path.points.front(),
             candidate.path.points.back())) {
         if (failure_reason != nullptr) *failure_reason = "candidate route segments do not connect endpoints";
+        return std::nullopt;
+    }
+    if (routes_violate_active_regions(request, routes)) {
+        if (failure_reason != nullptr) *failure_reason = "candidate route segments cross active region";
         return std::nullopt;
     }
     auto legal = legal_routes_without_short(std::move(routes), occupied_routes);
@@ -1111,6 +1123,7 @@ std::optional<std::vector<RouteSegment>> legal_candidate_routes(
 
 std::optional<DetailedLegalization> reroute_candidate_avoiding_detailed_routes(
     const Circuit& circuit,
+    const RoutingEvaluationRequest& request,
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate,
     const std::vector<RouteSegment>& occupied_routes,
@@ -1185,6 +1198,10 @@ std::optional<DetailedLegalization> reroute_candidate_avoiding_detailed_routes(
                 last_failure = "reroute route segments do not connect endpoints";
                 continue;
             }
+            if (routes_violate_active_regions(request, routes)) {
+                last_failure = "reroute route segments cross active region";
+                continue;
+            }
             auto legal_routes = legal_routes_without_short(std::move(routes), occupied_routes);
             if (!legal_routes.has_value()) {
                 last_failure = "reroute route segments short with occupied routes: " +
@@ -1208,6 +1225,7 @@ std::optional<DetailedLegalization> reroute_candidate_avoiding_detailed_routes(
 // 鎸夎鏂?detailed routing 璇箟瀵瑰€欓€夊仛灞€閮ㄥ悎娉曞寲锛氬悓 LCP 缁戝畾鍐呯殑鏇夸唬璺緞浼樺厛锛岀劧鍚?A* reroute銆?
 DetailedLegalization legalize_detailed_candidate(
     const Circuit& circuit,
+    const RoutingEvaluationRequest& request,
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& selected,
     const std::vector<RouteSegment>& occupied_routes) {
@@ -1233,7 +1251,7 @@ DetailedLegalization legalize_detailed_candidate(
     double best_legal_cost = std::numeric_limits<double>::infinity();
     for (const auto* candidate : attempts) {
         std::string failure_reason;
-        auto legal = legal_candidate_routes(circuit, evaluation, *candidate, occupied_routes, &failure_reason);
+        auto legal = legal_candidate_routes(circuit, request, evaluation, *candidate, occupied_routes, &failure_reason);
         if (legal.has_value()) {
             const auto legal_metrics = route_metrics_from_candidate_path(evaluation.context.grid(), *candidate);
             const double legal_cost = legal_metrics.cost;
@@ -1258,6 +1276,7 @@ DetailedLegalization legalize_detailed_candidate(
         std::string failure_reason;
         auto rerouted = reroute_candidate_avoiding_detailed_routes(
             circuit,
+            request,
             evaluation,
             *candidate,
             occupied_routes,
@@ -1318,6 +1337,7 @@ std::vector<std::string> ordered_lcp_locations_for_net(
 // 在固定 LCP location 下为一条支路挑选候选：同位置路径优先，再尝试同位置 reroute。
 DetailedLegalization legalize_branch_at_lcp_location(
     const Circuit& circuit,
+    const RoutingEvaluationRequest& request,
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& selected,
     const std::string& lcp_id,
@@ -1359,7 +1379,7 @@ DetailedLegalization legalize_branch_at_lcp_location(
     double best_legal_cost = std::numeric_limits<double>::infinity();
     for (const auto* candidate : attempts) {
         std::string failure_reason;
-        auto legal = legal_candidate_routes(circuit, evaluation, *candidate, occupied_routes, &failure_reason);
+        auto legal = legal_candidate_routes(circuit, request, evaluation, *candidate, occupied_routes, &failure_reason);
         if (legal.has_value()) {
             const auto legal_metrics = route_metrics_from_candidate_path(evaluation.context.grid(), *candidate);
             if (!best_legal.has_value() || legal_metrics.cost < best_legal_cost) {
@@ -1388,6 +1408,7 @@ DetailedLegalization legalize_branch_at_lcp_location(
         std::string failure_reason;
         auto rerouted = reroute_candidate_avoiding_detailed_routes(
             circuit,
+            request,
             evaluation,
             *candidate,
             occupied_routes,
@@ -1404,6 +1425,7 @@ DetailedLegalization legalize_branch_at_lcp_location(
 // 对带 LCP 的整网在提交 detailed route 前协商单一物理位置；多 LCP net 保持严格绑定。
 LcpNetLegalization legalize_lcp_net(
     const Circuit& circuit,
+    const RoutingEvaluationRequest& request,
     const RoutingEvaluation& evaluation,
     const std::vector<routing::RouteCandidate>& selected_branches,
     const std::vector<RouteSegment>& occupied_routes,
@@ -1435,7 +1457,7 @@ LcpNetLegalization legalize_lcp_net(
             bool location_ok = true;
             for (const auto& branch : selected_branches) {
                 auto legal = legalize_branch_at_lcp_location(
-                    circuit, evaluation, branch, lcp_id, location_id, tentative_occupied);
+                    circuit, request, evaluation, branch, lcp_id, location_id, tentative_occupied);
                 if (!legal.success) {
                     location_ok = false;
                     break;
@@ -1463,7 +1485,7 @@ LcpNetLegalization legalize_lcp_net(
 
     std::vector<RouteSegment> tentative_occupied = occupied_routes;
     for (const auto& branch : selected_branches) {
-        auto legal = legalize_detailed_candidate(circuit, evaluation, branch, tentative_occupied);
+        auto legal = legalize_detailed_candidate(circuit, request, evaluation, branch, tentative_occupied);
         if (!legal.success) {
             result.failure_messages.insert(
                 result.failure_messages.end(),
@@ -1689,6 +1711,13 @@ std::vector<std::size_t> collect_active_region_crossings(
     return violations;
 }
 
+// 判断整组候选金属是否包含 active-region DRC，供 detailed 候选筛选和 A* 重布线共用。
+bool routes_violate_active_regions(
+    const RoutingEvaluationRequest& request,
+    const std::vector<RouteSegment>& routes) {
+    return !collect_active_region_crossings(request, routes).empty();
+}
+
 // 鍒ゆ柇涓ゆ潯鍚屽眰寮傜綉绾挎鏄惁瀛樺湪杩戣窛绂诲钩琛岃€﹀悎椋庨櫓銆?
 // 鏀堕泦鍚屽眰寮傜綉閲戝睘閲嶅彔锛岄噸鍙犱唬琛ㄧ湡瀹炵煭璺紝涓嶈兘鍙綔涓?coupling 椋庨櫓澶勭悊銆?
 std::vector<std::pair<std::size_t, std::size_t>> collect_same_layer_shorts(const std::vector<RouteSegment>& routes) {
@@ -1780,13 +1809,6 @@ std::vector<LcpCandidateCoverage> analyze_lcp_candidate_coverage(
     return collect_lcp_candidate_coverage(request, candidates);
 }
 
-// 返回 net priority 的 detailed routing 回溯顺序权重。
-int detailed_priority_rank(Priority priority) {
-    if (priority == Priority::Symmetry) return 0;
-    if (priority == Priority::Critical) return 1;
-    return 2;
-}
-
 // 鎸夎鏂?detailed routing 浼樺厛绾ф帓搴?net route銆?
 bool module_in_symmetry_constraints(const Circuit& circuit, const std::string& module) {
     for (const auto& pair : circuit.constraints.symmetry_pairs) {
@@ -1808,12 +1830,15 @@ bool net_touches_symmetry_group(const Circuit& circuit, const std::string& net) 
     return false;
 }
 
+// 按对称关系与关键性共同确定 detailed routing 的四级提交顺序；线宽约束只参与 DRC，不降低关键网顺序。
 int detailed_net_rank(const Circuit& circuit, const std::string& net) {
-    if (net_touches_symmetry_group(circuit, net)) return 0;
     const auto found = circuit.nets.find(net);
     const Priority priority = found == circuit.nets.end() ? Priority::Normal : found->second.priority;
-    if (circuit.constraints.wire_widths.contains(net)) return 2;
-    return detailed_priority_rank(priority) + 1;
+    const bool symmetry_related = net_touches_symmetry_group(circuit, net) || priority == Priority::Symmetry;
+    if (symmetry_related && priority == Priority::Critical) return 0;
+    if (symmetry_related) return 1;
+    if (priority == Priority::Critical) return 2;
+    return 3;
 }
 
 std::vector<const routing::NetRouteChoice*> ordered_detailed_routes(
@@ -2263,7 +2288,7 @@ DetailedRoutingResult run_detailed_routing(
 
         if (is_lcp_net) {
             auto net_legal = legalize_lcp_net(
-                circuit, evaluation, group, result.routes, request.allow_lcp_location_negotiation);
+                circuit, request, evaluation, group, result.routes, request.allow_lcp_location_negotiation);
             if (!net_legal.success) {
                 for (const auto& failure : net_legal.failure_messages) {
                     trace.warnings.push_back(failure);
@@ -2292,7 +2317,7 @@ DetailedRoutingResult run_detailed_routing(
         }
 
         for (const auto& candidate : group) {
-            auto legal = legalize_detailed_candidate(circuit, evaluation, candidate, result.routes);
+            auto legal = legalize_detailed_candidate(circuit, request, evaluation, candidate, result.routes);
             if (!legal.success) {
                 for (const auto& failure : legal.failure_messages) {
                     trace.warnings.push_back(failure);
