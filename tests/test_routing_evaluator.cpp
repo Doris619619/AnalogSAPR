@@ -176,17 +176,24 @@ sapr::RoutingEvaluation make_line_evaluation(
 // 构造带 LCP 拓扑的最小 detailed routing request。
 sapr::Circuit make_priority_test_circuit() {
     sapr::Circuit circuit;
-    circuit.modules.emplace("M", sapr::Module{"M", 12.0, 12.0, sapr::Rect{5.0, 5.0, 6.0, 6.0}, 0.0, 0.0, ""});
-    circuit.module_order.push_back("M");
-    const std::vector<std::pair<std::string, double>> pins{
-        {"A", 0.0}, {"B", 9.0}, {"C", 0.0}, {"D", 9.0}, {"E", 0.0}, {"F", 9.0},
-    };
-    for (const auto& [pin, x] : pins) circuit.pins.emplace("M." + pin, sapr::Pin{"M", pin, x, 1.0, "M1"});
-    circuit.pin_order = {"M.A", "M.B", "M.C", "M.D", "M.E", "M.F"};
-    circuit.nets.emplace("SYM", sapr::Net{"SYM", sapr::Priority::Symmetry, {"M.A", "M.B"}});
-    circuit.nets.emplace("CRT", sapr::Net{"CRT", sapr::Priority::Critical, {"M.C", "M.D"}});
-    circuit.nets.emplace("NOR", sapr::Net{"NOR", sapr::Priority::Normal, {"M.E", "M.F"}});
-    circuit.net_order = {"SYM", "CRT", "NOR"};
+    for (const auto& module : {std::string{"S"}, std::string{"S_MIRROR"}, std::string{"P"}}) {
+        circuit.modules.emplace(module, sapr::Module{module, 12.0, 12.0, sapr::Rect{5.0, 5.0, 6.0, 6.0}, 0.0, 0.0, ""});
+        circuit.module_order.push_back(module);
+    }
+    for (const auto& pin : {std::string{"A"}, std::string{"B"}, std::string{"C"}, std::string{"D"}}) {
+        const double x = (pin == "A" || pin == "C") ? 0.0 : 9.0;
+        for (const auto& module : {std::string{"S"}, std::string{"P"}}) {
+            circuit.pins.emplace(module + "." + pin, sapr::Pin{module, pin, x, 1.0, "M1"});
+            circuit.pin_order.push_back(module + "." + pin);
+        }
+    }
+    circuit.constraints.symmetry_pairs.push_back({"sg", sapr::Axis::Vertical, "S", "S_MIRROR"});
+    circuit.constraints.wire_widths["SYM_CRT"] = {"SYM_CRT", 0.05, 1.0};
+    circuit.nets.emplace("SYM_CRT", sapr::Net{"SYM_CRT", sapr::Priority::Critical, {"S.A", "S.B"}});
+    circuit.nets.emplace("SYM_NOR", sapr::Net{"SYM_NOR", sapr::Priority::Normal, {"S.C", "S.D"}});
+    circuit.nets.emplace("PLAIN_CRT", sapr::Net{"PLAIN_CRT", sapr::Priority::Critical, {"P.A", "P.B"}});
+    circuit.nets.emplace("PLAIN_NOR", sapr::Net{"PLAIN_NOR", sapr::Priority::Normal, {"P.C", "P.D"}});
+    circuit.net_order = {"SYM_CRT", "SYM_NOR", "PLAIN_CRT", "PLAIN_NOR"};
     return circuit;
 }
 
@@ -248,25 +255,26 @@ sapr::RoutingEvaluation make_priority_evaluation(
         candidate.path.metrics.wirelength = 9.0;
         return candidate;
     };
-    const auto normal = make_candidate("NOR", "M.E", "M.F", 1.0);
-    const auto critical = make_candidate("CRT", "M.C", "M.D", 4.0);
-    const auto symmetry = make_candidate("SYM", "M.A", "M.B", 7.0);
+    const auto symmetric_critical = make_candidate("SYM_CRT", "S.A", "S.B", 1.0);
+    const auto symmetric_normal = make_candidate("SYM_NOR", "S.C", "S.D", 3.0);
+    const auto plain_critical = make_candidate("PLAIN_CRT", "P.A", "P.B", 7.0);
+    const auto plain_normal = make_candidate("PLAIN_NOR", "P.C", "P.D", 9.0);
 
     sapr::routing::GlobalRoutingResult global;
-    for (const auto& candidate : {normal, critical, symmetry}) {
+    for (const auto& candidate : {plain_normal, plain_critical, symmetric_normal, symmetric_critical}) {
         sapr::routing::NetRouteChoice choice;
         choice.net = candidate.net;
         choice.selected_candidates.push_back(candidate);
         global.net_routes.push_back(std::move(choice));
     }
-    global.total_metrics.wirelength = 27.0;
+    global.total_metrics.wirelength = 36.0;
 
     return sapr::RoutingEvaluation{
         std::move(context),
-        {normal, critical, symmetry},
+        {plain_normal, plain_critical, symmetric_normal, symmetric_critical},
         std::move(global),
         std::nullopt,
-        27.0,
+        36.0,
         0,
         false,
     };
@@ -1386,17 +1394,20 @@ void run_routing_evaluator_tests() {
 
     const auto priority_circuit = make_priority_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> priority_placements{
-        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+        {"S", sapr::Placement{"S", 0.0, 0.0, 0, "R0"}},
+        {"S_MIRROR", sapr::Placement{"S_MIRROR", 20.0, 0.0, 0, "R0"}},
+        {"P", sapr::Placement{"P", 40.0, 0.0, 0, "R0"}},
     };
     sapr::RoutingEvaluationRequest priority_request;
     priority_request.placements = priority_placements;
-    priority_request.placement_order = {"M"};
+    priority_request.placement_order = {"S", "S_MIRROR", "P"};
     const auto priority_eval = make_priority_evaluation(priority_circuit, priority_placements);
     const auto priority_detail = sapr::run_detailed_routing(priority_circuit, priority_request, priority_eval);
-    require(priority_detail.routes.size() >= 3, "priority detailed routing should emit one route per selected candidate");
-    require(priority_detail.routes[0].net == "SYM", "symmetry net should be detailed-routed before other priorities");
-    require(priority_detail.routes[1].net == "CRT", "critical net should be detailed-routed after symmetry net");
-    require(priority_detail.routes[2].net == "NOR", "normal net should be detailed-routed after priority nets");
+    require(priority_detail.routes.size() >= 4, "priority detailed routing should emit one route per selected candidate");
+    require(priority_detail.routes[0].net == "SYM_CRT", "symmetric critical net should be routed first");
+    require(priority_detail.routes[1].net == "SYM_NOR", "symmetric normal net should follow symmetric critical net");
+    require(priority_detail.routes[2].net == "PLAIN_CRT", "plain critical net should follow symmetric nets");
+    require(priority_detail.routes[3].net == "PLAIN_NOR", "plain normal net should be routed last");
 
     const auto reverse_packing_circuit = make_reverse_packing_order_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> reverse_packing_placements{

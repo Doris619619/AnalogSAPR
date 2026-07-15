@@ -1809,13 +1809,6 @@ std::vector<LcpCandidateCoverage> analyze_lcp_candidate_coverage(
     return collect_lcp_candidate_coverage(request, candidates);
 }
 
-// 返回 net priority 的 detailed routing 回溯顺序权重。
-int detailed_priority_rank(Priority priority) {
-    if (priority == Priority::Symmetry) return 0;
-    if (priority == Priority::Critical) return 1;
-    return 2;
-}
-
 // 鎸夎鏂?detailed routing 浼樺厛绾ф帓搴?net route銆?
 bool module_in_symmetry_constraints(const Circuit& circuit, const std::string& module) {
     for (const auto& pair : circuit.constraints.symmetry_pairs) {
@@ -1837,12 +1830,15 @@ bool net_touches_symmetry_group(const Circuit& circuit, const std::string& net) 
     return false;
 }
 
+// 按对称关系与关键性共同确定 detailed routing 的四级提交顺序；线宽约束只参与 DRC，不降低关键网顺序。
 int detailed_net_rank(const Circuit& circuit, const std::string& net) {
-    if (net_touches_symmetry_group(circuit, net)) return 0;
     const auto found = circuit.nets.find(net);
     const Priority priority = found == circuit.nets.end() ? Priority::Normal : found->second.priority;
-    if (circuit.constraints.wire_widths.contains(net)) return 2;
-    return detailed_priority_rank(priority) + 1;
+    const bool symmetry_related = net_touches_symmetry_group(circuit, net) || priority == Priority::Symmetry;
+    if (symmetry_related && priority == Priority::Critical) return 0;
+    if (symmetry_related) return 1;
+    if (priority == Priority::Critical) return 2;
+    return 3;
 }
 
 std::vector<const routing::NetRouteChoice*> ordered_detailed_routes(
