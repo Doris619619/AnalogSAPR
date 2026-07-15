@@ -1306,7 +1306,13 @@ void run_routing_evaluator_tests() {
 
     auto active_crossing_eval = make_line_evaluation(drc_circuit, drc_placements, 5.0);
     const auto active_crossing_detail = sapr::run_detailed_routing(drc_circuit, drc_request, active_crossing_eval);
-    require(active_crossing_detail.design_rule_violations > 0, "active crossing route should count as DRC");
+    require(active_crossing_detail.design_rule_violations == 0, "active crossing candidate should be legalized before final DRC");
+    require(
+        std::any_of(
+            active_crossing_detail.report.warnings.begin(),
+            active_crossing_detail.report.warnings.end(),
+            [](const auto& warning) { return warning.find("detailed routing used A* reroute fallback") != std::string::npos; }),
+        "active crossing candidate should use A* reroute fallback");
 
     // M2 从 active 上方跨过不应记为 active-region DRC；障碍也只应落在 M1。
     const auto multi_layer_active_config = sapr::routing::make_grid_config_for_routing_layers(2);
