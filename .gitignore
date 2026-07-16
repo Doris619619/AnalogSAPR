@@ -13,6 +13,14 @@ Makefile
 *.lib
 output/cpp_stage*/
 
+# 根目录 output/ 下默认 run 的即时产物（保留子目录里已入库的实验）
+/output/analysis/
+/output/btree/
+/output/*.png
+/output/*.txt
+/output/*.json
+/output/*.xlsx
+
 # IDE and local files
 .idea/
 .vscode/

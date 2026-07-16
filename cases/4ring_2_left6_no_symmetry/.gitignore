@@ -3,3 +3,7 @@ btree/
 
 # 本地 SA 调试输出，不纳入版本库
 fix_sam/
+test_by_myself_seed2_initial/
+test_by_myself_seed2_layers2_patience0_spacing0/
+test_by_myself_seed2_layers2_patience0_spacing1/
+test_by_myself_seed2_layers2_patience0_spacing2/

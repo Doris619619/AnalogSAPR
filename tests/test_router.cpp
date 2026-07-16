@@ -74,9 +74,7 @@ bool automatic_lcp_endpoints_are_resolved(const sapr::EnhancedBStarTree& tree) {
 // 构造包含一个四线段 LCP 的树，用于确定性覆盖 split 的端点重连语义。
 sapr::EnhancedBStarTree make_split_test_tree(const sapr::Circuit& circuit) {
     auto tree = sapr::make_enhanced_tree(circuit);
-    auto& asf_tree = tree.symmetry_groups.front().asf_bstar_tree;
-    auto& asf_node = asf_tree.nodes.at(asf_tree.representative_order.front());
-    auto& space = asf_node.space_node_groups.front().spaces.front();
+    auto& space = tree.nodes.at(tree.representative_order.front()).right_space;
     space.linking_points = {{"S", "", {{"N", "A", "S", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:A->S"},
                                        {"N", "B", "S", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:B->S"},
                                        {"N", "S", "C", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:S->C"},
@@ -89,10 +87,8 @@ sapr::EnhancedBStarTree make_split_test_tree(const sapr::Circuit& circuit) {
 // 构造两个同网 LCP 的树，用于确定性覆盖 merge 的全局端点重连语义。
 sapr::EnhancedBStarTree make_merge_test_tree(const sapr::Circuit& circuit) {
     auto tree = sapr::make_enhanced_tree(circuit);
-    auto& asf_tree = tree.symmetry_groups.front().asf_bstar_tree;
-    auto& asf_node = asf_tree.nodes.at(asf_tree.representative_order.front());
-    auto& first_space = asf_node.space_node_groups.front().spaces.at(0);
-    auto& second_space = asf_node.space_node_groups.front().spaces.at(1);
+    auto& first_space = tree.nodes.at(tree.representative_order.at(0)).right_space;
+    auto& second_space = tree.nodes.at(tree.representative_order.at(1)).right_space;
     first_space.linking_points = {{"A", "", {{"N", "P", "A", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:P->A"},
                                                         {"N", "A", "X", 1.0, 1.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:A->X"}},
                                                {}}};
@@ -154,6 +150,51 @@ bool topology_has_flow_path(const sapr::RoutingEvaluationRequest& request, const
         if (next != adjacency.end()) frontier.insert(frontier.end(), next->second.begin(), next->second.end());
     }
     return false;
+}
+
+// 保存模块拓扑、角度和 LCP 所属 space，用于证明一次扰动确实改变了论文表示的状态。
+struct PerturbationStateSnapshot {
+    std::vector<std::string> module_topology;
+    std::vector<std::string> module_angles;
+    std::vector<std::string> lcp_spaces;
+};
+
+// 抽取增强 B*-tree 的可比较状态，不依赖 JSON 输出顺序。
+PerturbationStateSnapshot snapshot_perturbation_state(const sapr::EnhancedBStarTree& tree) {
+    PerturbationStateSnapshot snapshot;
+    for (const auto& [id, node] : tree.nodes) {
+        snapshot.module_topology.push_back(
+            id + "|" + node.parent.value_or("root") + "|" + node.left.value_or("none") + "|" +
+            node.right.value_or("none"));
+        snapshot.module_angles.push_back(id + "|" + std::to_string(node.angle));
+    }
+    for (const auto& space : sapr::collect_space_nodes(tree)) {
+        for (const auto& point : space.linking_points) snapshot.lcp_spaces.push_back(point.id + "|" + space.id);
+    }
+    std::sort(snapshot.module_topology.begin(), snapshot.module_topology.end());
+    std::sort(snapshot.module_angles.begin(), snapshot.module_angles.end());
+    std::sort(snapshot.lcp_spaces.begin(), snapshot.lcp_spaces.end());
+    return snapshot;
+}
+
+// 对给定无对称树枚举确定性随机种子，找到指定扰动并返回扰动后的状态。
+template <typename Changed>
+void require_real_perturbation(
+    const sapr::EnhancedBStarTree& initial_tree,
+    const std::string& expected_move,
+    Changed&& changed,
+    const std::string& message) {
+    for (unsigned int seed = 0; seed < 1000; ++seed) {
+        auto tree = initial_tree;
+        const auto before = snapshot_perturbation_state(tree);
+        std::mt19937 rng(seed);
+        const auto report = sapr::perturb_placement_tree(tree, rng);
+        if (report.move != expected_move || !report.changed) continue;
+        const auto after = snapshot_perturbation_state(tree);
+        require(changed(before, after), message);
+        return;
+    }
+    require(false, "test seeds should exercise " + expected_move);
 }
 
 }  // namespace
@@ -234,6 +275,32 @@ void run_router_tests() {
             require(segment.min_width + 1e-9 < 1.0, "LCP segment min_width must not be lifted to default 1um");
         }
     }
+    // 该 case 无对称约束；逐项证明其可触发的五种 hybrid perturbation 改变了对应论文状态。
+    require_real_perturbation(
+        no_symmetry_tree,
+        "module-swap",
+        [](const auto& before, const auto& after) { return before.module_topology != after.module_topology; },
+        "module swap should exchange non-ancestor module positions");
+    require_real_perturbation(
+        no_symmetry_tree,
+        "module-delete-insert",
+        [](const auto& before, const auto& after) { return before.module_topology != after.module_topology; },
+        "module delete-insert should change tree topology");
+    require_real_perturbation(
+        no_symmetry_tree,
+        "module-rotate",
+        [](const auto& before, const auto& after) { return before.module_angles != after.module_angles; },
+        "module rotate should change at least one module angle");
+    require_real_perturbation(
+        no_symmetry_tree,
+        "lcp-delete-insert",
+        [](const auto& before, const auto& after) { return before.lcp_spaces != after.lcp_spaces; },
+        "LCP delete-insert should move an LCP to another space node");
+    require_real_perturbation(
+        no_symmetry_tree,
+        "lcp-swap",
+        [](const auto& before, const auto& after) { return before.lcp_spaces != after.lcp_spaces; },
+        "LCP swap should exchange LCP space-node ownership");
 
     const auto two_group_circuit = sapr::load_circuit(
         std::filesystem::path(SAPR_SOURCE_DIR) / "cases" / "4ring_2_complex_symmetry_perturbed_2groups" / "input");
@@ -431,7 +498,7 @@ void run_router_tests() {
 
     bool split_executed = false;
     for (unsigned int seed = 0; seed < 1000 && !split_executed; ++seed) {
-        auto split_tree = make_split_test_tree(circuit);
+        auto split_tree = make_split_test_tree(no_symmetry_circuit);
         std::mt19937 split_rng(seed);
         const auto report = sapr::perturb_placement_tree(split_tree, split_rng);
         if (report.move != "lcp-split" || !report.changed) continue;
@@ -453,7 +520,7 @@ void run_router_tests() {
 
     bool merge_executed = false;
     for (unsigned int seed = 0; seed < 1000 && !merge_executed; ++seed) {
-        auto merge_tree = make_merge_test_tree(circuit);
+        auto merge_tree = make_merge_test_tree(no_symmetry_circuit);
         std::mt19937 merge_rng(seed);
         const auto report = sapr::perturb_placement_tree(merge_tree, merge_rng);
         if (report.move != "lcp-merge" || !report.changed) continue;

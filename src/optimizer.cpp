@@ -1598,7 +1598,7 @@ RoutingEvaluationRequest pack_enhanced_tree(
     return request;
 }
 
-// 浣跨敤 routing adapter 璇勪环褰撳墠 placement candidate銆?
+// 使用最终 RouteSegment 统一汇总布局布线指标，避免多层 detailed 路由内部统计与输出走线不一致。
 RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const RoutingEvaluationRequest& request) {
     RoutingFeedback feedback;
     const auto routing_evaluation = evaluate_routing(circuit, request);
@@ -1609,16 +1609,12 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     solution.placement_order = request.placement_order;
     solution.routes = feedback.routes;
     feedback.metrics = measure(circuit, solution);
-    // 鍏堝浐鍖?global 闃舵蹇収锛涙渶缁?wirelength/bend/via 鍙 detailed 瑕嗙洊锛屼簩鑰呬笉寰楁贩鍐欍€?
+    // 固化 global 阶段快照；有最终 detailed 路由时，最终几何指标保持为上面按 RouteSegment 重算的结果。
     feedback.metrics.global_wirelength = routing_evaluation.global_routing.total_metrics.wirelength;
     feedback.metrics.global_bend_count = routing_evaluation.global_routing.total_metrics.bend_count;
     feedback.metrics.global_via_count = routing_evaluation.global_routing.total_metrics.via_count;
     feedback.metrics.global_penalty = routing_evaluation.global_routing.total_penalty;
-    if (!detailed.routes.empty()) {
-        feedback.metrics.wirelength = detailed.detailed_wirelength;
-        feedback.metrics.bend_count = detailed.detailed_bend_count;
-        feedback.metrics.via_count = detailed.detailed_via_count;
-    } else {
+    if (detailed.routes.empty()) {
         feedback.metrics.wirelength = feedback.metrics.global_wirelength;
         feedback.metrics.bend_count = feedback.metrics.global_bend_count;
         feedback.metrics.via_count = feedback.metrics.global_via_count;
@@ -1743,6 +1739,9 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
     sa_progress.reserve(static_cast<std::size_t>(config.sa_iterations));
     std::vector<SaBtreeIterationTrace> sa_btree_iterations;
     if (config.dump_sa_btree) sa_btree_iterations.reserve(static_cast<std::size_t>(config.sa_iterations));
+    int stagnant_iterations = 0;
+    bool sa_terminated_early = false;
+    std::string sa_termination_reason;
     for (int iteration = 0; iteration < config.sa_iterations; ++iteration) {
         // 同一 SA 温度轮内重采样，避免不可执行的 LCP 操作消耗一次退火迭代。
         constexpr int max_perturbation_attempts = 8;
@@ -1782,7 +1781,16 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
         const bool next_feedback_converged = next.feedback.metrics.routing_feedback_converged;
         const int next_space_feedback_nodes = next.feedback.metrics.space_feedback_nodes;
         if (accept) current = std::move(next);
-        if (current.cost < best.cost) best = current;
+        const double best_improvement = best.cost - current.cost;
+        if (best_improvement > config.sa_convergence_tolerance) {
+            best = current;
+            stagnant_iterations = 0;
+        } else {
+            if (current.cost < best.cost) best = current;
+            if (config.sa_convergence_tolerance > 0.0 && config.sa_convergence_patience > 0) {
+                ++stagnant_iterations;
+            }
+        }
         // 榛樿杈撳嚭杞婚噺 SA 杩涘害锛岄伩鍏嶉暱璇勪及鏃剁粓绔湅璧锋潵鍍忓崱浣忋€?
         std::cerr << "[sa] " << (iteration + 1) << '/' << config.sa_iterations
                   << " move=" << perturbation.move
@@ -1821,10 +1829,22 @@ Solution solve_placement_aware(const Circuit& circuit, const SolverConfig& confi
                       << " row_overflow=" << current.feedback.metrics.row_width_overflow
                       << '\n';
         }
+        if (config.sa_convergence_tolerance > 0.0 && config.sa_convergence_patience > 0 &&
+            stagnant_iterations >= config.sa_convergence_patience) {
+            sa_terminated_early = true;
+            sa_termination_reason = "best-cost improvement stayed within " +
+                std::to_string(config.sa_convergence_tolerance) + " for " +
+                std::to_string(config.sa_convergence_patience) + " consecutive iterations";
+            std::cerr << "[sa] early-stop: " << sa_termination_reason << '\n' << std::flush;
+            break;
+        }
         temperature *= config.cooling_rate;
     }
 
-    return make_solution(best, std::move(sa_progress), std::move(sa_btree_iterations));
+    auto solution = make_solution(best, std::move(sa_progress), std::move(sa_btree_iterations));
+    solution.sa_terminated_early = sa_terminated_early;
+    solution.sa_termination_reason = std::move(sa_termination_reason);
+    return solution;
 }
 
 // 淇濇寔鍘嗗彶 CLI/API 鍚嶇О锛屽綋鍓嶉粯璁ゆ寚鍚戣鏂?placement-aware 姹傝В娴佺▼銆?

@@ -116,9 +116,10 @@ OK
 
 未指定 `--boundary-margin` 时，程序按最大线宽的一半、边界 clearance 和两倍有效网格步长自动估算；该参数独立于器件间 `--spacing`。
 
-布线金属层数默认仅 `M1`（`--routing-layers 1`），避免高层逃逸掩盖 placement/拓扑问题。需要有限 via 或恢复旧多层行为时：
+布线金属层数默认使用 `M1`、`M2`（`--routing-layers 2`），与论文实验设置一致，并避免单层布线因不可绕开的交叉而产生短路。需要进行严格的平面合法性调试时可显式指定单层；需要更多层时：
 
 ```powershell
+.\build\sapr.exe run --input input --output output --routing-layers 1
 .\build\sapr.exe run --input input --output output --routing-layers 3
 .\build\sapr.exe run --input input --output output --routing-layers 7
 ```
@@ -177,8 +178,9 @@ IO/
     ├── *_layout.png       # 全层合并布局布线图
     ├── *_layout_M*.png    # 多层时按层分图（可选）
     ├── metrics.json       # 指标与 routing_evaluation 摘要
-    ├── routing_debug.json # 布线诊断详情
-    └── routing_debug.json # 每次 run 自动生成的 routing 诊断快照
+    ├── sa_trace.json      # SA 每轮代价/接受记录
+    ├── analysis/          # SA 诊断图（代价曲线、温度接受率、扰动统计）
+    └── routing_debug.json # 布线诊断详情
 ```
 
 ---
