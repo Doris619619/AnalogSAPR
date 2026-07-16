@@ -1616,6 +1616,14 @@ void run_routing_evaluator_tests() {
     require(
         !missing_segment_dp.best_state.failure_messages.empty(),
         "missing required wire segment should be recorded in DP failure messages");
+    require(
+        std::any_of(
+            missing_segment_dp.best_state.failure_messages.begin(),
+            missing_segment_dp.best_state.failure_messages.end(),
+            [](const std::string& message) {
+                return message.find("no DP-compatible A* candidate") != std::string::npos;
+            }),
+        "DP failure should distinguish missing state-compatible candidates from A* path generation failure");
 
     auto expensive_left = make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:a", 9.0, 1.0);
     expensive_left.segment_id = "N:left";

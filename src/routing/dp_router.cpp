@@ -707,12 +707,16 @@ void apply_segment_transition(
     std::vector<RoutingDpState> next_states;
     for (const auto& state : states) {
         bool selected_any = false;
+        std::vector<std::string> rejection_reasons;
         for (const auto& candidate : group.candidates) {
             if (!candidate_matches_group(candidate, group)) continue;
             RoutingDpState next = state;
             const auto append_result = append_candidate_if_consistent(next, candidate, context);
             append_candidate_event(candidate_events, group, state, candidate, append_result);
-            if (!append_result.accepted) continue;
+            if (!append_result.accepted) {
+                append_unique(rejection_reasons, append_result.reason);
+                continue;
+            }
             append_candidate_packing_trace(next, candidate, lcp_owner_by_id, lcp_space_by_id, trace_index);
             selected_any = true;
             next_states.push_back(std::move(next));
@@ -721,7 +725,10 @@ void apply_segment_transition(
             RoutingDpState failed = state;
             failed.penalty += kMissingSegmentPenalty;
             append_unique(failed.covered_wire_segments, group.key);
-            std::string message = "missing successful A* candidate for " + group.key;
+            std::string message = "no DP-compatible A* candidate for " + group.key;
+            for (const auto& reason : rejection_reasons) {
+                message += " [rejected: " + reason + "]";
+            }
             bool has_multi_terminal_missing = false;
             for (const auto& candidate : group.candidates) {
                 if (!candidate_matches_group(candidate, group)) continue;
