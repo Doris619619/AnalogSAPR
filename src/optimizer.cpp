@@ -395,6 +395,44 @@ void write_dp_result_json(std::ostringstream& out, const std::optional<routing::
     out << "}}";
 }
 
+// 写出每个 DP tree node 保留的 state，定位某个 LCP binding 在 beam pruning 后的消失位置。
+void write_dp_node_states_json(std::ostringstream& out, const std::optional<routing::RoutingDpResult>& result) {
+    out << '[';
+    if (!result.has_value()) {
+        out << ']';
+        return;
+    }
+    for (std::size_t node_index = 0; node_index < result->node_results.size(); ++node_index) {
+        if (node_index != 0) out << ',';
+        const auto& node = result->node_results[node_index];
+        out << "{\"tree_node\": ";
+        write_json_string(out, node.tree_node);
+        out << ", \"states\": [";
+        for (std::size_t state_index = 0; state_index < node.states.size(); ++state_index) {
+            if (state_index != 0) out << ',';
+            const auto& state = node.states[state_index];
+            std::vector<std::pair<std::string, std::string>> bindings(
+                state.lcp_location_by_id.begin(), state.lcp_location_by_id.end());
+            std::sort(bindings.begin(), bindings.end());
+            out << "{\"id\": " << state.id << ", \"cost\": " << state.cost
+                << ", \"lcp_bindings\": {";
+            for (std::size_t binding_index = 0; binding_index < bindings.size(); ++binding_index) {
+                if (binding_index != 0) out << ',';
+                write_json_string(out, bindings[binding_index].first);
+                out << ':';
+                write_json_string(out, bindings[binding_index].second);
+            }
+            out << "}, \"covered_wire_segments\": ";
+            write_json_string_array(out, state.covered_wire_segments);
+            out << ", \"failure_messages\": ";
+            write_json_string_array(out, state.failure_messages);
+            out << '}';
+        }
+        out << "]}";
+    }
+    out << ']';
+}
+
 // 鍐欏嚭 detailed traceback 涓嚭鐜扮殑 pin/LCP 鑺傜偣銆?
 void write_detailed_node_json(std::ostringstream& out, const DetailedRouteNode& node) {
     out << "{\"id\": ";
@@ -590,6 +628,9 @@ std::string make_routing_debug_json(
         << "},\n";
     out << "  \"bottom_up_dp\": ";
     write_dp_result_json(out, evaluation.bottom_up_dp);
+    out << ",\n";
+    out << "  \"dp_node_states\": ";
+    write_dp_node_states_json(out, evaluation.bottom_up_dp);
     out << ",\n";
     write_debug_topologies_json(out, request);
     out << ",\n";
