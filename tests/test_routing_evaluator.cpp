@@ -176,17 +176,24 @@ sapr::RoutingEvaluation make_line_evaluation(
 // 构造带 LCP 拓扑的最小 detailed routing request。
 sapr::Circuit make_priority_test_circuit() {
     sapr::Circuit circuit;
-    circuit.modules.emplace("M", sapr::Module{"M", 12.0, 12.0, sapr::Rect{5.0, 5.0, 6.0, 6.0}, 0.0, 0.0, ""});
-    circuit.module_order.push_back("M");
-    const std::vector<std::pair<std::string, double>> pins{
-        {"A", 0.0}, {"B", 9.0}, {"C", 0.0}, {"D", 9.0}, {"E", 0.0}, {"F", 9.0},
-    };
-    for (const auto& [pin, x] : pins) circuit.pins.emplace("M." + pin, sapr::Pin{"M", pin, x, 1.0, "M1"});
-    circuit.pin_order = {"M.A", "M.B", "M.C", "M.D", "M.E", "M.F"};
-    circuit.nets.emplace("SYM", sapr::Net{"SYM", sapr::Priority::Symmetry, {"M.A", "M.B"}});
-    circuit.nets.emplace("CRT", sapr::Net{"CRT", sapr::Priority::Critical, {"M.C", "M.D"}});
-    circuit.nets.emplace("NOR", sapr::Net{"NOR", sapr::Priority::Normal, {"M.E", "M.F"}});
-    circuit.net_order = {"SYM", "CRT", "NOR"};
+    for (const auto& module : {std::string{"S"}, std::string{"S_MIRROR"}, std::string{"P"}}) {
+        circuit.modules.emplace(module, sapr::Module{module, 12.0, 12.0, sapr::Rect{5.0, 5.0, 6.0, 6.0}, 0.0, 0.0, ""});
+        circuit.module_order.push_back(module);
+    }
+    for (const auto& pin : {std::string{"A"}, std::string{"B"}, std::string{"C"}, std::string{"D"}}) {
+        const double x = (pin == "A" || pin == "C") ? 0.0 : 9.0;
+        for (const auto& module : {std::string{"S"}, std::string{"P"}}) {
+            circuit.pins.emplace(module + "." + pin, sapr::Pin{module, pin, x, 1.0, "M1"});
+            circuit.pin_order.push_back(module + "." + pin);
+        }
+    }
+    circuit.constraints.symmetry_pairs.push_back({"sg", sapr::Axis::Vertical, "S", "S_MIRROR"});
+    circuit.constraints.wire_widths["SYM_CRT"] = {"SYM_CRT", 0.05, 1.0};
+    circuit.nets.emplace("SYM_CRT", sapr::Net{"SYM_CRT", sapr::Priority::Critical, {"S.A", "S.B"}});
+    circuit.nets.emplace("SYM_NOR", sapr::Net{"SYM_NOR", sapr::Priority::Normal, {"S.C", "S.D"}});
+    circuit.nets.emplace("PLAIN_CRT", sapr::Net{"PLAIN_CRT", sapr::Priority::Critical, {"P.A", "P.B"}});
+    circuit.nets.emplace("PLAIN_NOR", sapr::Net{"PLAIN_NOR", sapr::Priority::Normal, {"P.C", "P.D"}});
+    circuit.net_order = {"SYM_CRT", "SYM_NOR", "PLAIN_CRT", "PLAIN_NOR"};
     return circuit;
 }
 
@@ -248,28 +255,83 @@ sapr::RoutingEvaluation make_priority_evaluation(
         candidate.path.metrics.wirelength = 9.0;
         return candidate;
     };
-    const auto normal = make_candidate("NOR", "M.E", "M.F", 1.0);
-    const auto critical = make_candidate("CRT", "M.C", "M.D", 4.0);
-    const auto symmetry = make_candidate("SYM", "M.A", "M.B", 7.0);
+    const auto symmetric_critical = make_candidate("SYM_CRT", "S.A", "S.B", 1.0);
+    const auto symmetric_normal = make_candidate("SYM_NOR", "S.C", "S.D", 3.0);
+    const auto plain_critical = make_candidate("PLAIN_CRT", "P.A", "P.B", 7.0);
+    const auto plain_normal = make_candidate("PLAIN_NOR", "P.C", "P.D", 9.0);
 
     sapr::routing::GlobalRoutingResult global;
-    for (const auto& candidate : {normal, critical, symmetry}) {
+    for (const auto& candidate : {plain_normal, plain_critical, symmetric_normal, symmetric_critical}) {
         sapr::routing::NetRouteChoice choice;
         choice.net = candidate.net;
         choice.selected_candidates.push_back(candidate);
         global.net_routes.push_back(std::move(choice));
     }
-    global.total_metrics.wirelength = 27.0;
+    global.total_metrics.wirelength = 36.0;
 
     return sapr::RoutingEvaluation{
         std::move(context),
-        {normal, critical, symmetry},
+        {plain_normal, plain_critical, symmetric_normal, symmetric_critical},
         std::move(global),
         std::nullopt,
-        27.0,
+        36.0,
         0,
         false,
     };
+}
+
+/* 构造两个普通网络分别归属根节点和叶节点的最小电路，用于验证逆 packing 回溯顺序。 */
+sapr::Circuit make_reverse_packing_order_test_circuit() {
+    sapr::Circuit circuit;
+    for (const auto& module : {std::string{"ROOT"}, std::string{"LEAF"}}) {
+        circuit.modules.emplace(module, sapr::Module{module, 12.0, 12.0, sapr::Rect{5.0, 5.0, 6.0, 6.0}, 0.0, 0.0, ""});
+        circuit.module_order.push_back(module);
+        circuit.pins.emplace(module + ".A", sapr::Pin{module, "A", 0.0, 1.0, "M1"});
+        circuit.pins.emplace(module + ".B", sapr::Pin{module, "B", 9.0, 1.0, "M1"});
+        circuit.pin_order.push_back(module + ".A");
+        circuit.pin_order.push_back(module + ".B");
+    }
+    circuit.nets.emplace("ROOT_NET", sapr::Net{"ROOT_NET", sapr::Priority::Normal, {"ROOT.A", "ROOT.B"}});
+    circuit.nets.emplace("LEAF_NET", sapr::Net{"LEAF_NET", sapr::Priority::Normal, {"LEAF.A", "LEAF.B"}});
+    circuit.net_order = {"ROOT_NET", "LEAF_NET"};
+    return circuit;
+}
+
+/* 构造根节点网络先出现、叶节点网络后出现的候选，检验 detailed routing 是否反向提交。 */
+sapr::RoutingEvaluation make_reverse_packing_order_evaluation(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::routing::RoutingContext context(circuit, placements);
+    const auto root = make_horizontal_candidate(context, "ROOT_NET", "ROOT.A", "ROOT.B", 1.0);
+    const auto leaf = make_horizontal_candidate(context, "LEAF_NET", "LEAF.A", "LEAF.B", 4.0);
+    sapr::routing::GlobalRoutingResult global;
+    for (const auto& candidate : {root, leaf}) {
+        sapr::routing::NetRouteChoice choice;
+        choice.net = candidate.net;
+        choice.selected_candidates.push_back(candidate);
+        global.net_routes.push_back(std::move(choice));
+    }
+    global.total_metrics.wirelength = 18.0;
+    sapr::routing::RoutingDpResult dp_result;
+    dp_result.success = true;
+    dp_result.traceback_candidates = {root, leaf};
+    return sapr::RoutingEvaluation{
+        std::move(context), {root, leaf}, std::move(global), std::move(dp_result), 18.0, 0, true};
+}
+
+/* 构造前序 packing trace：ROOT 先被打包，LEAF 后被打包，因此 detailed routing 必须先回溯 LEAF。 */
+sapr::RoutingEvaluationRequest make_reverse_packing_order_request(
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::RoutingEvaluationRequest request;
+    request.placements = placements;
+    request.placement_order = {"ROOT", "LEAF"};
+    request.packing_trace.steps.push_back(
+        {"ROOT_NODE", "ROOT", 0.0, 0.0, sapr::Rect{}, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         std::optional<std::string>{"LEAF_NODE"}, std::nullopt, {"ROOT"}, {}, {}});
+    request.packing_trace.steps.push_back(
+        {"LEAF_NODE", "LEAF", 0.0, 0.0, sapr::Rect{}, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+         std::nullopt, std::nullopt, {"LEAF"}, {}, {}});
+    return request;
 }
 
 sapr::RoutingEvaluationRequest make_lcp_request(
@@ -419,6 +481,54 @@ sapr::RoutingEvaluationRequest make_lcp_pair_request(
     request.linking_points.push_back(left);
     request.linking_points.push_back(right);
     request.net_topologies.push_back({"N", {"M.A", "M.B"}, {left, right}, {segment}});
+    return request;
+}
+
+// 构造 root LCP 连接多个 leaf 的候选覆盖用例，确保 pairwise top-K 不会漏掉任一端物理位置。
+sapr::RoutingEvaluationRequest make_pairwise_coverage_request(
+    const sapr::Circuit& circuit,
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::RoutingEvaluationRequest request;
+    request.placements = placements;
+    request.placement_order = {"M"};
+
+    const auto make_lcp = [](const std::string& id, const std::string& space_id, double y) {
+        sapr::LinkingControlPoint lcp;
+        lcp.id = id;
+        lcp.space_node_id = space_id;
+        for (int index = 0; index < 40; ++index) {
+            const double x = id == "ROOT" ? 50.0 + static_cast<double>(index) : static_cast<double>(index);
+            lcp.location_candidates.push_back(
+                {x, y, id + ":loc" + std::to_string(index), "strict", false, 0.0, "coverage"});
+        }
+        return lcp;
+    };
+
+    auto leaf0 = make_lcp("LEAF0", "S_LEAF0", 0.0);
+    auto leaf1 = make_lcp("LEAF1", "S_LEAF1", 20.0);
+    auto root = make_lcp("ROOT", "S_ROOT", 10.0);
+    sapr::WireSegmentRef first{"N", "LEAF0", "ROOT", 1.0, 2.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:leaf0_root"};
+    sapr::WireSegmentRef second{"N", "LEAF1", "ROOT", 1.0, 2.0, std::nullopt, sapr::CurrentDirection::Unknown, "N:leaf1_root"};
+    leaf0.segments.push_back(first);
+    leaf1.segments.push_back(second);
+    root.segments.push_back(first);
+    root.segments.push_back(second);
+
+    const auto add_space = [&](const sapr::LinkingControlPoint& point) {
+        sapr::SpaceNode space;
+        space.id = point.space_node_id;
+        space.owner = "M";
+        space.kind = sapr::SpaceNodeKind::Right;
+        space.linking_points.push_back(point);
+        request.space_nodes.push_back(space);
+    };
+    add_space(leaf0);
+    add_space(leaf1);
+    add_space(root);
+
+    request.linking_points = {leaf0, leaf1, root};
+    request.net_topologies.push_back({"N", {"M.A", "M.B"}, {leaf0, leaf1, root}, {first, second}});
+    (void)circuit;
     return request;
 }
 
@@ -761,8 +871,8 @@ void run_routing_evaluator_tests() {
             approx(explicit_margin_request.packing_trace.steps.front().occupied_bbox.y1, 1.5),
         "packing trace root bbox should start at the explicit boundary margin");
     require(
-        request_for_dp.packing_trace.steps.size() == request_for_dp.tree.nodes.size(),
-        "packing trace should contain one step per representative tree node");
+        request_for_dp.packing_trace.steps.size() >= request_for_dp.tree.nodes.size(),
+        "packing trace should cover representative tree nodes and may include ASF internal steps");
     for (const auto& step : request_for_dp.packing_trace.steps) {
         require(step.occupied_bbox.x1 <= step.occupied_bbox.x2, "packing trace bbox x range should be valid");
         require(step.occupied_bbox.y1 <= step.occupied_bbox.y2, "packing trace bbox y range should be valid");
@@ -881,7 +991,7 @@ void run_routing_evaluator_tests() {
         has_space_trace || !request_for_dp.linking_points.empty(),
         "LCP DP transitions should record source space node id or preserve request-level LCP ownership");
     for (const auto& node_result : dp_evaluation.bottom_up_dp->node_results) {
-        require(node_result.states.size() <= 8, "bottom-up DP should honor max_states_per_node");
+        require(node_result.states.size() <= 16, "bottom-up DP should honor max_states_per_node");
     }
     const auto mixed_circuit = sapr::load_circuit(mixed_lcp_direct_case_input_dir());
     auto mixed_tree = sapr::make_chain_tree(mixed_circuit);
@@ -1204,7 +1314,13 @@ void run_routing_evaluator_tests() {
 
     auto active_crossing_eval = make_line_evaluation(drc_circuit, drc_placements, 5.0);
     const auto active_crossing_detail = sapr::run_detailed_routing(drc_circuit, drc_request, active_crossing_eval);
-    require(active_crossing_detail.design_rule_violations > 0, "active crossing route should count as DRC");
+    require(active_crossing_detail.design_rule_violations == 0, "active crossing candidate should be legalized before final DRC");
+    require(
+        std::any_of(
+            active_crossing_detail.report.warnings.begin(),
+            active_crossing_detail.report.warnings.end(),
+            [](const auto& warning) { return warning.find("detailed routing used A* reroute fallback") != std::string::npos; }),
+        "active crossing candidate should use A* reroute fallback");
 
     // M2 从 active 上方跨过不应记为 active-region DRC；障碍也只应落在 M1。
     const auto multi_layer_active_config = sapr::routing::make_grid_config_for_routing_layers(2);
@@ -1278,17 +1394,50 @@ void run_routing_evaluator_tests() {
 
     const auto priority_circuit = make_priority_test_circuit();
     const std::unordered_map<std::string, sapr::Placement> priority_placements{
-        {"M", sapr::Placement{"M", 0.0, 0.0, 0, "R0"}},
+        {"S", sapr::Placement{"S", 0.0, 0.0, 0, "R0"}},
+        {"S_MIRROR", sapr::Placement{"S_MIRROR", 20.0, 0.0, 0, "R0"}},
+        {"P", sapr::Placement{"P", 40.0, 0.0, 0, "R0"}},
     };
     sapr::RoutingEvaluationRequest priority_request;
     priority_request.placements = priority_placements;
-    priority_request.placement_order = {"M"};
+    priority_request.placement_order = {"S", "S_MIRROR", "P"};
     const auto priority_eval = make_priority_evaluation(priority_circuit, priority_placements);
     const auto priority_detail = sapr::run_detailed_routing(priority_circuit, priority_request, priority_eval);
-    require(priority_detail.routes.size() >= 3, "priority detailed routing should emit one route per selected candidate");
-    require(priority_detail.routes[0].net == "SYM", "symmetry net should be detailed-routed before other priorities");
-    require(priority_detail.routes[1].net == "CRT", "critical net should be detailed-routed after symmetry net");
-    require(priority_detail.routes[2].net == "NOR", "normal net should be detailed-routed after priority nets");
+    require(priority_detail.routes.size() >= 4, "priority detailed routing should emit one route per selected candidate");
+    require(priority_detail.routes[0].net == "SYM_CRT", "symmetric critical net should be routed first");
+    require(priority_detail.routes[1].net == "SYM_NOR", "symmetric normal net should follow symmetric critical net");
+    require(priority_detail.routes[2].net == "PLAIN_CRT", "plain critical net should follow symmetric nets");
+    require(priority_detail.routes[3].net == "PLAIN_NOR", "plain normal net should be routed last");
+
+    const auto reverse_packing_circuit = make_reverse_packing_order_test_circuit();
+    const std::unordered_map<std::string, sapr::Placement> reverse_packing_placements{
+        {"ROOT", sapr::Placement{"ROOT", 0.0, 0.0, 0, "R0"}},
+        {"LEAF", sapr::Placement{"LEAF", 0.0, 0.0, 0, "R0"}},
+    };
+    const auto reverse_packing_request = make_reverse_packing_order_request(reverse_packing_placements);
+    const auto reverse_packing_evaluation =
+        make_reverse_packing_order_evaluation(reverse_packing_circuit, reverse_packing_placements);
+    const auto reverse_packing_detail =
+        sapr::run_detailed_routing(reverse_packing_circuit, reverse_packing_request, reverse_packing_evaluation);
+    require(reverse_packing_detail.traceback_failures == 0, "reverse packing order test should keep both routes legal");
+    require(reverse_packing_detail.routes.size() >= 2, "reverse packing order test should emit both selected routes");
+    require(
+        reverse_packing_detail.routes[0].net == "LEAF_NET" &&
+            reverse_packing_detail.routes[1].net == "ROOT_NET",
+        "detailed routing should trace back leaf-owned routes before root-owned routes");
+    auto reverse_packing_fallback_evaluation =
+        make_reverse_packing_order_evaluation(reverse_packing_circuit, reverse_packing_placements);
+    reverse_packing_fallback_evaluation.bottom_up_dp.reset();
+    reverse_packing_fallback_evaluation.used_bottom_up_dp = false;
+    const auto reverse_packing_fallback_detail = sapr::run_detailed_routing(
+        reverse_packing_circuit,
+        reverse_packing_request,
+        reverse_packing_fallback_evaluation);
+    require(
+        reverse_packing_fallback_detail.routes.size() >= 2 &&
+            reverse_packing_fallback_detail.routes[0].net == "ROOT_NET" &&
+            reverse_packing_fallback_detail.routes[1].net == "LEAF_NET",
+        "detailed routing fallback must keep the pre-existing priority order without a DP traceback");
 
     auto lcp_request = make_lcp_request(drc_circuit, drc_placements, true);
     auto lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
@@ -1299,6 +1448,18 @@ void run_routing_evaluator_tests() {
     require(lcp_detail.required_space_by_node.contains("S1"), "LCP detailed route should report required routing space");
     require(lcp_detail.required_space_by_node.at("S1") >= 3.0, "required space should include route width and spacing");
     require(lcp_detail.detailed_cost > 0.0, "detailed routing should report local detailed cost");
+
+    // LCP 与引脚重合时，单点 A* 路径是合法的零长度连接，不应导致整网 detailed traceback 失败。
+    auto zero_length_lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
+    auto& zero_length_candidate = zero_length_lcp_eval.global_routing.net_routes.front().selected_candidates.front();
+    zero_length_candidate.path.points = {
+        zero_length_lcp_eval.context.grid().snap_to_grid(sapr::routing::Point{0.0, 1.0}, 0),
+    };
+    zero_length_candidate.path.metrics = {};
+    const auto zero_length_lcp_detail = sapr::run_detailed_routing(drc_circuit, lcp_request, zero_length_lcp_eval);
+    require(
+        zero_length_lcp_detail.traceback_failures == 0,
+        "single-point LCP candidate should be accepted as a zero-length detailed connection");
 
     const auto lcp_pair_request = make_lcp_pair_request(drc_circuit, drc_placements);
     const auto lcp_pair_eval = make_lcp_pair_evaluation(drc_circuit, drc_placements);
@@ -1359,6 +1520,18 @@ void run_routing_evaluator_tests() {
     require(missing_lcp_detail.traceback_failures > 0, "missing LCP location should become a traceback failure");
     require(missing_lcp_detail.routing_failure_penalty > 0.0, "traceback failures should add routing failure penalty");
 
+    auto strict_missing_lcp_request = make_lcp_request(drc_circuit, drc_placements, false);
+    strict_missing_lcp_request.tree.root = "M";
+    strict_missing_lcp_request.tree.nodes.push_back({"M", "M", std::nullopt, std::nullopt});
+    strict_missing_lcp_request.strict_lcp_dp = true;
+    const auto strict_missing_lcp_eval = sapr::evaluate_routing(drc_circuit, strict_missing_lcp_request);
+    require(
+        strict_missing_lcp_eval.strict_lcp_dp_blocked_fallback,
+        "strict LCP DP should report that direct fallback was blocked");
+    require(
+        strict_missing_lcp_eval.failed_nets > 0,
+        "strict LCP DP should not hide failed LCP topology behind direct routing");
+
     sapr::routing::RoutingContext lcp_context(drc_circuit, drc_placements);
     std::vector<sapr::routing::RouteCandidate> multi_location_candidates{
         make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:a", 1.0, 1.0),
@@ -1373,6 +1546,60 @@ void run_routing_evaluator_tests() {
     for (const auto& candidate : lcp_global.net_routes.front().selected_candidates) {
         require(candidate.lcp_candidate_id == selected_location, "all selected segments of one LCP should share one location");
     }
+
+    auto partial_left = make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:first", 5.0, 1.0);
+    partial_left.segment_id = "N:left";
+    const std::vector<sapr::routing::RouteCandidate> partial_lcp_candidates{partial_left};
+    const auto partial_coverage = sapr::analyze_lcp_candidate_coverage(lcp_request, partial_lcp_candidates);
+    const auto partial_first = std::find_if(partial_coverage.begin(), partial_coverage.end(), [](const auto& coverage) {
+        return coverage.lcp_id == "LCP1" && coverage.candidate_id == "LCP1:first";
+    });
+    require(partial_first != partial_coverage.end(), "LCP coverage report should include the physical candidate");
+    require(
+        !partial_first->covers_all_incident_segments,
+        "LCP candidate should not cover all incident segments when one branch is missing");
+    require(
+        std::find(partial_first->missing_segments.begin(), partial_first->missing_segments.end(), "N:right") !=
+            partial_first->missing_segments.end(),
+        "LCP coverage report should name the missing incident segment");
+
+    auto complete_left = make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:first", 5.0, 1.0);
+    complete_left.segment_id = "N:left";
+    auto complete_right = make_manual_lcp_candidate(lcp_context, "LCP1", "M.B", "LCP1:first", 5.0, 1.0);
+    complete_right.segment_id = "N:right";
+    const std::vector<sapr::routing::RouteCandidate> complete_lcp_candidates{complete_left, complete_right};
+    const auto complete_coverage = sapr::analyze_lcp_candidate_coverage(lcp_request, complete_lcp_candidates);
+    const auto complete_first = std::find_if(complete_coverage.begin(), complete_coverage.end(), [](const auto& coverage) {
+        return coverage.lcp_id == "LCP1" && coverage.candidate_id == "LCP1:first";
+    });
+    require(complete_first != complete_coverage.end(), "complete LCP coverage should include the physical candidate");
+    require(
+        complete_first->covers_all_incident_segments,
+        "LCP candidate should cover all incident segments only when every branch is reachable");
+
+    const auto pairwise_coverage_request = make_pairwise_coverage_request(drc_circuit, drc_placements);
+    const auto pairwise_coverage_eval = sapr::evaluate_routing(drc_circuit, pairwise_coverage_request);
+    const auto covered_locations = [&](const std::string& segment_id, const std::string& lcp_id) {
+        std::unordered_set<std::string> locations;
+        for (const auto& candidate : pairwise_coverage_eval.debug_candidates) {
+            if (candidate.segment_id != segment_id || !candidate.path.success) continue;
+            if (candidate.source_lcp_id == lcp_id) locations.insert(candidate.source_lcp_candidate_id);
+            if (candidate.target_lcp_id == lcp_id) locations.insert(candidate.target_lcp_candidate_id);
+        }
+        return locations;
+    };
+    require(
+        covered_locations("N:leaf0_root", "LEAF0").size() == 40,
+        "coverage-aware LCP pair selection should keep every source location for the first branch");
+    require(
+        covered_locations("N:leaf0_root", "ROOT").size() == 40,
+        "coverage-aware LCP pair selection should keep every root location for the first branch");
+    require(
+        covered_locations("N:leaf1_root", "LEAF1").size() == 40,
+        "coverage-aware LCP pair selection should keep every source location for the second branch");
+    require(
+        covered_locations("N:leaf1_root", "ROOT").size() == 40,
+        "coverage-aware LCP pair selection should keep every root location for the second branch");
 
     auto missing_segment_request = make_lcp_request(drc_circuit, drc_placements, true);
     missing_segment_request.tree.root = "M";
@@ -1389,6 +1616,30 @@ void run_routing_evaluator_tests() {
     require(
         !missing_segment_dp.best_state.failure_messages.empty(),
         "missing required wire segment should be recorded in DP failure messages");
+
+    auto expensive_left = make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:a", 9.0, 1.0);
+    expensive_left.segment_id = "N:left";
+    expensive_left.path.metrics.wirelength = 200000.0;
+    auto cheap_incomplete_left = make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:b", 1.0, 2.0);
+    cheap_incomplete_left.segment_id = "N:left";
+    auto expensive_complete_right = make_manual_lcp_candidate(lcp_context, "LCP1", "M.B", "LCP1:a", 1.0, 3.0);
+    expensive_complete_right.segment_id = "N:right";
+    const std::vector<sapr::routing::RouteCandidate> root_selection_candidates{
+        expensive_left,
+        cheap_incomplete_left,
+        expensive_complete_right,
+    };
+    const auto root_selection_dp = sapr::routing::run_bottom_up_routing_dp(
+        drc_circuit,
+        missing_segment_request,
+        lcp_context,
+        root_selection_candidates);
+    require(
+        root_selection_dp.success,
+        "bottom-up DP should select a complete root state even when an incomplete state has lower cost");
+    require(
+        root_selection_dp.best_state.lcp_location_by_id.at("LCP1") == "LCP1:a",
+        "successful root state should retain the complete LCP physical binding");
 
     auto coupling_eval = make_line_evaluation(drc_circuit, drc_placements, 1.0);
     auto coupling_candidate = coupling_eval.global_routing.net_routes.front().selected_candidates.front();

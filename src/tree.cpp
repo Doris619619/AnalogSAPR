@@ -2,6 +2,7 @@
 #include "sapr/tree.hpp"
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <stdexcept>
 #include <unordered_map>
@@ -148,7 +149,32 @@ void refresh_right_most_branch(AsfBStarTree& tree) {
     }
 }
 
-// 根据 right-most branch 维护 space_node_cluster，保证 cluster 只存在于贴轴分支。
+/* 将离开贴轴分支的 cluster LCP 转移到同一 ASF 节点仍存在的 outer/top space，避免 SA 扰动丢失拓扑端点。 */
+void migrate_cluster_lcps_to_groups(AsfBStarNode& node) {
+    if (!node.space_node_cluster.has_value() || node.space_node_groups.size() < 2) return;
+    auto& cluster = *node.space_node_cluster;
+    if (cluster.spaces.size() < 4 || node.space_node_groups[0].spaces.size() < 2 ||
+        node.space_node_groups[1].spaces.size() < 2) {
+        return;
+    }
+
+    const std::array<std::pair<std::size_t, std::size_t>, 4> target_indices{{
+        {0, 0},  /* 代表侧轴间空间转移到代表侧外部空间。 */
+        {0, 1},  /* 镜像侧轴间空间转移到镜像侧外部空间。 */
+        {1, 0},  /* 代表侧顶部 cluster 空间转移到代表侧顶部 group 空间。 */
+        {1, 1},  /* 镜像侧顶部 cluster 空间转移到镜像侧顶部 group 空间。 */
+    }};
+    for (std::size_t index = 0; index < target_indices.size(); ++index) {
+        const auto [group_index, space_index] = target_indices[index];
+        auto& target = node.space_node_groups[group_index].spaces[space_index];
+        for (auto& point : cluster.spaces[index].linking_points) {
+            point.space_node_id = target.id;
+            target.linking_points.push_back(std::move(point));
+        }
+    }
+}
+
+/* 根据 right-most branch 维护 space_node_cluster，保证 cluster 只存在于贴轴分支。 */
 void refresh_space_node_clusters(AsfBStarTree& tree) {
     std::unordered_set<std::string> right_branch(tree.right_most_branch.begin(), tree.right_most_branch.end());
     for (auto& [id, node] : tree.nodes) {
@@ -157,6 +183,7 @@ void refresh_space_node_clusters(AsfBStarTree& tree) {
                 node.space_node_cluster = make_space_node_cluster(tree.group_name, node.module, node.mirror_module);
             }
         } else {
+            migrate_cluster_lcps_to_groups(node);
             node.space_node_cluster.reset();
         }
     }

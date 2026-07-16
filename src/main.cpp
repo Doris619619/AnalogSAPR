@@ -75,6 +75,7 @@ void print_usage() {
               << "           [--cooling-rate 0.96] [--routing-layers 2]\n"
               << "           [--sa-convergence-tolerance 1e-6] [--sa-convergence-patience 20]\n"
               << "           [--dump-routing-eval]\n"
+              << "           [--strict-lcp-dp]\n"
               << "           [--debug-search]\n"
               << "           [--render-dpi 200] [--render-name name]\n"
               << "           [--dump-btree] [--no-dump-btree] [--render-btree-name name]\n"
@@ -483,6 +484,7 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
         throw std::runtime_error("invalid value for --routing-layers: must be in [1, 7]");
     }
     config.debug_search = has_option(args, "--debug-search");
+    config.strict_lcp_dp = has_option(args, "--strict-lcp-dp");
     // json-only 优先于 no-dump：仍收集并写出每轮文本，但跳过 PNG。
     const bool dump_sa_btree_json_only = has_option(args, "--dump-sa-btree-json-only");
     config.dump_sa_btree = dump_sa_btree_json_only || !has_option(args, "--no-dump-sa-btree");

@@ -4,12 +4,15 @@ endif()
 if(NOT DEFINED BINARY_DIR)
   message(FATAL_ERROR "BINARY_DIR is required")
 endif()
+if(NOT DEFINED PYTHON_EXECUTABLE)
+  set(PYTHON_EXECUTABLE python)
+endif()
 set(smoke_output "${BINARY_DIR}/render-smoke-output")
 file(MAKE_DIRECTORY "${smoke_output}")
 file(COPY "${SOURCE_DIR}/cases/IFAmpliflier_min3/output/placement.txt" DESTINATION "${smoke_output}")
 file(COPY "${SOURCE_DIR}/cases/IFAmpliflier_min3/output/routing.txt" DESTINATION "${smoke_output}")
 execute_process(
-  COMMAND python "${SOURCE_DIR}/tools/render_layout.py"
+  COMMAND "${PYTHON_EXECUTABLE}" "${SOURCE_DIR}/tools/render_layout.py"
           --input "${SOURCE_DIR}/cases/IFAmpliflier_min3/input"
           --output "${smoke_output}"
           --name render_smoke

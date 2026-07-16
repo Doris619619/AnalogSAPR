@@ -1,4 +1,4 @@
-// 声明放置后的器件和引脚几何变换接口。
+/* 文件职责：声明布局 placement 的统一几何变换接口。 */
 #pragma once
 
 #include <utility>
@@ -7,11 +7,17 @@
 
 namespace sapr {
 
-// 计算引脚经过器件旋转和平移后的全局坐标。
+/* 将器件 BB 左下角局部点按 placement 变换为全局坐标。 */
+std::pair<double, double> transform_placed_point(
+    const Module& module,
+    double local_x,
+    double local_y,
+    const Placement& placement);
+
+/* 将器件引脚按 placement 变换为全局坐标。 */
 std::pair<double, double> placed_pin(const Module& module, const Pin& pin, const Placement& placement);
 
-// 返回器件旋转后的宽度和高度。
+/* 返回器件经过 placement 变换后的外接尺寸。 */
 std::pair<double, double> placed_size(const Module& module, const Placement& placement);
 
 }  // namespace sapr
-

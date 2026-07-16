@@ -2,6 +2,7 @@
 #include "test_support.hpp"
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <random>
 #include <string>
@@ -47,6 +48,25 @@ bool lcp_references_are_consistent(const sapr::EnhancedBStarTree& tree, const st
                 if (!removed_id.empty() && (segment.from == removed_id || segment.to == removed_id)) return false;
             }
         }
+    }
+    return true;
+}
+
+bool automatic_lcp_endpoints_are_resolved(const sapr::EnhancedBStarTree& tree) {
+    std::unordered_set<std::string> point_ids;
+    std::vector<sapr::WireSegmentRef> segments;
+    for (const auto& space : sapr::collect_space_nodes(tree)) {
+        for (const auto& point : space.linking_points) {
+            point_ids.insert(point.id);
+            segments.insert(segments.end(), point.segments.begin(), point.segments.end());
+        }
+    }
+    const auto is_lcp_endpoint = [](const std::string& endpoint) {
+        return endpoint.find(":leaf:") != std::string::npos || endpoint.ends_with(":root");
+    };
+    for (const auto& segment : segments) {
+        if (is_lcp_endpoint(segment.from) && !point_ids.contains(segment.from)) return false;
+        if (is_lcp_endpoint(segment.to) && !point_ids.contains(segment.to)) return false;
     }
     return true;
 }
@@ -199,6 +219,34 @@ void run_router_tests() {
             approx(routing_r90_bbox.x2, 3.0) && approx(routing_r90_bbox.y2, 4.0),
         "routing R90 bbox should stay anchored like placement output");
 
+    const sapr::Module transform_module{"T", 4.0, 3.0, sapr::Rect{0.0, 0.0, 4.0, 3.0}, 0.0, 0.0, ""};
+    const sapr::Pin transform_pin{"T", "P", 0.5, 0.75, "M1"};
+    struct TransformExpectation {
+        sapr::Placement placement;
+        double x;
+        double y;
+        double width;
+        double height;
+    };
+    const std::array<TransformExpectation, 8> transform_expectations = {{
+        {{"T", 3.0, 5.0, 0, "R0"}, 3.5, 5.75, 4.0, 3.0},
+        {{"T", 3.0, 5.0, 90, "R90"}, 5.25, 5.5, 3.0, 4.0},
+        {{"T", 3.0, 5.0, 180, "R180"}, 6.5, 7.25, 4.0, 3.0},
+        {{"T", 3.0, 5.0, 270, "R270"}, 3.75, 8.5, 3.0, 4.0},
+        {{"T", 3.0, 5.0, 0, "MX"}, 3.5, 7.25, 4.0, 3.0},
+        {{"T", 3.0, 5.0, 0, "MY"}, 6.5, 5.75, 4.0, 3.0},
+        {{"T", 3.0, 5.0, 90, "MXR90"}, 3.75, 5.5, 3.0, 4.0},
+        {{"T", 3.0, 5.0, 270, "MYR90"}, 5.25, 8.5, 3.0, 4.0},
+    }};
+    for (const auto& expected : transform_expectations) {
+        const auto [placed_x, placed_y] = sapr::placed_pin(transform_module, transform_pin, expected.placement);
+        const auto routing_point = sapr::routing::transform_pin_to_global(transform_module, transform_pin, expected.placement);
+        const auto [placed_width, placed_height] = sapr::placed_size(transform_module, expected.placement);
+        require(approx(placed_x, expected.x) && approx(placed_y, expected.y), "Cadence orient pin transform failed");
+        require(approx(routing_point.x, expected.x) && approx(routing_point.y, expected.y), "routing transform must match placement geometry");
+        require(approx(placed_width, expected.width) && approx(placed_height, expected.height), "Cadence orient size transform failed");
+    }
+
     const auto chain = sapr::make_chain_tree(circuit);
     require(chain.root == std::optional<std::string>{"M1"}, "chain root should be M1");
     require(chain.nodes.at("M1").left == std::optional<std::string>{"M2"}, "chain left child should preserve order");
@@ -272,12 +320,22 @@ void run_router_tests() {
         }
     }
     auto two_group_perturbed = two_group_tree;
+    sapr::initialize_lcp_topology(two_group_circuit, two_group_perturbed, sapr::SolverConfig{});
     std::mt19937 two_group_rng(23);
     bool saw_asf_move = false;
     for (int i = 0; i < 50; ++i) {
+        const auto lcp_count_before_move = sapr::count_tree_lcps(two_group_perturbed);
         const auto report = sapr::perturb_placement_tree(two_group_perturbed, two_group_rng);
         saw_asf_move = saw_asf_move || report.move.starts_with("asf-module-");
         require(sapr::is_valid_tree(two_group_perturbed), "ASF internal perturbation should preserve tree legality");
+        if (report.move.starts_with("asf-module-")) {
+            require(
+                sapr::count_tree_lcps(two_group_perturbed) == lcp_count_before_move,
+                "ASF perturbation should migrate cluster LCPs instead of dropping them");
+            require(
+                automatic_lcp_endpoints_are_resolved(two_group_perturbed),
+                "ASF perturbation should preserve every LCP segment endpoint reference");
+        }
         for (const auto& group : two_group_perturbed.symmetry_groups) {
             const auto& asf_tree = group.asf_bstar_tree;
             for (const auto& [representative, mirror] : asf_tree.mirror_map) {
@@ -307,6 +365,40 @@ void run_router_tests() {
     require(tree.symmetry_groups.front().asf_bstar_tree.nodes.at("M1").space_node_groups.size() == 2, "space node group should model mirrored right/top spaces");
     require(tree.symmetry_groups.front().asf_bstar_tree.nodes.at("M1").space_node_cluster->spaces.size() == 4, "space node cluster should model four ASF spaces");
     require(sapr::collect_space_nodes(tree).size() >= tree.representative_order.size() * 2, "space nodes should be collectable");
+
+    struct MirrorExpectation {
+        int angle;
+        const char* orient;
+    };
+    const std::array<MirrorExpectation, 4> mirror_expectations = {{
+        {0, "MY"},
+        {90, "MXR90"},
+        {180, "MX"},
+        {270, "MYR90"},
+    }};
+    for (const auto& expected : mirror_expectations) {
+        auto rotated_pair_tree = tree;
+        rotated_pair_tree.symmetry_groups.front().asf_bstar_tree.nodes.at("M1").angle = expected.angle;
+        const auto rotated_pair_request = sapr::pack_enhanced_tree(circuit, rotated_pair_tree, sapr::SolverConfig{});
+        const auto& representative = rotated_pair_request.placements.at("M1");
+        const auto& mirror = rotated_pair_request.placements.at("M2");
+        const auto representative_box = placement_box(circuit, representative);
+        const auto mirror_box = placement_box(circuit, mirror);
+        const double axis_x = (representative_box.x1 + mirror_box.x2) / 2.0;
+        require(mirror.orient == expected.orient, "ASF mirror orient should preserve representative rotation");
+        require(
+            approx(representative_box.x1, 2.0 * axis_x - mirror_box.x2) &&
+                approx(representative_box.x2, 2.0 * axis_x - mirror_box.x1) &&
+                approx(representative_box.y1, mirror_box.y1) && approx(representative_box.y2, mirror_box.y2),
+            "ASF mirror bbox should stay vertically symmetric after rotation");
+        const auto [representative_pin_x, representative_pin_y] =
+            sapr::placed_pin(circuit.modules.at("M1"), circuit.pins.at("M1.G"), representative);
+        const auto [mirror_pin_x, mirror_pin_y] =
+            sapr::placed_pin(circuit.modules.at("M2"), circuit.pins.at("M2.G"), mirror);
+        require(
+            approx(representative_pin_x, 2.0 * axis_x - mirror_pin_x) && approx(representative_pin_y, mirror_pin_y),
+            "ASF mirror pin should stay vertically symmetric after rotation");
+    }
 
     sapr::SpaceNode space{"space",
                           "M1",

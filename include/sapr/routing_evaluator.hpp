@@ -1,4 +1,4 @@
-// 文件职责：声明供布局、模拟退火和 CLI 调用的布线评估公开接口。
+﻿// 鏂囦欢鑱岃矗锛氬０鏄庝緵甯冨眬銆佹ā鎷熼€€鐏拰 CLI 璋冪敤鐨勫竷绾胯瘎浼板叕寮€鎺ュ彛銆?
 #pragma once
 
 #include <optional>
@@ -13,7 +13,7 @@
 
 namespace sapr {
 
-// 汇总一次 placement 布线评估产生的上下文、候选路径和全局布线结果。
+// 姹囨€讳竴娆?placement 甯冪嚎璇勪及浜х敓鐨勪笂涓嬫枃銆佸€欓€夎矾寰勫拰鍏ㄥ眬甯冪嚎缁撴灉銆?
 struct RoutingEvaluation {
     routing::RoutingContext context;
     std::vector<routing::RouteCandidate> candidates;
@@ -23,6 +23,18 @@ struct RoutingEvaluation {
     int failed_nets{};
     bool used_bottom_up_dp{};
     std::vector<routing::RouteCandidate> debug_candidates;
+    bool strict_lcp_dp_blocked_fallback{};
+};
+
+
+// 表示一个 LCP 物理候选点对其所有 incident segments 的覆盖情况。
+struct LcpCandidateCoverage {
+    std::string lcp_id;
+    std::string candidate_id;
+    std::vector<std::string> required_segments;
+    std::vector<std::string> reachable_segments;
+    std::vector<std::string> missing_segments;
+    bool covers_all_incident_segments{};
 };
 
 // 根据当前 placement 构建布线环境、生成 A* 候选路径并执行 DP 全局布线。
@@ -44,5 +56,10 @@ DetailedRoutingResult run_detailed_routing(
     const Circuit& circuit,
     const RoutingEvaluationRequest& request,
     const RoutingEvaluation& evaluation);
+
+// 统计每个 LCP 物理候选点是否能覆盖该 LCP 的全部 incident segments。
+std::vector<LcpCandidateCoverage> analyze_lcp_candidate_coverage(
+    const RoutingEvaluationRequest& request,
+    const std::vector<routing::RouteCandidate>& candidates);
 
 }  // namespace sapr
