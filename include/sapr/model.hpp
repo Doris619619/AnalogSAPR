@@ -536,6 +536,9 @@ struct DetailedRoutingReport {
 
 // 琛ㄧず top-down performance-aware detailed routing 鐨勮緭鍑恒€?
 struct DetailedRoutingResult {
+    // 保存 detailed 阶段已提交、但可能因最终全局 DRC 被拒绝的原始金属段，仅供 routing_debug.json 诊断。
+    std::vector<RouteSegment> raw_routes;
+    // 仅保存通过最终 DRC 的可交付金属段，作为 routing.txt 的唯一来源。
     std::vector<RouteSegment> routes;
     DetailedRoutingReport report;
     std::unordered_map<std::string, double> required_space_by_node;

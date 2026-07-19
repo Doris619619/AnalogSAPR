@@ -2335,6 +2335,8 @@ DetailedRoutingResult run_detailed_routing(
     }
     apply_detailed_flow_check(circuit, legalized_candidates, result);
     result.routes = routing::merge_collinear_same_net_routes(result.routes);
+    // 在最终全局 DRC 前保留已成功 detailed legalization 的路线，避免 routes 清空后丢失诊断证据。
+    result.raw_routes = result.routes;
     const auto drc_routes = collect_active_region_crossings(request, result.routes);
     const auto short_pairs = collect_same_layer_shorts(result.routes);
     result.design_rule_violations = static_cast<int>(drc_routes.size() + short_pairs.size());

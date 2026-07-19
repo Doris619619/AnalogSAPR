@@ -1212,6 +1212,14 @@ void run_routing_evaluator_tests() {
     require(legalized_detail.design_rule_violations == 0, "detailed routing should legalize shorts with an alternative candidate");
     require(!legalized_detail.routes.empty(), "detailed routing should keep legalized routes instead of clearing all output");
     require(
+        legalized_detail.raw_routes.size() == legalized_detail.routes.size() &&
+            legalized_detail.raw_routes.front().net == legalized_detail.routes.front().net &&
+            approx(legalized_detail.raw_routes.front().x1, legalized_detail.routes.front().x1) &&
+            approx(legalized_detail.raw_routes.front().y1, legalized_detail.routes.front().y1) &&
+            approx(legalized_detail.raw_routes.front().x2, legalized_detail.routes.front().x2) &&
+            approx(legalized_detail.raw_routes.front().y2, legalized_detail.routes.front().y2),
+        "diagnostic raw routes should preserve every final detailed route when final DRC passes");
+    require(
         approx(legalized_detail.detailed_cost, 18.0),
         "detailed routing cost should be recomputed from final routes instead of stale candidate via metrics");
 

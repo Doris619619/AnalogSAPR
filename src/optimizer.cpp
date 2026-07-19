@@ -605,6 +605,7 @@ std::string make_routing_debug_json(
         << ", \"dp_used\": " << (evaluation.used_bottom_up_dp ? "true" : "false")
         << ", \"failed_nets\": " << evaluation.failed_nets
         << ", \"detailed_routes\": " << detailed.routes.size()
+        << ", \"detailed_raw_routes\": " << detailed.raw_routes.size()
         << ", \"space_nodes_with_routes\": " << detailed.space_nodes_with_routes
         << ", \"traceback_failures\": " << detailed.traceback_failures
         << ", \"design_rule_violations\": " << detailed.design_rule_violations
@@ -661,6 +662,11 @@ std::string make_routing_debug_json(
             if (index != 0) out << ',';
             write_dp_candidate_event_json(out, evaluation.bottom_up_dp->candidate_events[index]);
         }
+    }
+    out << "],\n  \"detailed_raw_routes\": [";
+    for (std::size_t index = 0; index < detailed.raw_routes.size(); ++index) {
+        if (index != 0) out << ',';
+        write_route_segment_json(out, detailed.raw_routes[index]);
     }
     out << "],\n  \"final_routes\": [";
     for (std::size_t index = 0; index < detailed.routes.size(); ++index) {
