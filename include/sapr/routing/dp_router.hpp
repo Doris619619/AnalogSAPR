@@ -1,6 +1,7 @@
 // 文件职责：声明基于 B*-tree 自底向上的 routing DP 状态和求解接口。
 #pragma once
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -50,6 +51,21 @@ struct RoutingDpCandidateEvent {
     bool selected{};
 };
 
+// 记录 DP 裁剪整个 state 时丢失的候选组合，区分语义去重与 beam 截断。
+struct RoutingDpStatePruneEvent {
+struct RoutingDpStatePruneEvent {
+    std::string tree_node;
+    std::string stage;
+    std::string reason;
+    double dropped_cost{};
+    double retained_cost{};
+    int beam_limit{};
+    std::vector<std::string> lcp_bindings;
+    std::vector<std::string> covered_wire_segments;
+    std::vector<std::string> selected_transitions;
+    std::vector<std::string> failure_messages;
+};
+
 // 表示一个 B*-tree node 对应的 DP 状态集合。
 struct NodeRoutingDpResult {
     std::string tree_node;
@@ -68,6 +84,9 @@ struct RoutingDpResult {
     int packing_time_dp_segments{};
     bool packing_time_dp_used{};
     std::vector<RoutingDpCandidateEvent> candidate_events;
+    std::unique_ptr<std::vector<RoutingDpStatePruneEvent>> state_prune_events;
+    // 诊断事件独立持有，避免结果对象移动时触发 MSVC Debug 容器代理失效。
+    std::unique_ptr<std::vector<RoutingDpStatePruneEvent>> state_prune_events;
 };
 
 // 按 B*-tree post-order 运行 routing DP，并从 A* candidates 中选择一致的 traceback 路径。

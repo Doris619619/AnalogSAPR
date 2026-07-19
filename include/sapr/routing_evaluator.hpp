@@ -13,6 +13,18 @@
 
 namespace sapr {
 
+// 记录 LCP 多端覆盖检查删除 A* 候选的具体位置与原因。
+struct LcpCandidateFilterEvent {
+    std::string net;
+    std::string from_terminal;
+    std::string to_terminal;
+    std::string segment_id;
+    std::string lcp_candidate_id;
+    std::string source_lcp_candidate_id;
+    std::string target_lcp_candidate_id;
+    std::string reason;
+};
+
 // 姹囨€讳竴娆?placement 甯冪嚎璇勪及浜х敓鐨勪笂涓嬫枃銆佸€欓€夎矾寰勫拰鍏ㄥ眬甯冪嚎缁撴灉銆?
 struct RoutingEvaluation {
     routing::RoutingContext context;
@@ -24,6 +36,8 @@ struct RoutingEvaluation {
     bool used_bottom_up_dp{};
     std::vector<routing::RouteCandidate> debug_candidates;
     bool strict_lcp_dp_blocked_fallback{};
+    // 记录 LCP 多端覆盖过滤使候选失效的原因，供 routing_debug.json 定位 DP 前的删除。
+    std::vector<LcpCandidateFilterEvent> lcp_candidate_filter_events;
 };
 
 

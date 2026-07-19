@@ -17,6 +17,15 @@ constexpr double kBendWeight = 3.0;
 constexpr double kMissingSegmentPenalty = 100000.0;
 constexpr double kShortConflictPenalty = 1000000.0;
 constexpr double kMultiTerminalMissingPenalty = 1000000.0;
+constexpr std::size_t kMaxRecordedStatePruneEvents = 4096;
+
+// 为裁剪事件保留一条失败摘要，避免复制随子树合并增长的完整错误列表。
+std::vector<std::string> state_failure_summary(const RoutingDpState& state) {
+std::vector<std::string> state_failure_summary(const RoutingDpState& state) {
+    if (!state.choice_message.empty()) return {state.choice_message};
+    if (!state.failure_messages.empty()) return {state.failure_messages.front()};
+    return {};
+}
 
 // 表示同一逻辑 wire segment 对应的一组 A* 候选路径。
 struct CandidateGroup {
@@ -518,7 +527,8 @@ void prune_states(
     int max_states,
     int& pruned_states,
     const std::vector<CandidateGroup>& groups,
-    const CandidateRouteCache& candidate_routes) {
+    const CandidateRouteCache& candidate_routes,
+    std::vector<RoutingDpStatePruneEvent>& state_prune_events) {
     std::sort(states.begin(), states.end(), [](const auto& left, const auto& right) {
         if (left.cost != right.cost) return left.cost < right.cost;
         if (left.covered_wire_segments.size() != right.covered_wire_segments.size()) {
@@ -527,13 +537,35 @@ void prune_states(
         return left.selected_candidates.size() < right.selected_candidates.size();
     });
 
-    std::unordered_set<std::string> seen_semantics;
+    std::unordered_map<std::string, std::size_t> retained_semantic_index;
     std::vector<RoutingDpState> unique_states;
     unique_states.reserve(states.size());
     for (auto& state : states) {
-        if (seen_semantics.insert(state_semantic_signature(state)).second) {
+        const auto signature = state_semantic_signature(state);
+        const auto [retained, inserted] = retained_semantic_index.try_emplace(signature, unique_states.size());
+        if (inserted) {
             unique_states.push_back(std::move(state));
         } else {
+            if (state_prune_events.size() >= kMaxRecordedStatePruneEvents) {
+                ++pruned_states;
+                continue;
+            }
+            const auto& kept = unique_states[retained->second];
+            RoutingDpStatePruneEvent event;
+            event.tree_node = state.tree_node;
+            event.stage = "semantic_dedup";
+            event.reason = "same_semantic_signature";
+            event.dropped_cost = state.cost;
+            event.retained_cost = kept.cost;
+            event.beam_limit = max_states;
+            for (const auto& [lcp_id, location_id] : state.lcp_location_by_id) {
+                event.lcp_bindings.push_back(lcp_id + "=" + location_id);
+            }
+            std::sort(event.lcp_bindings.begin(), event.lcp_bindings.end());
+            event.covered_wire_segments = state.covered_wire_segments;
+            event.selected_transitions = state.selected_transitions;
+            event.failure_messages = state_failure_summary(state);
+            state_prune_events.push_back(std::move(event));
             ++pruned_states;
         }
     }
@@ -594,6 +626,27 @@ void prune_states(
             selected[*best_index] = true;
             append_state_bindings(unique_states[*best_index], retained_bindings);
             retained.push_back(std::move(unique_states[*best_index]));
+        }
+        const double best_retained_cost = retained.empty() ? 0.0 : retained.front().cost;
+        for (std::size_t index = 0; index < unique_states.size(); ++index) {
+            if (selected[index]) continue;
+            if (state_prune_events.size() >= kMaxRecordedStatePruneEvents) break;
+            const auto& state = unique_states[index];
+            RoutingDpStatePruneEvent event;
+            event.tree_node = state.tree_node;
+            event.stage = "beam";
+            event.reason = "outside_beam_limit";
+            event.dropped_cost = state.cost;
+            event.retained_cost = best_retained_cost;
+            event.beam_limit = max_states;
+            for (const auto& [lcp_id, location_id] : state.lcp_location_by_id) {
+                event.lcp_bindings.push_back(lcp_id + "=" + location_id);
+            }
+            std::sort(event.lcp_bindings.begin(), event.lcp_bindings.end());
+            event.covered_wire_segments = state.covered_wire_segments;
+            event.selected_transitions = state.selected_transitions;
+            event.failure_messages = state_failure_summary(state);
+            state_prune_events.push_back(std::move(event));
         }
         pruned_states += static_cast<int>(unique_states.size() - retained.size());
         std::sort(retained.begin(), retained.end(), [](const auto& left, const auto& right) {
@@ -771,7 +824,8 @@ void apply_segment_transition(
     const CandidateRouteCache& candidate_routes,
     int max_states,
     int& pruned_states,
-    std::vector<RoutingDpCandidateEvent>& candidate_events) {
+    std::vector<RoutingDpCandidateEvent>& candidate_events,
+    std::vector<RoutingDpStatePruneEvent>& state_prune_events) {
     std::vector<RoutingDpState> next_states;
     for (const auto& state : states) {
         bool selected_any = false;
@@ -817,7 +871,7 @@ void apply_segment_transition(
             next_states.push_back(std::move(failed));
         }
     }
-    prune_states(next_states, max_states, pruned_states, all_groups, candidate_routes);
+    prune_states(next_states, max_states, pruned_states, all_groups, candidate_routes, state_prune_events);
     states = std::move(next_states);
 }
 
@@ -837,7 +891,8 @@ std::vector<RoutingDpState> build_states_for_node(
     bool use_packing_time_segments,
     int max_states,
     int& pruned_states,
-    std::vector<RoutingDpCandidateEvent>& candidate_events) {
+    std::vector<RoutingDpCandidateEvent>& candidate_events,
+    std::vector<RoutingDpStatePruneEvent>& state_prune_events) {
     auto states = merge_child_states_for_node(node, result_by_node, trace_index);
     if (states.empty()) return states;
 
@@ -867,10 +922,11 @@ std::vector<RoutingDpState> build_states_for_node(
             candidate_routes,
             max_states,
             pruned_states,
-            candidate_events);
+            candidate_events,
+            state_prune_events);
     }
 
-    prune_states(states, max_states, pruned_states, groups, candidate_routes);
+    prune_states(states, max_states, pruned_states, groups, candidate_routes, state_prune_events);
     return states;
 }
 
@@ -896,7 +952,8 @@ RoutingDpResult run_bottom_up_routing_dp(
     int max_states_per_node) {
     (void)circuit;
     (void)context;
-    RoutingDpResult result;
+    RoutingDpResult result{};
+    result.state_prune_events = std::make_unique<std::vector<RoutingDpStatePruneEvent>>();
     if (!request.tree.root.has_value() || request.tree.nodes.empty() || candidates.empty()) return result;
 
     const auto nodes = tree_nodes_by_id(request.tree);
@@ -961,7 +1018,8 @@ RoutingDpResult run_bottom_up_routing_dp(
             result.packing_time_dp_used,
             max_states_per_node,
             result.dp_pruned_states,
-            result.candidate_events);
+            result.candidate_events,
+            *result.state_prune_events);
         result.dp_nodes += 1;
         result.dp_states += static_cast<int>(node_result.states.size());
         result_by_node[node_id] = node_result;

@@ -57,27 +57,29 @@ RoutingEvaluation make_evaluation(
     const Circuit& circuit,
     std::optional<routing::RoutingDpResult> bottom_up_dp = std::nullopt,
     std::vector<routing::RouteCandidate> debug_candidates = {},
-    bool strict_lcp_dp_blocked_fallback = false) {
+    bool strict_lcp_dp_blocked_fallback = false,
+    std::vector<LcpCandidateFilterEvent> lcp_candidate_filter_events = {}) {
     const bool use_dp = bottom_up_dp.has_value() && bottom_up_dp->success;
     const auto routing_candidates = use_dp
                                         ? merge_dp_traceback_with_uncovered_nets(candidates, bottom_up_dp->traceback_candidates)
                                         : candidates;
     auto global_routing = routing::run_global_routing(circuit, context, routing_candidates);
     if (debug_candidates.empty()) debug_candidates = candidates;
-    RoutingEvaluation evaluation{
+    const double routing_cost = global_routing.total_metrics.cost;
+    const int failed_nets = global_routing.failed_nets;
+    // 直接构造返回值，避免 Debug 构建移动含调试迭代器的候选容器。
+    return RoutingEvaluation{
         std::move(context),
         std::move(candidates),
         std::move(global_routing),
         std::move(bottom_up_dp),
-        0.0,
-        0,
+        routing_cost,
+        failed_nets,
         use_dp,
         std::move(debug_candidates),
         strict_lcp_dp_blocked_fallback,
+        std::move(lcp_candidate_filter_events),
     };
-    evaluation.routing_cost = evaluation.global_routing.total_metrics.cost;
-    evaluation.failed_nets = evaluation.global_routing.failed_nets;
-    return evaluation;
 }
 
 // 杩斿洖褰撳墠 request 涓甫 LCP 鎷撴墤鐨?net 闆嗗悎銆?
@@ -366,7 +368,8 @@ std::vector<LcpCandidateCoverage> collect_lcp_candidate_coverage(
 
 void filter_multi_terminal_unreachable_lcp_candidates(
     const RoutingEvaluationRequest& request,
-    std::vector<routing::RouteCandidate>& candidates) {
+    std::vector<routing::RouteCandidate>& candidates,
+    std::vector<LcpCandidateFilterEvent>* filter_events) {
     std::unordered_map<std::string, std::unordered_set<std::string>> required_segments_by_location;
     std::unordered_map<std::string, std::unordered_set<std::string>> reachable_segments_by_location;
 
@@ -426,6 +429,18 @@ void filter_multi_terminal_unreachable_lcp_candidates(
         for (const auto& message : missing_messages) candidate.path.message += "; " + message;
         candidate.current_density_ok = false;
         candidate.current_density_penalty = 50000.0;
+        if (filter_events != nullptr) {
+            filter_events->push_back(LcpCandidateFilterEvent{
+                candidate.net,
+                candidate.from_terminal,
+                candidate.to_terminal,
+                candidate.segment_id,
+                candidate.lcp_candidate_id,
+                candidate.source_lcp_candidate_id,
+                candidate.target_lcp_candidate_id,
+                candidate.path.message,
+            });
+        }
     }
 }
 
@@ -434,7 +449,8 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
     const routing::RoutingContext& context,
     const RoutingEvaluationRequest& request,
     const Circuit& circuit,
-    std::vector<routing::RouteCandidate>* raw_candidates = nullptr) {
+    std::vector<routing::RouteCandidate>* raw_candidates = nullptr,
+    std::vector<LcpCandidateFilterEvent>* filter_events = nullptr) {
     std::vector<routing::RouteCandidate> candidates;
     std::unordered_map<std::string, LinkingControlPoint> lcp_by_id;
     for (const auto& point : request.linking_points) lcp_by_id[point.id] = point;
@@ -543,7 +559,7 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
         }
     }
     if (raw_candidates != nullptr) *raw_candidates = candidates;
-    filter_multi_terminal_unreachable_lcp_candidates(request, candidates);
+    filter_multi_terminal_unreachable_lcp_candidates(request, candidates, filter_events);
     return candidates;
 }
 [[maybe_unused]] std::vector<routing::GridPoint> prune_backtracks(std::vector<routing::GridPoint> points) {
@@ -2112,6 +2128,7 @@ RoutingEvaluation evaluate_routing(
     }
     auto candidates = direct_candidates;
     std::vector<routing::RouteCandidate> debug_candidates = direct_candidates;
+    std::vector<LcpCandidateFilterEvent> lcp_candidate_filter_events;
     const auto lcp_nets = nets_with_lcp_topology(request);
     if (!lcp_nets.empty()) {
         candidates.erase(
@@ -2127,7 +2144,12 @@ RoutingEvaluation evaluate_routing(
                 [&](const auto& candidate) { return lcp_nets.contains(candidate.net); }),
             debug_candidates.end());
         std::vector<routing::RouteCandidate> raw_lcp_candidates;
-        auto lcp_candidates = generate_lcp_route_candidates(context, request, circuit, &raw_lcp_candidates);
+        auto lcp_candidates = generate_lcp_route_candidates(
+            context,
+            request,
+            circuit,
+            &raw_lcp_candidates,
+            &lcp_candidate_filter_events);
         candidates.insert(
             candidates.end(),
             std::make_move_iterator(lcp_candidates.begin()),
@@ -2138,7 +2160,14 @@ RoutingEvaluation evaluate_routing(
             std::make_move_iterator(raw_lcp_candidates.end()));
     }
     if (request.net_topologies.empty() || !request.tree.root.has_value()) {
-        return make_evaluation(std::move(context), std::move(candidates), circuit, std::nullopt, std::move(debug_candidates));
+        return make_evaluation(
+            std::move(context),
+            std::move(candidates),
+            circuit,
+            std::nullopt,
+            std::move(debug_candidates),
+            false,
+            std::move(lcp_candidate_filter_events));
     }
     auto bottom_up_dp = routing::run_bottom_up_routing_dp(circuit, request, context, candidates);
     if (!bottom_up_dp.success) {
@@ -2149,21 +2178,26 @@ RoutingEvaluation evaluate_routing(
                 circuit,
                 std::move(bottom_up_dp),
                 std::move(debug_candidates),
-                true);
+                true,
+                std::move(lcp_candidate_filter_events));
         }
         return make_evaluation(
             std::move(context),
             std::move(direct_candidates),
             circuit,
             std::move(bottom_up_dp),
-            std::move(debug_candidates));
+            std::move(debug_candidates),
+            false,
+            std::move(lcp_candidate_filter_events));
     }
     return make_evaluation(
         std::move(context),
         std::move(candidates),
         circuit,
         std::move(bottom_up_dp),
-        std::move(debug_candidates));
+        std::move(debug_candidates),
+        false,
+        std::move(lcp_candidate_filter_events));
 }
 
 // 灏?DP 鍏ㄥ眬甯冪嚎閫変腑鐨?A* 缃戞牸璺緞杞崲涓哄綋鍓?routing.txt 浣跨敤鐨勪腑蹇冪嚎绾挎銆?

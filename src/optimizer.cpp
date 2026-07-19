@@ -369,6 +369,49 @@ void write_dp_candidate_event_json(std::ostringstream& out, const routing::Routi
         << '}';
 }
 
+// 写出 LCP 多端覆盖检查删除的 A* 候选，区分其与后续 DP 阶段的拒绝和裁剪。
+void write_lcp_candidate_filter_event_json(std::ostringstream& out, const LcpCandidateFilterEvent& event) {
+    out << "{\"net\": ";
+    write_json_string(out, event.net);
+    out << ", \"from\": ";
+    write_json_string(out, event.from_terminal);
+    out << ", \"to\": ";
+    write_json_string(out, event.to_terminal);
+    out << ", \"segment_id\": ";
+    write_json_string(out, event.segment_id);
+    out << ", \"lcp_candidate_id\": ";
+    write_json_string(out, event.lcp_candidate_id);
+    out << ", \"source_lcp_candidate_id\": ";
+    write_json_string(out, event.source_lcp_candidate_id);
+    out << ", \"target_lcp_candidate_id\": ";
+    write_json_string(out, event.target_lcp_candidate_id);
+    out << ", \"reason\": ";
+    write_json_string(out, event.reason);
+    out << '}';
+}
+
+// 写出 DP state 在语义去重或 beam 截断时被删除的候选组合。
+void write_dp_state_prune_event_json(std::ostringstream& out, const routing::RoutingDpStatePruneEvent& event) {
+    out << "{\"tree_node\": ";
+    write_json_string(out, event.tree_node);
+    out << ", \"stage\": ";
+    write_json_string(out, event.stage);
+    out << ", \"reason\": ";
+    write_json_string(out, event.reason);
+    out << ", \"dropped_cost\": " << event.dropped_cost
+        << ", \"retained_cost\": " << event.retained_cost
+        << ", \"beam_limit\": " << event.beam_limit
+        << ", \"lcp_bindings\": ";
+    write_json_string_array(out, event.lcp_bindings);
+    out << ", \"covered_wire_segments\": ";
+    write_json_string_array(out, event.covered_wire_segments);
+    out << ", \"selected_transitions\": ";
+    write_json_string_array(out, event.selected_transitions);
+    out << ", \"failure_messages\": ";
+    write_json_string_array(out, event.failure_messages);
+    out << '}';
+}
+
 // 写出最终 bottom-up DP 状态，供 strict LCP-DP 失败时定位未覆盖 terminal 与绑定冲突。
 void write_dp_result_json(std::ostringstream& out, const std::optional<routing::RoutingDpResult>& result) {
     if (!result.has_value()) {
@@ -602,6 +645,7 @@ std::string make_routing_debug_json(
         << ", \"global_penalty\": " << metrics.global_penalty
         << ", \"final_penalty\": " << metrics.penalty
         << ", \"candidate_count\": " << evaluation.candidates.size()
+        << ", \"lcp_candidate_filter_count\": " << evaluation.lcp_candidate_filter_events.size()
         << ", \"dp_used\": " << (evaluation.used_bottom_up_dp ? "true" : "false")
         << ", \"failed_nets\": " << evaluation.failed_nets
         << ", \"detailed_routes\": " << detailed.routes.size()
@@ -619,6 +663,15 @@ std::string make_routing_debug_json(
         << ", \"lcp_locations_missing_segments\": " << count_missing_lcp_coverages(lcp_coverages)
         << ", \"fallback_blocked_by_strict_lcp_dp\": "
         << (evaluation.strict_lcp_dp_blocked_fallback ? "true" : "false")
+        << ", \"dp_state_prune_event_count\": "
+        << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->state_prune_events != nullptr
+                ? evaluation.bottom_up_dp->state_prune_events->size()
+                : 0)
+        << ", \"dp_state_prune_events_truncated\": "
+        << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->state_prune_events != nullptr &&
+                    evaluation.bottom_up_dp->state_prune_events->size() >= 4096
+                ? "true"
+                : "false")
         << ", \"first_uncovered_lcp_location\": ";
     write_json_string(out, first_uncovered);
     out
@@ -661,6 +714,18 @@ std::string make_routing_debug_json(
         for (std::size_t index = 0; index < evaluation.bottom_up_dp->candidate_events.size(); ++index) {
             if (index != 0) out << ',';
             write_dp_candidate_event_json(out, evaluation.bottom_up_dp->candidate_events[index]);
+        }
+    }
+    out << "],\n  \"lcp_candidate_filter_events\": [";
+    for (std::size_t index = 0; index < evaluation.lcp_candidate_filter_events.size(); ++index) {
+        if (index != 0) out << ',';
+        write_lcp_candidate_filter_event_json(out, evaluation.lcp_candidate_filter_events[index]);
+    }
+    out << "],\n  \"dp_state_prune_events\": [";
+    if (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->state_prune_events != nullptr) {
+        for (std::size_t index = 0; index < evaluation.bottom_up_dp->state_prune_events->size(); ++index) {
+            if (index != 0) out << ',';
+            write_dp_state_prune_event_json(out, (*evaluation.bottom_up_dp->state_prune_events)[index]);
         }
     }
     out << "],\n  \"detailed_raw_routes\": [";
