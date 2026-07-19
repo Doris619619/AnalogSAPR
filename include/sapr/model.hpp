@@ -244,6 +244,9 @@ struct Solution {
     // 涓?btree_trace.json 骞跺垪鍐欏嚭鐨?SA 杞婚噺杩涘害锛坰a_trace.json锛夈€?
     std::vector<SaProgressEntry> sa_progress;
     std::vector<SaBtreeIterationTrace> sa_btree_iterations;
+    // 记录 SA 是否因收敛准则提前结束，避免输出将计划迭代数误认为实际迭代数。
+    bool sa_terminated_early{};
+    std::string sa_termination_reason;
 };
 
 // 閰嶇疆姹傝В鍣ㄧ殑纭畾鎬у弬鏁板拰璁烘枃浠ｄ环鍑芥暟鏉冮噸銆?
@@ -254,6 +257,10 @@ struct SolverConfig {
     int sa_iterations{250};
     double initial_temperature{5.0};
     double cooling_rate{0.96};
+    // 最优代价改善不超过该阈值时计为无显著改善；设为非正值可关闭提前停止。
+    double sa_convergence_tolerance{1e-6};
+    // 连续无显著改善达到该轮数后提前停止；设为非正值可关闭提前停止。
+    int sa_convergence_patience{20};
     double area_weight{1.0};
     double wirelength_weight{1.0};
     double bend_weight{0.2};
@@ -269,8 +276,8 @@ struct SolverConfig {
     bool strict_lcp_dp{false};
     // 在写入 detailed route 前协商整网 LCP 物理位置，避免 DP 位置不可实现时只留下失败罚分。
     bool negotiate_lcp_locations{true};
-    // 允许使用的金属层数（M1..Mn）；默认 1 层，便于论文复现与平面合法性实验。
-    int routing_layers{1};
+    // 允许使用的金属层数（M1..Mn）；默认两层以对齐论文实验设置并避免单层短路。
+    int routing_layers{2};
 };
 
 // 琛ㄧず涓€娆?SA 鎵板姩鐨勮皟璇曟憳瑕侊紝渚涘懡浠よ璇婃柇鎼滅储鐘舵€佹槸鍚︾湡瀹炲彉鍖栥€?

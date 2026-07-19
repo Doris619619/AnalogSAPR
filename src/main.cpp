@@ -72,13 +72,15 @@ void print_usage() {
               << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n"
               << "           [--boundary-margin value] [--boundary-clearance 0]\n"
               << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
-              << "           [--cooling-rate 0.96] [--routing-layers 1]\n"
+              << "           [--cooling-rate 0.96] [--routing-layers 2]\n"
+              << "           [--sa-convergence-tolerance 1e-6] [--sa-convergence-patience 20]\n"
               << "           [--dump-routing-eval]\n"
               << "           [--strict-lcp-dp]\n"
               << "           [--debug-search]\n"
               << "           [--render-dpi 200] [--render-name name]\n"
               << "           [--dump-btree] [--no-dump-btree] [--render-btree-name name]\n"
-              << "           [--no-dump-sa-btree] [--dump-sa-btree-json-only]\n";
+              << "           [--no-dump-sa-btree] [--dump-sa-btree-json-only]\n"
+              << "           [--no-sa-analysis]\n";
 }
 
 std::string shell_quote(const std::string& value) {
@@ -118,6 +120,15 @@ std::filesystem::path sa_trace_xlsx_script_path() {
     const auto source_candidate = std::filesystem::path("tools") / "export_sa_trace_xlsx.py";
     if (std::filesystem::exists(source_candidate)) return source_candidate;
     const auto build_candidate = std::filesystem::path("..") / "tools" / "export_sa_trace_xlsx.py";
+    if (std::filesystem::exists(build_candidate)) return build_candidate;
+    return source_candidate;
+}
+
+// 定位 SA 诊断图绘制脚本。
+std::filesystem::path sa_analysis_script_path() {
+    const auto source_candidate = std::filesystem::path("tools") / "plot_sa_analysis.py";
+    if (std::filesystem::exists(source_candidate)) return source_candidate;
+    const auto build_candidate = std::filesystem::path("..") / "tools" / "plot_sa_analysis.py";
     if (std::filesystem::exists(build_candidate)) return build_candidate;
     return source_candidate;
 }
@@ -215,6 +226,8 @@ std::filesystem::path write_sa_trace_json(const sapr::Solution& solution, const 
     out << "  \"sa_iterations\": " << (solution.sa_progress.empty() ? 0 : solution.sa_progress.front().sa_iterations)
         << ",\n";
     out << "  \"recorded\": " << solution.sa_progress.size() << ",\n";
+    out << "  \"terminated_early\": " << (solution.sa_terminated_early ? "true" : "false") << ",\n";
+    out << "  \"termination_reason\": \"" << json_escape(solution.sa_termination_reason) << "\",\n";
     out << "  \"iterations\": [\n";
     for (std::size_t index = 0; index < solution.sa_progress.size(); ++index) {
         const auto& entry = solution.sa_progress[index];
@@ -313,6 +326,29 @@ int export_sa_trace_xlsx(const std::filesystem::path& trace_json, const std::fil
     const int status = std::system(command.str().c_str());
     if (status != 0) {
         std::cerr << "warning: failed to export sa_trace.xlsx; JSON is still available\n";
+    }
+    return status;
+}
+
+// 默认在 output/analysis/ 写出 SA 诊断图；失败仅告警，不影响主流程。
+int export_sa_analysis_plots(
+    const std::filesystem::path& trace_json,
+    const std::filesystem::path& output,
+    const std::string& render_name) {
+    const auto script = sa_analysis_script_path();
+    if (!std::filesystem::exists(script)) {
+        std::cerr << "warning: SA analysis plot script not found; skip analysis/\n";
+        return 1;
+    }
+    const auto analysis_dir = output / "analysis";
+    std::ostringstream command;
+    command << python_command() << ' ' << shell_quote(script)
+            << " --trace " << shell_quote(trace_json)
+            << " --output-dir " << shell_quote(analysis_dir);
+    if (!render_name.empty()) command << " --name " << shell_quote(render_name);
+    const int status = std::system(command.str().c_str());
+    if (status != 0) {
+        std::cerr << "warning: failed to generate SA analysis plots; sa_trace.json is still available\n";
     }
     return status;
 }
@@ -433,6 +469,16 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     config.sa_iterations = option_int(args, "--sa-iterations", config.sa_iterations);
     config.initial_temperature = option_double(args, "--initial-temperature", config.initial_temperature);
     config.cooling_rate = option_double(args, "--cooling-rate", config.cooling_rate);
+    config.sa_convergence_tolerance =
+        option_double(args, "--sa-convergence-tolerance", config.sa_convergence_tolerance);
+    config.sa_convergence_patience =
+        option_int(args, "--sa-convergence-patience", config.sa_convergence_patience);
+    if (config.sa_convergence_tolerance < 0.0) {
+        throw std::runtime_error("--sa-convergence-tolerance must be non-negative");
+    }
+    if (config.sa_convergence_patience < 0) {
+        throw std::runtime_error("--sa-convergence-patience must be non-negative");
+    }
     config.routing_layers = option_int(args, "--routing-layers", config.routing_layers);
     if (config.routing_layers < 1 || config.routing_layers > 7) {
         throw std::runtime_error("invalid value for --routing-layers: must be in [1, 7]");
@@ -442,6 +488,8 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     // json-only 优先于 no-dump：仍收集并写出每轮文本，但跳过 PNG。
     const bool dump_sa_btree_json_only = has_option(args, "--dump-sa-btree-json-only");
     config.dump_sa_btree = dump_sa_btree_json_only || !has_option(args, "--no-dump-sa-btree");
+    // SA 诊断图默认开启；--no-sa-analysis 可关闭。
+    const bool dump_sa_analysis = !has_option(args, "--no-sa-analysis");
     const bool dump_routing_eval = has_option(args, "--dump-routing-eval");
     const int render_dpi = option_int(args, "--render-dpi", 200);
     if (render_dpi <= 0) throw std::runtime_error("invalid value for --render-dpi: must be positive");
@@ -462,6 +510,9 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     if (!solution.sa_progress.empty()) {
         const auto sa_trace_path = write_sa_trace_json(solution, output);
         export_sa_trace_xlsx(sa_trace_path, output);
+        if (dump_sa_analysis) {
+            export_sa_analysis_plots(sa_trace_path, output, render_name);
+        }
     }
     if (solution.routing_debug_json.has_value()) {
         write_routing_debug_json(solution, output);

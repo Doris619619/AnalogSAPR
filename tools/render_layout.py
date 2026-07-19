@@ -129,6 +129,13 @@ DEV_COLORS = {
     "unknown": "#999999",
 }
 
+# 分图层图中：本层有活跃连线的器件外框，用于与仅作上下文的器件区分。
+LAYER_ACTIVE_MODULE_EDGE = "#212121"
+LAYER_ACTIVE_MODULE_LINEWIDTH = 2.2
+IDLE_MODULE_LINEWIDTH = 1.0
+# LCP 与本层走线端点/中心线的吸附阈值（um），用于按层过滤菱形标记。
+LCP_LAYER_MATCH_UM = 0.8
+
 
 # 拆分一行数据和尾部注释，空白字段用于后续格式校验。
 def strip_line(raw: str) -> tuple[list[str], str]:
@@ -749,6 +756,42 @@ def compute_bounds(
     return xlim, ylim
 
 
+# 从活跃 pin 键（module.pin）提取本视图有连线的器件 id。
+def modules_with_active_pins(connected_pins: set[str]) -> set[str]:
+    active_modules: set[str] = set()
+    for pin_key in connected_pins:
+        if "." not in pin_key:
+            continue
+        active_modules.add(pin_key.rsplit(".", 1)[0])
+    return active_modules
+
+
+# 只保留落在给定走线附近的 LCP；分图层时传入该层 routes，避免他层菱形干扰读图。
+def filter_lcps_near_routes(
+    lcps: list[SelectedLcp],
+    routes: list[Route],
+    threshold_um: float = LCP_LAYER_MATCH_UM,
+) -> list[SelectedLcp]:
+    if not lcps:
+        return []
+    if not routes:
+        return []
+    routes_by_net: dict[str, list[Route]] = {}
+    for route in routes:
+        routes_by_net.setdefault(route.net, []).append(route)
+
+    kept: list[SelectedLcp] = []
+    for lcp in lcps:
+        matched = False
+        for route in routes_by_net.get(lcp.net, []):
+            if point_segment_distance(lcp.x, lcp.y, route.x1, route.y1, route.x2, route.y2) <= threshold_um:
+                matched = True
+                break
+        if matched:
+            kept.append(lcp)
+    return kept
+
+
 # 在布局图上标注最终选用的 LCP 物理位置（仅形状，不写文字）。
 def draw_selected_lcps(
     ax: Any,
@@ -833,9 +876,22 @@ def draw_layout_axes(
                 bbox={"boxstyle": "round,pad=0.1", "facecolor": "#FFF9C4", "edgecolor": VIA_COLOR, "linewidth": 0.5, "alpha": 0.95},
             )
 
+    # 分图层：本层有活跃 pin 的器件加深色外框；合图不加粗，避免整图过重。
+    active_modules = modules_with_active_pins(connected_pins) if focus_layer is not None else set()
     for module, placement, corners in placed_modules:
         color = DEV_COLORS.get(module.device_type, DEV_COLORS["unknown"])
-        patch = mpatches.Polygon(corners, closed=True, facecolor=color, edgecolor=color, linewidth=1.0, alpha=0.35, zorder=3)
+        on_layer = module.module_id in active_modules
+        edge = LAYER_ACTIVE_MODULE_EDGE if on_layer else color
+        width = LAYER_ACTIVE_MODULE_LINEWIDTH if on_layer else IDLE_MODULE_LINEWIDTH
+        patch = mpatches.Polygon(
+            corners,
+            closed=True,
+            facecolor=color,
+            edgecolor=edge,
+            linewidth=width,
+            alpha=0.35,
+            zorder=3,
+        )
         ax.add_patch(patch)
         draw_module_label(ax, module, corners)
         if show_pins:
@@ -849,8 +905,12 @@ def draw_layout_axes(
                 connected_pins,
             )
 
-    if lcps:
-        draw_selected_lcps(ax, lcps, colors_by_net)
+    # 分图层只画落在本层走线附近的 LCP；合图保留全部选中 LCP。
+    visible_lcps = lcps or []
+    if focus_layer is not None and visible_lcps:
+        visible_lcps = filter_lcps_near_routes(visible_lcps, routes)
+    if visible_lcps:
+        draw_selected_lcps(ax, visible_lcps, colors_by_net)
 
     legend: list[Any] = []
     for device_type in sorted({module.device_type for module, _placement, _corners in placed_modules}):
@@ -862,12 +922,20 @@ def draw_layout_axes(
         legend.append(mpatches.Patch(color=colors_by_net.get(net, "#999999"), label=f"net {net}"))
     if focus_layer is not None:
         legend.append(mpatches.Patch(facecolor="white", edgecolor=VIA_COLOR, label="via (to other layer)"))
+        legend.append(
+            mpatches.Patch(
+                facecolor="white",
+                edgecolor=LAYER_ACTIVE_MODULE_EDGE,
+                linewidth=LAYER_ACTIVE_MODULE_LINEWIDTH,
+                label="module on this layer",
+            )
+        )
     if show_pins:
         legend.append(mpatches.Patch(facecolor=PIN_COLOR_CONNECTED, edgecolor=PIN_EDGE_CONNECTED, label="active pin (this view)"))
         legend.append(mpatches.Patch(facecolor=PIN_COLOR_IDLE, edgecolor=PIN_EDGE_IDLE, label="other pin"))
-    if lcps:
+    if visible_lcps:
         legend.append(
-            mpatches.Patch(facecolor=LCP_FACE_COLOR, edgecolor=LCP_EDGE_COLOR, label="LCP (selected)")
+            mpatches.Patch(facecolor=LCP_FACE_COLOR, edgecolor=LCP_EDGE_COLOR, label="LCP (this layer)" if focus_layer else "LCP (selected)")
         )
     if legend:
         ax.legend(handles=legend, loc="upper right", fontsize=7, framealpha=0.8)

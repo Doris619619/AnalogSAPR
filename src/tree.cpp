@@ -969,10 +969,18 @@ bool perturb_lcp_swap(EnhancedBStarTree& tree, std::mt19937& rng) {
     auto spaces = collect_mutable_spaces(tree);
     auto slots = collect_lcp_slots(spaces);
     if (slots.size() < 2) return false;
-    std::uniform_int_distribution<std::size_t> slot_dist(0, slots.size() - 1);
-    const auto first = slots[slot_dist(rng)];
-    auto second = slots[slot_dist(rng)];
-    if (first.space == second.space && first.index == second.index) second = slots[(slot_dist(rng) + 1) % slots.size()];
+    // 同一 space 内只交换 vector 顺序，不会改变 LCP 的拓扑或物理归属，不能计为论文中的 swap。
+    std::vector<std::pair<LcpSlot, LcpSlot>> swappable;
+    for (std::size_t first_index = 0; first_index < slots.size(); ++first_index) {
+        for (std::size_t second_index = first_index + 1; second_index < slots.size(); ++second_index) {
+            if (slots[first_index].space != slots[second_index].space) {
+                swappable.push_back({slots[first_index], slots[second_index]});
+            }
+        }
+    }
+    if (swappable.empty()) return false;
+    std::uniform_int_distribution<std::size_t> pair_dist(0, swappable.size() - 1);
+    const auto [first, second] = swappable[pair_dist(rng)];
     std::swap(first.space->linking_points[first.index], second.space->linking_points[second.index]);
     first.space->linking_points[first.index].space_node_id = first.space->id;
     second.space->linking_points[second.index].space_node_id = second.space->id;
@@ -1078,13 +1086,26 @@ PerturbationReport perturb_placement_tree(EnhancedBStarTree& tree, std::mt19937&
     const int move = move_dist(rng);
     const auto movable = movable_nodes(tree);
     if (move == 0 && movable.size() > 1) {
-        std::uniform_int_distribution<std::size_t> index_dist(0, movable.size() - 1);
-        const auto first = movable[index_dist(rng)];
-        auto second = movable[index_dist(rng)];
-        if (first == second) second = movable[(index_dist(rng) + 1) % movable.size()];
-        swap_tree_positions(tree, first, second);
-        report.move = "module-swap";
-        report.changed = true;
+        // 根节点和祖先/后代不能直接交换树位置；旧实现会退化为交换 angle，偏离论文的 module swap。
+        std::vector<std::pair<std::string, std::string>> swappable;
+        for (std::size_t first_index = 0; first_index < movable.size(); ++first_index) {
+            for (std::size_t second_index = first_index + 1; second_index < movable.size(); ++second_index) {
+                const auto& first = movable[first_index];
+                const auto& second = movable[second_index];
+                if (!tree.nodes.at(first).parent.has_value() || !tree.nodes.at(second).parent.has_value()) continue;
+                if (is_ancestor_of(tree, first, second) || is_ancestor_of(tree, second, first)) continue;
+                swappable.push_back({first, second});
+            }
+        }
+        if (swappable.empty()) {
+            report.move = "module-swap";
+        } else {
+            std::uniform_int_distribution<std::size_t> pair_dist(0, swappable.size() - 1);
+            const auto& [first, second] = swappable[pair_dist(rng)];
+            swap_tree_positions(tree, first, second);
+            report.move = "module-swap";
+            report.changed = true;
+        }
     } else if (move == 1 && movable.size() > 1) {
         std::uniform_int_distribution<std::size_t> index_dist(0, movable.size() - 1);
         const auto id = movable[index_dist(rng)];
