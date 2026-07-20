@@ -2232,6 +2232,8 @@ std::vector<RouteSegment> selected_candidates_to_segments(
     for (const auto& candidate : selected_candidates_for_detailed_routing(evaluation)) {
         append_path_segments(routes, evaluation, candidate);
     }
+    // active 边界会在路径转线段时切开；再次合并会把合法的 pin access 段伪造成穿越 active 的长线段。
+    if (!evaluation.context.active_regions().empty()) return routes;
     return routing::merge_collinear_same_net_routes(routes);
 }
 
@@ -2420,7 +2422,10 @@ DetailedRoutingResult run_detailed_routing(
         }
     }
     apply_detailed_flow_check(circuit, legalized_candidates, result);
-    result.routes = routing::merge_collinear_same_net_routes(result.routes);
+    // 保留 active 边界切段，避免输出归一化重新合并 pin access 段并引入伪 DRC。
+    if (request.active_region_blockers.empty()) {
+        result.routes = routing::merge_collinear_same_net_routes(result.routes);
+    }
     // 在最终全局 DRC 前保留已成功 detailed legalization 的路线，避免 routes 清空后丢失诊断证据。
     result.raw_routes = result.routes;
     const auto drc_routes = collect_active_region_crossings(request, result.routes);
