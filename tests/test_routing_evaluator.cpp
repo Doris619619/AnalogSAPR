@@ -998,10 +998,14 @@ void run_routing_evaluator_tests() {
     sapr::initialize_lcp_topology(mixed_circuit, mixed_tree, config);
     const auto mixed_request = sapr::pack_enhanced_tree(mixed_circuit, mixed_tree, config);
     const auto mixed_evaluation = sapr::evaluate_routing(mixed_circuit, mixed_request);
+    require(mixed_evaluation.bottom_up_dp.has_value(), "mixed LCP/direct case should expose bottom-up DP result");
     require(
-        mixed_evaluation.bottom_up_dp.has_value() && mixed_evaluation.bottom_up_dp->success,
-        "mixed LCP/direct case should use successful bottom-up DP");
-    require(mixed_evaluation.failed_nets == 0, "successful DP should not drop direct-only nets from global routing");
+        std::none_of(
+            mixed_evaluation.bottom_up_dp->candidate_events.begin(),
+            mixed_evaluation.bottom_up_dp->candidate_events.end(),
+            [](const auto& event) { return event.reason == "short_conflict_penalty"; }),
+        "bottom-up DP should reject occupied-route shorts instead of retaining a penalty candidate");
+    require(mixed_evaluation.failed_nets == 0, "non-strict DP fallback should not drop direct-only nets from global routing");
     std::unordered_set<std::string> mixed_routed_nets;
     for (const auto& segment : sapr::selected_candidates_to_segments(mixed_evaluation)) {
         mixed_routed_nets.insert(segment.net);

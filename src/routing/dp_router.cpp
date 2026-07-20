@@ -17,7 +17,6 @@ namespace {
 
 constexpr double kBendWeight = 3.0;
 constexpr double kMissingSegmentPenalty = 100000.0;
-constexpr double kShortConflictPenalty = 1000000.0;
 constexpr double kMultiTerminalMissingPenalty = 1000000.0;
 constexpr std::size_t kMaxRecordedCandidateEvents = 4096;
 constexpr std::size_t kMaxRecordedStatePruneEvents = 4096;
@@ -257,6 +256,9 @@ AppendCandidateResult append_candidate_if_consistent(
     const bool has_short = routes_short_with_existing(candidate_routes, state.occupied_routes);
     if (has_short) {
         result.occupied_route_conflicts = collect_occupied_route_conflicts(candidate_routes, state.occupied_routes);
+        result.has_short = true;
+        result.reason = "occupied_route_short";
+        return result;
     }
     if (!candidate.lcp_id.empty()) {
         const auto assigned = state.lcp_location_by_id.find(candidate.lcp_id);
@@ -288,18 +290,13 @@ AppendCandidateResult append_candidate_if_consistent(
     state.selected_candidates.push_back(candidate);
     state.occupied_routes.insert(state.occupied_routes.end(), candidate_routes.begin(), candidate_routes.end());
     add_candidate_metrics(state, candidate);
-    if (has_short) {
-        state.penalty += kShortConflictPenalty;
-        recompute_state_cost(state);
-    }
     append_unique(state.covered_terminals, candidate.from_terminal);
     append_unique(state.covered_terminals, candidate.to_terminal);
     append_unique(state.covered_wire_segments, candidate_segment_key(candidate));
     append_unique(state.selected_transitions, candidate_segment_key(candidate));
     state.choice_message = candidate_segment_key(candidate);
     result.accepted = true;
-    result.has_short = has_short;
-    result.reason = has_short ? "short_conflict_penalty" : "selected";
+    result.reason = "selected";
     return result;
 }
 
