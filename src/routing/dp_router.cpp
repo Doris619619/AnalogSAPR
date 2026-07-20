@@ -2,6 +2,8 @@
 #include "sapr/routing/dp_router.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <cstdint>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -15,8 +17,17 @@ namespace {
 
 constexpr double kBendWeight = 3.0;
 constexpr double kMissingSegmentPenalty = 100000.0;
-constexpr double kShortConflictPenalty = 1000000.0;
 constexpr double kMultiTerminalMissingPenalty = 1000000.0;
+constexpr std::size_t kMaxRecordedCandidateEvents = 4096;
+constexpr std::size_t kMaxRecordedStatePruneEvents = 4096;
+
+// 为裁剪事件保留一条失败摘要，避免复制随子树合并增长的完整错误列表。
+std::vector<std::string> state_failure_summary(const RoutingDpState& state) {
+std::vector<std::string> state_failure_summary(const RoutingDpState& state) {
+    if (!state.choice_message.empty()) return {state.choice_message};
+    if (!state.failure_messages.empty()) return {state.failure_messages.front()};
+    return {};
+}
 
 // 表示同一逻辑 wire segment 对应的一组 A* 候选路径。
 struct CandidateGroup {
@@ -27,6 +38,9 @@ struct CandidateGroup {
     std::string segment_id;
     std::vector<RouteCandidate> candidates;
 };
+
+// 缓存每个候选转换后的几何线段，避免 beam 比较时重复执行路径离散化。
+using CandidateRouteCache = std::vector<std::vector<std::vector<RouteSegment>>>;
 
 // 表示 B*-tree node 的左右子树模块集合，供 local transition 判断使用。
 struct ChildSubtreeModules {
@@ -46,6 +60,7 @@ struct AppendCandidateResult {
     bool has_short{};
     std::string reason;
     std::string state_lcp_candidate_id;
+    std::vector<std::string> occupied_route_conflicts;
 };
 
 // 返回 terminal 所属模块，LCP 或无法识别时返回空字符串。
@@ -115,10 +130,15 @@ std::string existing_lcp_binding(const RoutingDpState& state, const RouteCandida
 // 写入一次 DP candidate 尝试事件，供 routing_debug.json 解释 DP 拒绝原因。
 void append_candidate_event(
     std::vector<RoutingDpCandidateEvent>& events,
+    bool& events_truncated,
     const CandidateGroup& group,
     const RoutingDpState& state,
     const RouteCandidate& candidate,
     const AppendCandidateResult& result) {
+    if (events.size() >= kMaxRecordedCandidateEvents) {
+        events_truncated = true;
+        return;
+    }
     RoutingDpCandidateEvent event;
     event.group_key = group.key;
     event.net = candidate.net;
@@ -130,8 +150,30 @@ void append_candidate_event(
                                        ? existing_lcp_binding(state, candidate)
                                        : result.state_lcp_candidate_id;
     event.reason = result.reason;
+    event.occupied_route_conflicts = result.occupied_route_conflicts;
     event.selected = result.accepted;
     events.push_back(std::move(event));
+}
+
+std::vector<std::string> collect_occupied_route_conflicts(
+    const std::vector<RouteSegment>& candidate_routes,
+    const std::vector<RouteSegment>& occupied_routes) {
+    constexpr std::size_t kMaxConflictsPerCandidateEvent = 4;
+    std::vector<std::string> conflicts;
+    for (const auto& candidate_route : candidate_routes) {
+        for (const auto& occupied_route : occupied_routes) {
+            if (!same_layer_short(candidate_route, occupied_route)) continue;
+            conflicts.push_back(
+                candidate_route.net + ":" + candidate_route.layer + " (" +
+                std::to_string(candidate_route.x1) + "," + std::to_string(candidate_route.y1) + ")->(" +
+                std::to_string(candidate_route.x2) + "," + std::to_string(candidate_route.y2) + ") with " +
+                occupied_route.net + ":" + occupied_route.layer + " (" +
+                std::to_string(occupied_route.x1) + "," + std::to_string(occupied_route.y1) + ")->(" +
+                std::to_string(occupied_route.x2) + "," + std::to_string(occupied_route.y2) + ")");
+            if (conflicts.size() >= kMaxConflictsPerCandidateEvent) return conflicts;
+        }
+    }
+    return conflicts;
 }
 
 // 追加不重复字符串，避免 traceback 列表出现重复项。
@@ -212,6 +254,12 @@ AppendCandidateResult append_candidate_if_consistent(
     const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
     auto candidate_routes = candidate_to_route_segments(context.grid(), candidate, width);
     const bool has_short = routes_short_with_existing(candidate_routes, state.occupied_routes);
+    if (has_short) {
+        result.occupied_route_conflicts = collect_occupied_route_conflicts(candidate_routes, state.occupied_routes);
+        result.has_short = true;
+        result.reason = "occupied_route_short";
+        return result;
+    }
     if (!candidate.lcp_id.empty()) {
         const auto assigned = state.lcp_location_by_id.find(candidate.lcp_id);
         if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.lcp_candidate_id) {
@@ -242,18 +290,13 @@ AppendCandidateResult append_candidate_if_consistent(
     state.selected_candidates.push_back(candidate);
     state.occupied_routes.insert(state.occupied_routes.end(), candidate_routes.begin(), candidate_routes.end());
     add_candidate_metrics(state, candidate);
-    if (has_short) {
-        state.penalty += kShortConflictPenalty;
-        recompute_state_cost(state);
-    }
     append_unique(state.covered_terminals, candidate.from_terminal);
     append_unique(state.covered_terminals, candidate.to_terminal);
     append_unique(state.covered_wire_segments, candidate_segment_key(candidate));
     append_unique(state.selected_transitions, candidate_segment_key(candidate));
     state.choice_message = candidate_segment_key(candidate);
     result.accepted = true;
-    result.has_short = has_short;
-    result.reason = has_short ? "short_conflict_penalty" : "selected";
+    result.reason = "selected";
     return result;
 }
 
@@ -437,10 +480,34 @@ std::string state_binding_signature(const RoutingDpState& state) {
 }
 
 /* 编码对后续 DP transition 等价的状态信息，用于删除重复的高代价 state。 */
+std::string state_occupancy_signature(const RoutingDpState& state) {
+    std::vector<std::string> values;
+    values.reserve(state.occupied_routes.size());
+    for (const auto& route : state.occupied_routes) {
+        double x1 = route.x1;
+        double y1 = route.y1;
+        double x2 = route.x2;
+        double y2 = route.y2;
+        if (x2 < x1 || (x2 == x1 && y2 < y1)) {
+            std::swap(x1, x2);
+            std::swap(y1, y2);
+        }
+        values.push_back(
+            route.net + "|" + route.layer + "|" +
+            std::to_string(std::bit_cast<std::uint64_t>(x1)) + "|" +
+            std::to_string(std::bit_cast<std::uint64_t>(y1)) + "|" +
+            std::to_string(std::bit_cast<std::uint64_t>(x2)) + "|" +
+            std::to_string(std::bit_cast<std::uint64_t>(y2)) + "|" +
+            std::to_string(std::bit_cast<std::uint64_t>(route.width)));
+    }
+    return sorted_value_signature(std::move(values));
+}
+
 std::string state_semantic_signature(const RoutingDpState& state) {
     return state_binding_signature(state) + "#" +
            sorted_value_signature(state.covered_wire_segments) + "#" +
-           sorted_value_signature(state.failure_messages);
+           sorted_value_signature(state.failure_messages) + "#" +
+           state_occupancy_signature(state);
 }
 
 /* 将 state 的全部 LCP binding 加入已保留集合，供后续多样性选择计算新增决策数。 */
@@ -459,8 +526,64 @@ int binding_novelty(const RoutingDpState& state, const std::unordered_set<std::s
     return result;
 }
 
+// 返回候选在指定 LCP 上绑定的 location；候选不经过该 LCP 时返回空。
+std::string candidate_location_for_lcp(const RouteCandidate& candidate, const std::string& lcp_id) {
+    if (candidate.lcp_id == lcp_id) return candidate.lcp_candidate_id;
+    if (candidate.source_lcp_id == lcp_id) return candidate.source_lcp_candidate_id;
+    if (candidate.target_lcp_id == lcp_id) return candidate.target_lcp_candidate_id;
+    return {};
+}
+
+// 统计 state 中仍可用既有候选完成全部未覆盖 incident segment 的新增 LCP binding。
+int completable_binding_novelty(
+    const RoutingDpState& state,
+    const std::vector<CandidateGroup>& groups,
+    const CandidateRouteCache& candidate_routes,
+    const std::unordered_set<std::string>& retained_bindings) {
+    std::vector<std::string> lcp_ids;
+    lcp_ids.reserve(state.lcp_location_by_id.size());
+    for (const auto& [lcp_id, location_id] : state.lcp_location_by_id) lcp_ids.push_back(lcp_id);
+    std::sort(lcp_ids.begin(), lcp_ids.end());
+    for (const auto& lcp_id : lcp_ids) {
+        const auto location = state.lcp_location_by_id.find(lcp_id);
+        if (location == state.lcp_location_by_id.end()) continue;
+        const std::string& location_id = location->second;
+        const std::string binding = lcp_id + "=" + location_id;
+        if (retained_bindings.contains(binding)) continue;
+        bool has_pending_incident_segment = false;
+        bool all_pending_segments_compatible = true;
+        for (std::size_t group_index = 0; group_index < groups.size(); ++group_index) {
+            const auto& group = groups[group_index];
+            if (group.from != lcp_id && group.to != lcp_id) continue;
+            if (contains_value(state.covered_wire_segments, group.key)) continue;
+            has_pending_incident_segment = true;
+            bool has_compatible_candidate = false;
+            for (std::size_t candidate_index = 0; candidate_index < group.candidates.size(); ++candidate_index) {
+                const auto& candidate = group.candidates[candidate_index];
+                if (!candidate.path.success || candidate_location_for_lcp(candidate, lcp_id) != location_id) continue;
+                if (!routes_short_with_existing(candidate_routes[group_index][candidate_index], state.occupied_routes)) {
+                    has_compatible_candidate = true;
+                    break;
+                }
+            }
+            if (!has_compatible_candidate) {
+                all_pending_segments_compatible = false;
+                break;
+            }
+        }
+        if (has_pending_incident_segment && all_pending_segments_compatible) return 1;
+    }
+    return 0;
+}
+
 /* 在固定 beam 上限内保留语义不同的 LCP binding，避免纯成本截断删除后续唯一可行的物理位置。 */
-void prune_states(std::vector<RoutingDpState>& states, int max_states, int& pruned_states) {
+void prune_states(
+    std::vector<RoutingDpState>& states,
+    int max_states,
+    int& pruned_states,
+    const std::vector<CandidateGroup>& groups,
+    const CandidateRouteCache& candidate_routes,
+    std::vector<RoutingDpStatePruneEvent>& state_prune_events) {
     std::sort(states.begin(), states.end(), [](const auto& left, const auto& right) {
         if (left.cost != right.cost) return left.cost < right.cost;
         if (left.covered_wire_segments.size() != right.covered_wire_segments.size()) {
@@ -469,13 +592,35 @@ void prune_states(std::vector<RoutingDpState>& states, int max_states, int& prun
         return left.selected_candidates.size() < right.selected_candidates.size();
     });
 
-    std::unordered_set<std::string> seen_semantics;
+    std::unordered_map<std::string, std::size_t> retained_semantic_index;
     std::vector<RoutingDpState> unique_states;
     unique_states.reserve(states.size());
     for (auto& state : states) {
-        if (seen_semantics.insert(state_semantic_signature(state)).second) {
+        const auto signature = state_semantic_signature(state);
+        const auto [retained, inserted] = retained_semantic_index.try_emplace(signature, unique_states.size());
+        if (inserted) {
             unique_states.push_back(std::move(state));
         } else {
+            if (state_prune_events.size() >= kMaxRecordedStatePruneEvents) {
+                ++pruned_states;
+                continue;
+            }
+            const auto& kept = unique_states[retained->second];
+            RoutingDpStatePruneEvent event;
+            event.tree_node = state.tree_node;
+            event.stage = "semantic_dedup";
+            event.reason = "same_semantic_signature";
+            event.dropped_cost = state.cost;
+            event.retained_cost = kept.cost;
+            event.beam_limit = max_states;
+            for (const auto& [lcp_id, location_id] : state.lcp_location_by_id) {
+                event.lcp_bindings.push_back(lcp_id + "=" + location_id);
+            }
+            std::sort(event.lcp_bindings.begin(), event.lcp_bindings.end());
+            event.covered_wire_segments = state.covered_wire_segments;
+            event.selected_transitions = state.selected_transitions;
+            event.failure_messages = state_failure_summary(state);
+            state_prune_events.push_back(std::move(event));
             ++pruned_states;
         }
     }
@@ -512,6 +657,14 @@ void prune_states(std::vector<RoutingDpState>& states, int max_states, int& prun
                     if (candidate_healthy) best_index = index;
                     continue;
                 }
+                const int candidate_completable_novelty =
+                    completable_binding_novelty(candidate, groups, candidate_routes, retained_bindings);
+                const int best_completable_novelty =
+                    completable_binding_novelty(best, groups, candidate_routes, retained_bindings);
+                if (candidate_completable_novelty != best_completable_novelty) {
+                    if (candidate_completable_novelty > best_completable_novelty) best_index = index;
+                    continue;
+                }
                 const int candidate_novelty = binding_novelty(candidate, retained_bindings);
                 const int best_novelty = binding_novelty(best, retained_bindings);
                 if (candidate_novelty != best_novelty) {
@@ -528,6 +681,27 @@ void prune_states(std::vector<RoutingDpState>& states, int max_states, int& prun
             selected[*best_index] = true;
             append_state_bindings(unique_states[*best_index], retained_bindings);
             retained.push_back(std::move(unique_states[*best_index]));
+        }
+        const double best_retained_cost = retained.empty() ? 0.0 : retained.front().cost;
+        for (std::size_t index = 0; index < unique_states.size(); ++index) {
+            if (selected[index]) continue;
+            if (state_prune_events.size() >= kMaxRecordedStatePruneEvents) break;
+            const auto& state = unique_states[index];
+            RoutingDpStatePruneEvent event;
+            event.tree_node = state.tree_node;
+            event.stage = "beam";
+            event.reason = "outside_beam_limit";
+            event.dropped_cost = state.cost;
+            event.retained_cost = best_retained_cost;
+            event.beam_limit = max_states;
+            for (const auto& [lcp_id, location_id] : state.lcp_location_by_id) {
+                event.lcp_bindings.push_back(lcp_id + "=" + location_id);
+            }
+            std::sort(event.lcp_bindings.begin(), event.lcp_bindings.end());
+            event.covered_wire_segments = state.covered_wire_segments;
+            event.selected_transitions = state.selected_transitions;
+            event.failure_messages = state_failure_summary(state);
+            state_prune_events.push_back(std::move(event));
         }
         pruned_states += static_cast<int>(unique_states.size() - retained.size());
         std::sort(retained.begin(), retained.end(), [](const auto& left, const auto& right) {
@@ -701,18 +875,26 @@ void apply_segment_transition(
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
     const std::unordered_map<std::string, std::string>& lcp_space_by_id,
     const PackingTraceIndex& trace_index,
+    const std::vector<CandidateGroup>& all_groups,
+    const CandidateRouteCache& candidate_routes,
     int max_states,
     int& pruned_states,
-    std::vector<RoutingDpCandidateEvent>& candidate_events) {
+    std::vector<RoutingDpCandidateEvent>& candidate_events,
+    bool& candidate_events_truncated,
+    std::vector<RoutingDpStatePruneEvent>& state_prune_events) {
     std::vector<RoutingDpState> next_states;
     for (const auto& state : states) {
         bool selected_any = false;
+        std::vector<std::string> rejection_reasons;
         for (const auto& candidate : group.candidates) {
             if (!candidate_matches_group(candidate, group)) continue;
             RoutingDpState next = state;
             const auto append_result = append_candidate_if_consistent(next, candidate, context);
-            append_candidate_event(candidate_events, group, state, candidate, append_result);
-            if (!append_result.accepted) continue;
+            append_candidate_event(candidate_events, candidate_events_truncated, group, state, candidate, append_result);
+            if (!append_result.accepted) {
+                append_unique(rejection_reasons, append_result.reason);
+                continue;
+            }
             append_candidate_packing_trace(next, candidate, lcp_owner_by_id, lcp_space_by_id, trace_index);
             selected_any = true;
             next_states.push_back(std::move(next));
@@ -721,7 +903,10 @@ void apply_segment_transition(
             RoutingDpState failed = state;
             failed.penalty += kMissingSegmentPenalty;
             append_unique(failed.covered_wire_segments, group.key);
-            std::string message = "missing successful A* candidate for " + group.key;
+            std::string message = "no DP-compatible A* candidate for " + group.key;
+            for (const auto& reason : rejection_reasons) {
+                message += " [rejected: " + reason + "]";
+            }
             bool has_multi_terminal_missing = false;
             for (const auto& candidate : group.candidates) {
                 if (!candidate_matches_group(candidate, group)) continue;
@@ -742,7 +927,7 @@ void apply_segment_transition(
             next_states.push_back(std::move(failed));
         }
     }
-    prune_states(next_states, max_states, pruned_states);
+    prune_states(next_states, max_states, pruned_states, all_groups, candidate_routes, state_prune_events);
     states = std::move(next_states);
 }
 
@@ -754,6 +939,7 @@ std::vector<RoutingDpState> build_states_for_node(
     const ChildSubtreeModules& children,
     const std::vector<CandidateGroup>& groups,
     const RoutingContext& context,
+    const CandidateRouteCache& candidate_routes,
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
     const std::unordered_map<std::string, std::string>& lcp_space_by_id,
     const PackingTraceIndex& trace_index,
@@ -761,7 +947,9 @@ std::vector<RoutingDpState> build_states_for_node(
     bool use_packing_time_segments,
     int max_states,
     int& pruned_states,
-    std::vector<RoutingDpCandidateEvent>& candidate_events) {
+    std::vector<RoutingDpCandidateEvent>& candidate_events,
+    bool& candidate_events_truncated,
+    std::vector<RoutingDpStatePruneEvent>& state_prune_events) {
     auto states = merge_child_states_for_node(node, result_by_node, trace_index);
     if (states.empty()) return states;
 
@@ -787,12 +975,16 @@ std::vector<RoutingDpState> build_states_for_node(
             lcp_owner_by_id,
             lcp_space_by_id,
             trace_index,
+            groups,
+            candidate_routes,
             max_states,
             pruned_states,
-            candidate_events);
+            candidate_events,
+            candidate_events_truncated,
+            state_prune_events);
     }
 
-    prune_states(states, max_states, pruned_states);
+    prune_states(states, max_states, pruned_states, groups, candidate_routes, state_prune_events);
     return states;
 }
 
@@ -818,7 +1010,11 @@ RoutingDpResult run_bottom_up_routing_dp(
     int max_states_per_node) {
     (void)circuit;
     (void)context;
-    RoutingDpResult result;
+    RoutingDpResult result{};
+    result.beam_width = max_states_per_node;
+    result.state_prune_events = std::make_unique<std::vector<RoutingDpStatePruneEvent>>();
+    result.candidate_events.reserve(kMaxRecordedCandidateEvents);
+    result.state_prune_events->reserve(kMaxRecordedStatePruneEvents);
     if (!request.tree.root.has_value() || request.tree.nodes.empty() || candidates.empty()) return result;
 
     const auto nodes = tree_nodes_by_id(request.tree);
@@ -830,6 +1026,17 @@ RoutingDpResult run_bottom_up_routing_dp(
     const auto required_segments = required_segment_keys(request);
     const auto required_lcps = required_lcp_ids(request);
     const auto groups = make_candidate_groups(request, candidates);
+    CandidateRouteCache candidate_routes;
+    candidate_routes.reserve(groups.size());
+    for (const auto& group : groups) {
+        std::vector<std::vector<RouteSegment>> group_routes;
+        group_routes.reserve(group.candidates.size());
+        for (const auto& candidate : group.candidates) {
+            const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
+            group_routes.push_back(candidate_to_route_segments(context.grid(), candidate, width));
+        }
+        candidate_routes.push_back(std::move(group_routes));
+    }
     const auto lcp_owner_by_id = make_lcp_owner_map(request);
     const auto lcp_space_by_id = make_lcp_space_map(request);
     const auto trace_index = make_packing_trace_index(request.packing_trace);
@@ -864,6 +1071,7 @@ RoutingDpResult run_bottom_up_routing_dp(
             children,
             groups,
             context,
+            candidate_routes,
             lcp_owner_by_id,
             lcp_space_by_id,
             trace_index,
@@ -871,7 +1079,9 @@ RoutingDpResult run_bottom_up_routing_dp(
             result.packing_time_dp_used,
             max_states_per_node,
             result.dp_pruned_states,
-            result.candidate_events);
+            result.candidate_events,
+            result.candidate_events_truncated,
+            *result.state_prune_events);
         result.dp_nodes += 1;
         result.dp_states += static_cast<int>(node_result.states.size());
         result_by_node[node_id] = node_result;

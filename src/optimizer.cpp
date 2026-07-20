@@ -365,8 +365,53 @@ void write_dp_candidate_event_json(std::ostringstream& out, const routing::Routi
     write_json_string(out, event.state_lcp_candidate_id);
     out << ", \"reason\": ";
     write_json_string(out, event.reason);
+    out << ", \"occupied_route_conflicts\": ";
+    write_json_string_array(out, event.occupied_route_conflicts);
     out << ", \"selected\": " << (event.selected ? "true" : "false")
         << '}';
+}
+
+// 写出 LCP 多端覆盖检查删除的 A* 候选，区分其与后续 DP 阶段的拒绝和裁剪。
+void write_lcp_candidate_filter_event_json(std::ostringstream& out, const LcpCandidateFilterEvent& event) {
+    out << "{\"net\": ";
+    write_json_string(out, event.net);
+    out << ", \"from\": ";
+    write_json_string(out, event.from_terminal);
+    out << ", \"to\": ";
+    write_json_string(out, event.to_terminal);
+    out << ", \"segment_id\": ";
+    write_json_string(out, event.segment_id);
+    out << ", \"lcp_candidate_id\": ";
+    write_json_string(out, event.lcp_candidate_id);
+    out << ", \"source_lcp_candidate_id\": ";
+    write_json_string(out, event.source_lcp_candidate_id);
+    out << ", \"target_lcp_candidate_id\": ";
+    write_json_string(out, event.target_lcp_candidate_id);
+    out << ", \"reason\": ";
+    write_json_string(out, event.reason);
+    out << '}';
+}
+
+// 写出 DP state 在语义去重或 beam 截断时被删除的候选组合。
+void write_dp_state_prune_event_json(std::ostringstream& out, const routing::RoutingDpStatePruneEvent& event) {
+    out << "{\"tree_node\": ";
+    write_json_string(out, event.tree_node);
+    out << ", \"stage\": ";
+    write_json_string(out, event.stage);
+    out << ", \"reason\": ";
+    write_json_string(out, event.reason);
+    out << ", \"dropped_cost\": " << event.dropped_cost
+        << ", \"retained_cost\": " << event.retained_cost
+        << ", \"beam_limit\": " << event.beam_limit
+        << ", \"lcp_bindings\": ";
+    write_json_string_array(out, event.lcp_bindings);
+    out << ", \"covered_wire_segments\": ";
+    write_json_string_array(out, event.covered_wire_segments);
+    out << ", \"selected_transitions\": ";
+    write_json_string_array(out, event.selected_transitions);
+    out << ", \"failure_messages\": ";
+    write_json_string_array(out, event.failure_messages);
+    out << '}';
 }
 
 // 写出最终 bottom-up DP 状态，供 strict LCP-DP 失败时定位未覆盖 terminal 与绑定冲突。
@@ -380,6 +425,7 @@ void write_dp_result_json(std::ostringstream& out, const std::optional<routing::
         << ", \"dp_nodes\": " << dp.dp_nodes
         << ", \"dp_states\": " << dp.dp_states
         << ", \"dp_pruned_states\": " << dp.dp_pruned_states
+        << ", \"beam_width\": " << dp.beam_width
         << ", \"traceback_candidate_count\": " << dp.traceback_candidates.size()
         << ", \"best_state\": {\"id\": " << dp.best_state.id
         << ", \"tree_node\": ";
@@ -393,6 +439,44 @@ void write_dp_result_json(std::ostringstream& out, const std::optional<routing::
     out << ", \"failure_messages\": ";
     write_json_string_array(out, dp.best_state.failure_messages);
     out << "}}";
+}
+
+// 写出每个 DP tree node 保留的 state，定位某个 LCP binding 在 beam pruning 后的消失位置。
+void write_dp_node_states_json(std::ostringstream& out, const std::optional<routing::RoutingDpResult>& result) {
+    out << '[';
+    if (!result.has_value()) {
+        out << ']';
+        return;
+    }
+    for (std::size_t node_index = 0; node_index < result->node_results.size(); ++node_index) {
+        if (node_index != 0) out << ',';
+        const auto& node = result->node_results[node_index];
+        out << "{\"tree_node\": ";
+        write_json_string(out, node.tree_node);
+        out << ", \"states\": [";
+        for (std::size_t state_index = 0; state_index < node.states.size(); ++state_index) {
+            if (state_index != 0) out << ',';
+            const auto& state = node.states[state_index];
+            std::vector<std::pair<std::string, std::string>> bindings(
+                state.lcp_location_by_id.begin(), state.lcp_location_by_id.end());
+            std::sort(bindings.begin(), bindings.end());
+            out << "{\"id\": " << state.id << ", \"cost\": " << state.cost
+                << ", \"lcp_bindings\": {";
+            for (std::size_t binding_index = 0; binding_index < bindings.size(); ++binding_index) {
+                if (binding_index != 0) out << ',';
+                write_json_string(out, bindings[binding_index].first);
+                out << ':';
+                write_json_string(out, bindings[binding_index].second);
+            }
+            out << "}, \"covered_wire_segments\": ";
+            write_json_string_array(out, state.covered_wire_segments);
+            out << ", \"failure_messages\": ";
+            write_json_string_array(out, state.failure_messages);
+            out << '}';
+        }
+        out << "]}";
+    }
+    out << ']';
 }
 
 // 鍐欏嚭 detailed traceback 涓嚭鐜扮殑 pin/LCP 鑺傜偣銆?
@@ -450,6 +534,78 @@ void write_detailed_trace_json(std::ostringstream& out, const DetailedRouteTrace
     out << "], \"warnings\": ";
     write_json_string_array(out, trace.warnings);
     out << '}';
+}
+
+// 输出单条 selected candidate 的 detailed 落地状态，供 DP 选择与最终输出逐条对照。
+void write_detailed_transition_outcome_json(std::ostringstream& out, const DetailedTransitionOutcome& outcome) {
+    out << "{\"net\": ";
+    write_json_string(out, outcome.net);
+    out << ", \"from\": ";
+    write_json_string(out, outcome.from_terminal);
+    out << ", \"to\": ";
+    write_json_string(out, outcome.to_terminal);
+    out << ", \"segment_id\": ";
+    write_json_string(out, outcome.segment_id);
+    out << ", \"lcp_id\": ";
+    write_json_string(out, outcome.lcp_id);
+    out << ", \"source_lcp_id\": ";
+    write_json_string(out, outcome.source_lcp_id);
+    out << ", \"target_lcp_id\": ";
+    write_json_string(out, outcome.target_lcp_id);
+    out << ", \"dp_status\": ";
+    write_json_string(out, outcome.selected_by_dp ? "selected" : "not_selected_by_dp");
+    out << ", \"detailed_status\": ";
+    write_json_string(out, !outcome.detailed_attempted ? "not_attempted" : outcome.detailed_legalized ? "legalized" : "failed");
+    out << ", \"final_output\": ";
+    write_json_string(out, outcome.final_output ? "included" : "excluded");
+    out << ", \"failure_stage\": ";
+    write_json_string(out, outcome.failure_stage);
+    out << ", \"failure_reason\": ";
+    write_json_string(out, outcome.failure_reason);
+    out << '}';
+}
+
+// 按 net 汇总 selected candidate 的 detailed 落地情况，避免从散落 warning 手工计数。
+void write_detailed_net_summary_json(
+    std::ostringstream& out,
+    const std::vector<DetailedTransitionOutcome>& outcomes) {
+    struct Summary {
+        std::string net;
+        std::size_t selected_by_dp{};
+        std::size_t detailed_success{};
+        std::size_t detailed_failed{};
+        std::size_t final_included{};
+    };
+    std::vector<Summary> summaries;
+    std::unordered_map<std::string, std::size_t> summary_index;
+    for (const auto& outcome : outcomes) {
+        const auto [found, inserted] = summary_index.emplace(outcome.net, summaries.size());
+        if (inserted) summaries.push_back(Summary{outcome.net});
+        auto& summary = summaries[found->second];
+        if (outcome.selected_by_dp) ++summary.selected_by_dp;
+        if (outcome.detailed_legalized) ++summary.detailed_success;
+        else ++summary.detailed_failed;
+        if (outcome.final_output) ++summary.final_included;
+    }
+    out << '[';
+    for (std::size_t index = 0; index < summaries.size(); ++index) {
+        if (index != 0) out << ',';
+        const auto& summary = summaries[index];
+        const std::string status = summary.final_included == summary.detailed_success &&
+                                           summary.detailed_failed == 0
+                                       ? "complete"
+                                       : "incomplete";
+        out << "{\"net\": ";
+        write_json_string(out, summary.net);
+        out << ", \"dp_selected_segments\": " << summary.selected_by_dp
+            << ", \"detailed_success_segments\": " << summary.detailed_success
+            << ", \"detailed_failed_segments\": " << summary.detailed_failed
+            << ", \"final_output_segments\": " << summary.final_included
+            << ", \"status\": ";
+        write_json_string(out, status);
+        out << '}';
+    }
+    out << ']';
 }
 
 // 姹囨€讳竴娆?routing evaluation 鍜?detailed routing 鐨勮瘖鏂俊鎭€?
@@ -564,9 +720,12 @@ std::string make_routing_debug_json(
         << ", \"global_penalty\": " << metrics.global_penalty
         << ", \"final_penalty\": " << metrics.penalty
         << ", \"candidate_count\": " << evaluation.candidates.size()
+        << ", \"dp_beam_width\": " << request.dp_beam_width
+        << ", \"lcp_candidate_filter_count\": " << evaluation.lcp_candidate_filter_events.size()
         << ", \"dp_used\": " << (evaluation.used_bottom_up_dp ? "true" : "false")
         << ", \"failed_nets\": " << evaluation.failed_nets
         << ", \"detailed_routes\": " << detailed.routes.size()
+        << ", \"detailed_raw_routes\": " << detailed.raw_routes.size()
         << ", \"space_nodes_with_routes\": " << detailed.space_nodes_with_routes
         << ", \"traceback_failures\": " << detailed.traceback_failures
         << ", \"design_rule_violations\": " << detailed.design_rule_violations
@@ -580,6 +739,15 @@ std::string make_routing_debug_json(
         << ", \"lcp_locations_missing_segments\": " << count_missing_lcp_coverages(lcp_coverages)
         << ", \"fallback_blocked_by_strict_lcp_dp\": "
         << (evaluation.strict_lcp_dp_blocked_fallback ? "true" : "false")
+        << ", \"dp_state_prune_event_count\": "
+        << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->state_prune_events != nullptr
+                ? evaluation.bottom_up_dp->state_prune_events->size()
+                : 0)
+        << ", \"dp_state_prune_events_truncated\": "
+        << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->state_prune_events != nullptr &&
+                    evaluation.bottom_up_dp->state_prune_events->size() >= 4096
+                ? "true"
+                : "false")
         << ", \"first_uncovered_lcp_location\": ";
     write_json_string(out, first_uncovered);
     out
@@ -590,6 +758,9 @@ std::string make_routing_debug_json(
         << "},\n";
     out << "  \"bottom_up_dp\": ";
     write_dp_result_json(out, evaluation.bottom_up_dp);
+    out << ",\n";
+    out << "  \"dp_node_states\": ";
+    write_dp_node_states_json(out, evaluation.bottom_up_dp);
     out << ",\n";
     write_debug_topologies_json(out, request);
     out << ",\n";
@@ -621,6 +792,25 @@ std::string make_routing_debug_json(
             write_dp_candidate_event_json(out, evaluation.bottom_up_dp->candidate_events[index]);
         }
     }
+    out << "],\n  \"dp_candidate_events_truncated\": "
+        << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->candidate_events_truncated ? "true" : "false");
+    out << ",\n  \"lcp_candidate_filter_events\": [";
+    for (std::size_t index = 0; index < evaluation.lcp_candidate_filter_events.size(); ++index) {
+        if (index != 0) out << ',';
+        write_lcp_candidate_filter_event_json(out, evaluation.lcp_candidate_filter_events[index]);
+    }
+    out << "],\n  \"dp_state_prune_events\": [";
+    if (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->state_prune_events != nullptr) {
+        for (std::size_t index = 0; index < evaluation.bottom_up_dp->state_prune_events->size(); ++index) {
+            if (index != 0) out << ',';
+            write_dp_state_prune_event_json(out, (*evaluation.bottom_up_dp->state_prune_events)[index]);
+        }
+    }
+    out << "],\n  \"detailed_raw_routes\": [";
+    for (std::size_t index = 0; index < detailed.raw_routes.size(); ++index) {
+        if (index != 0) out << ',';
+        write_route_segment_json(out, detailed.raw_routes[index]);
+    }
     out << "],\n  \"final_routes\": [";
     for (std::size_t index = 0; index < detailed.routes.size(); ++index) {
         if (index != 0) out << ',';
@@ -631,7 +821,14 @@ std::string make_routing_debug_json(
         if (index != 0) out << ',';
         write_detailed_trace_json(out, detailed.report.traces[index]);
     }
-    out << "],\n  \"warnings\": ";
+    out << "],\n  \"detailed_transition_outcomes\": [";
+    for (std::size_t index = 0; index < detailed.transition_outcomes.size(); ++index) {
+        if (index != 0) out << ',';
+        write_detailed_transition_outcome_json(out, detailed.transition_outcomes[index]);
+    }
+    out << "],\n  \"detailed_net_summary\": ";
+    write_detailed_net_summary_json(out, detailed.transition_outcomes);
+    out << ",\n  \"warnings\": ";
     write_json_string_array(out, detailed.report.warnings);
     out << ",\n  \"design_rule_segments\": ";
     write_json_string_array(out, detailed.report.design_rule_segments);
@@ -1591,6 +1788,7 @@ RoutingEvaluationRequest pack_enhanced_tree(
     request.strict_lcp_dp = config.strict_lcp_dp;
     request.allow_lcp_location_negotiation = config.negotiate_lcp_locations;
     request.routing_layers = config.routing_layers;
+    request.dp_beam_width = config.dp_beam_width;
     assign_space_physical_regions(circuit, request, config);
     request.tree = make_routing_tree_snapshot(tree);
     populate_routing_context(circuit, request);

@@ -998,10 +998,14 @@ void run_routing_evaluator_tests() {
     sapr::initialize_lcp_topology(mixed_circuit, mixed_tree, config);
     const auto mixed_request = sapr::pack_enhanced_tree(mixed_circuit, mixed_tree, config);
     const auto mixed_evaluation = sapr::evaluate_routing(mixed_circuit, mixed_request);
+    require(mixed_evaluation.bottom_up_dp.has_value(), "mixed LCP/direct case should expose bottom-up DP result");
     require(
-        mixed_evaluation.bottom_up_dp.has_value() && mixed_evaluation.bottom_up_dp->success,
-        "mixed LCP/direct case should use successful bottom-up DP");
-    require(mixed_evaluation.failed_nets == 0, "successful DP should not drop direct-only nets from global routing");
+        std::none_of(
+            mixed_evaluation.bottom_up_dp->candidate_events.begin(),
+            mixed_evaluation.bottom_up_dp->candidate_events.end(),
+            [](const auto& event) { return event.reason == "short_conflict_penalty"; }),
+        "bottom-up DP should reject occupied-route shorts instead of retaining a penalty candidate");
+    require(mixed_evaluation.failed_nets == 0, "non-strict DP fallback should not drop direct-only nets from global routing");
     std::unordered_set<std::string> mixed_routed_nets;
     for (const auto& segment : sapr::selected_candidates_to_segments(mixed_evaluation)) {
         mixed_routed_nets.insert(segment.net);
@@ -1211,6 +1215,14 @@ void run_routing_evaluator_tests() {
     const auto legalized_detail = sapr::run_detailed_routing(conflict_circuit, short_detail_request, short_detail_eval);
     require(legalized_detail.design_rule_violations == 0, "detailed routing should legalize shorts with an alternative candidate");
     require(!legalized_detail.routes.empty(), "detailed routing should keep legalized routes instead of clearing all output");
+    require(
+        legalized_detail.raw_routes.size() == legalized_detail.routes.size() &&
+            legalized_detail.raw_routes.front().net == legalized_detail.routes.front().net &&
+            approx(legalized_detail.raw_routes.front().x1, legalized_detail.routes.front().x1) &&
+            approx(legalized_detail.raw_routes.front().y1, legalized_detail.routes.front().y1) &&
+            approx(legalized_detail.raw_routes.front().x2, legalized_detail.routes.front().x2) &&
+            approx(legalized_detail.raw_routes.front().y2, legalized_detail.routes.front().y2),
+        "diagnostic raw routes should preserve every final detailed route when final DRC passes");
     require(
         approx(legalized_detail.detailed_cost, 18.0),
         "detailed routing cost should be recomputed from final routes instead of stale candidate via metrics");
@@ -1616,6 +1628,14 @@ void run_routing_evaluator_tests() {
     require(
         !missing_segment_dp.best_state.failure_messages.empty(),
         "missing required wire segment should be recorded in DP failure messages");
+    require(
+        std::any_of(
+            missing_segment_dp.best_state.failure_messages.begin(),
+            missing_segment_dp.best_state.failure_messages.end(),
+            [](const std::string& message) {
+                return message.find("no DP-compatible A* candidate") != std::string::npos;
+            }),
+        "DP failure should distinguish missing state-compatible candidates from A* path generation failure");
 
     auto expensive_left = make_manual_lcp_candidate(lcp_context, "M.A", "LCP1", "LCP1:a", 9.0, 1.0);
     expensive_left.segment_id = "N:left";

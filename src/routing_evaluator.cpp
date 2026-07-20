@@ -57,27 +57,29 @@ RoutingEvaluation make_evaluation(
     const Circuit& circuit,
     std::optional<routing::RoutingDpResult> bottom_up_dp = std::nullopt,
     std::vector<routing::RouteCandidate> debug_candidates = {},
-    bool strict_lcp_dp_blocked_fallback = false) {
+    bool strict_lcp_dp_blocked_fallback = false,
+    std::vector<LcpCandidateFilterEvent> lcp_candidate_filter_events = {}) {
     const bool use_dp = bottom_up_dp.has_value() && bottom_up_dp->success;
     const auto routing_candidates = use_dp
                                         ? merge_dp_traceback_with_uncovered_nets(candidates, bottom_up_dp->traceback_candidates)
                                         : candidates;
     auto global_routing = routing::run_global_routing(circuit, context, routing_candidates);
     if (debug_candidates.empty()) debug_candidates = candidates;
-    RoutingEvaluation evaluation{
+    const double routing_cost = global_routing.total_metrics.cost;
+    const int failed_nets = global_routing.failed_nets;
+    // 直接构造返回值，避免 Debug 构建移动含调试迭代器的候选容器。
+    return RoutingEvaluation{
         std::move(context),
         std::move(candidates),
         std::move(global_routing),
         std::move(bottom_up_dp),
-        0.0,
-        0,
+        routing_cost,
+        failed_nets,
         use_dp,
         std::move(debug_candidates),
         strict_lcp_dp_blocked_fallback,
+        std::move(lcp_candidate_filter_events),
     };
-    evaluation.routing_cost = evaluation.global_routing.total_metrics.cost;
-    evaluation.failed_nets = evaluation.global_routing.failed_nets;
-    return evaluation;
 }
 
 // 杩斿洖褰撳墠 request 涓甫 LCP 鎷撴墤鐨?net 闆嗗悎銆?
@@ -366,7 +368,8 @@ std::vector<LcpCandidateCoverage> collect_lcp_candidate_coverage(
 
 void filter_multi_terminal_unreachable_lcp_candidates(
     const RoutingEvaluationRequest& request,
-    std::vector<routing::RouteCandidate>& candidates) {
+    std::vector<routing::RouteCandidate>& candidates,
+    std::vector<LcpCandidateFilterEvent>* filter_events) {
     std::unordered_map<std::string, std::unordered_set<std::string>> required_segments_by_location;
     std::unordered_map<std::string, std::unordered_set<std::string>> reachable_segments_by_location;
 
@@ -426,6 +429,18 @@ void filter_multi_terminal_unreachable_lcp_candidates(
         for (const auto& message : missing_messages) candidate.path.message += "; " + message;
         candidate.current_density_ok = false;
         candidate.current_density_penalty = 50000.0;
+        if (filter_events != nullptr) {
+            filter_events->push_back(LcpCandidateFilterEvent{
+                candidate.net,
+                candidate.from_terminal,
+                candidate.to_terminal,
+                candidate.segment_id,
+                candidate.lcp_candidate_id,
+                candidate.source_lcp_candidate_id,
+                candidate.target_lcp_candidate_id,
+                candidate.path.message,
+            });
+        }
     }
 }
 
@@ -434,7 +449,8 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
     const routing::RoutingContext& context,
     const RoutingEvaluationRequest& request,
     const Circuit& circuit,
-    std::vector<routing::RouteCandidate>* raw_candidates = nullptr) {
+    std::vector<routing::RouteCandidate>* raw_candidates = nullptr,
+    std::vector<LcpCandidateFilterEvent>* filter_events = nullptr) {
     std::vector<routing::RouteCandidate> candidates;
     std::unordered_map<std::string, LinkingControlPoint> lcp_by_id;
     for (const auto& point : request.linking_points) lcp_by_id[point.id] = point;
@@ -543,7 +559,7 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
         }
     }
     if (raw_candidates != nullptr) *raw_candidates = candidates;
-    filter_multi_terminal_unreachable_lcp_candidates(request, candidates);
+    filter_multi_terminal_unreachable_lcp_candidates(request, candidates, filter_events);
     return candidates;
 }
 [[maybe_unused]] std::vector<routing::GridPoint> prune_backtracks(std::vector<routing::GridPoint> points) {
@@ -1711,6 +1727,30 @@ std::vector<std::size_t> collect_active_region_crossings(
     return violations;
 }
 
+// 写入一条候选在 detailed 阶段的结构化落地结果，避免仅靠 warning 文本判断最终状态。
+void append_detailed_transition_outcome(
+    DetailedRoutingResult& result,
+    const routing::RouteCandidate& candidate,
+    bool selected_by_dp,
+    bool legalized,
+    const std::string& failure_reason = {}) {
+    result.transition_outcomes.push_back(DetailedTransitionOutcome{
+        candidate.net,
+        candidate.from_terminal,
+        candidate.to_terminal,
+        candidate.segment_id,
+        candidate.lcp_id,
+        candidate.source_lcp_id,
+        candidate.target_lcp_id,
+        selected_by_dp,
+        true,
+        legalized,
+        legalized,
+        legalized ? std::string{} : "detailed_route_legalization",
+        failure_reason,
+    });
+}
+
 // 判断整组候选金属是否包含 active-region DRC，供 detailed 候选筛选和 A* 重布线共用。
 bool routes_violate_active_regions(
     const RoutingEvaluationRequest& request,
@@ -2112,6 +2152,7 @@ RoutingEvaluation evaluate_routing(
     }
     auto candidates = direct_candidates;
     std::vector<routing::RouteCandidate> debug_candidates = direct_candidates;
+    std::vector<LcpCandidateFilterEvent> lcp_candidate_filter_events;
     const auto lcp_nets = nets_with_lcp_topology(request);
     if (!lcp_nets.empty()) {
         candidates.erase(
@@ -2127,7 +2168,12 @@ RoutingEvaluation evaluate_routing(
                 [&](const auto& candidate) { return lcp_nets.contains(candidate.net); }),
             debug_candidates.end());
         std::vector<routing::RouteCandidate> raw_lcp_candidates;
-        auto lcp_candidates = generate_lcp_route_candidates(context, request, circuit, &raw_lcp_candidates);
+        auto lcp_candidates = generate_lcp_route_candidates(
+            context,
+            request,
+            circuit,
+            &raw_lcp_candidates,
+            &lcp_candidate_filter_events);
         candidates.insert(
             candidates.end(),
             std::make_move_iterator(lcp_candidates.begin()),
@@ -2138,9 +2184,17 @@ RoutingEvaluation evaluate_routing(
             std::make_move_iterator(raw_lcp_candidates.end()));
     }
     if (request.net_topologies.empty() || !request.tree.root.has_value()) {
-        return make_evaluation(std::move(context), std::move(candidates), circuit, std::nullopt, std::move(debug_candidates));
+        return make_evaluation(
+            std::move(context),
+            std::move(candidates),
+            circuit,
+            std::nullopt,
+            std::move(debug_candidates),
+            false,
+            std::move(lcp_candidate_filter_events));
     }
-    auto bottom_up_dp = routing::run_bottom_up_routing_dp(circuit, request, context, candidates);
+    auto bottom_up_dp = routing::run_bottom_up_routing_dp(
+        circuit, request, context, candidates, request.dp_beam_width);
     if (!bottom_up_dp.success) {
         if (request.strict_lcp_dp && !lcp_nets.empty()) {
             return make_evaluation(
@@ -2149,21 +2203,26 @@ RoutingEvaluation evaluate_routing(
                 circuit,
                 std::move(bottom_up_dp),
                 std::move(debug_candidates),
-                true);
+                true,
+                std::move(lcp_candidate_filter_events));
         }
         return make_evaluation(
             std::move(context),
             std::move(direct_candidates),
             circuit,
             std::move(bottom_up_dp),
-            std::move(debug_candidates));
+            std::move(debug_candidates),
+            false,
+            std::move(lcp_candidate_filter_events));
     }
     return make_evaluation(
         std::move(context),
         std::move(candidates),
         circuit,
         std::move(bottom_up_dp),
-        std::move(debug_candidates));
+        std::move(debug_candidates),
+        false,
+        std::move(lcp_candidate_filter_events));
 }
 
 // 灏?DP 鍏ㄥ眬甯冪嚎閫変腑鐨?A* 缃戞牸璺緞杞崲涓哄綋鍓?routing.txt 浣跨敤鐨勪腑蹇冪嚎绾挎銆?
@@ -2173,6 +2232,8 @@ std::vector<RouteSegment> selected_candidates_to_segments(
     for (const auto& candidate : selected_candidates_for_detailed_routing(evaluation)) {
         append_path_segments(routes, evaluation, candidate);
     }
+    // active 边界会在路径转线段时切开；再次合并会把合法的 pin access 段伪造成穿越 active 的长线段。
+    if (!evaluation.context.active_regions().empty()) return routes;
     return routing::merge_collinear_same_net_routes(routes);
 }
 
@@ -2194,6 +2255,22 @@ DetailedRoutingResult run_detailed_routing(
             has_dp_traceback);
     const int dp_state_id = has_dp_traceback ? evaluation.bottom_up_dp->best_state.id : -1;
     const std::string tree_node = has_dp_traceback ? evaluation.bottom_up_dp->best_state.tree_node : std::string{};
+    // 判断 detailed 候选是否来自 DP traceback；未覆盖 net 的全局候选会被标记为非 DP 选择。
+    const auto selected_by_dp = [&](const routing::RouteCandidate& candidate) {
+        if (!has_dp_traceback) return false;
+        return std::any_of(
+            evaluation.bottom_up_dp->traceback_candidates.begin(),
+            evaluation.bottom_up_dp->traceback_candidates.end(),
+            [&](const auto& traceback) {
+                return traceback.net == candidate.net &&
+                       traceback.from_terminal == candidate.from_terminal &&
+                       traceback.to_terminal == candidate.to_terminal &&
+                       traceback.segment_id == candidate.segment_id &&
+                       traceback.lcp_candidate_id == candidate.lcp_candidate_id &&
+                       traceback.source_lcp_candidate_id == candidate.source_lcp_candidate_id &&
+                       traceback.target_lcp_candidate_id == candidate.target_lcp_candidate_id;
+            });
+    };
     if (evaluation.bottom_up_dp.has_value() && !evaluation.bottom_up_dp->success) {
         auto& trace = trace_for_net(result.report, "__dp__");
         if (evaluation.bottom_up_dp->best_state.failure_messages.empty()) {
@@ -2238,6 +2315,7 @@ DetailedRoutingResult run_detailed_routing(
             legal.routes,
             dp_state_id,
             tree_node);
+        append_detailed_transition_outcome(result, actual_candidate, selected_by_dp(actual_candidate), true);
         detailed_metrics.wirelength += legal.metrics.wirelength;
         detailed_metrics.bend_count += legal.metrics.bend_count;
         detailed_metrics.via_count += legal.metrics.via_count;
@@ -2295,6 +2373,11 @@ DetailedRoutingResult run_detailed_routing(
                     result.report.warnings.push_back(failure);
                 }
                 for (const auto& branch : group) {
+                    const std::string failure_reason = net_legal.failure_messages.empty()
+                                                           ? "LCP detailed legalization failed"
+                                                           : net_legal.failure_messages.front();
+                    append_detailed_transition_outcome(
+                        result, branch, selected_by_dp(branch), false, failure_reason);
                     add_traceback_failure(
                         result,
                         trace,
@@ -2323,6 +2406,11 @@ DetailedRoutingResult run_detailed_routing(
                     trace.warnings.push_back(failure);
                     result.report.warnings.push_back(failure);
                 }
+                const std::string failure_reason = legal.failure_messages.empty()
+                                                       ? "detailed legalization failed"
+                                                       : legal.failure_messages.front();
+                append_detailed_transition_outcome(
+                    result, candidate, selected_by_dp(candidate), false, failure_reason);
                 add_traceback_failure(
                     result,
                     trace,
@@ -2334,7 +2422,12 @@ DetailedRoutingResult run_detailed_routing(
         }
     }
     apply_detailed_flow_check(circuit, legalized_candidates, result);
-    result.routes = routing::merge_collinear_same_net_routes(result.routes);
+    // 保留 active 边界切段，避免输出归一化重新合并 pin access 段并引入伪 DRC。
+    if (request.active_region_blockers.empty()) {
+        result.routes = routing::merge_collinear_same_net_routes(result.routes);
+    }
+    // 在最终全局 DRC 前保留已成功 detailed legalization 的路线，避免 routes 清空后丢失诊断证据。
+    result.raw_routes = result.routes;
     const auto drc_routes = collect_active_region_crossings(request, result.routes);
     const auto short_pairs = collect_same_layer_shorts(result.routes);
     result.design_rule_violations = static_cast<int>(drc_routes.size() + short_pairs.size());
@@ -2374,6 +2467,7 @@ DetailedRoutingResult run_detailed_routing(
     if (result.design_rule_violations > 0) {
         result.routing_failure_penalty += kDetailedFailurePenalty * static_cast<double>(result.design_rule_violations);
         result.report.warnings.push_back("detailed routing discarded routes with DRC violations");
+        for (auto& outcome : result.transition_outcomes) outcome.final_output = false;
         result.routes.clear();
         routed_space_nodes.clear();
         detailed_metrics = routing::PathMetrics{};

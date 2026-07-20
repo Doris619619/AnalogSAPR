@@ -278,6 +278,7 @@ struct SolverConfig {
     bool negotiate_lcp_locations{true};
     // 允许使用的金属层数（M1..Mn）；默认两层以对齐论文实验设置并避免单层短路。
     int routing_layers{2};
+    int dp_beam_width{16};
 };
 
 // 琛ㄧず涓€娆?SA 鎵板姩鐨勮皟璇曟憳瑕侊紝渚涘懡浠よ璇婃柇鎼滅储鐘舵€佹槸鍚︾湡瀹炲彉鍖栥€?
@@ -475,6 +476,7 @@ struct RoutingEvaluationRequest {
     bool allow_lcp_location_negotiation{};
     // 传入 RoutingContext::GridConfig.layer_count，统一限制 A*/obstacle/detailed reroute。
     int routing_layers{1};
+    int dp_beam_width{16};
 };
 
 // 琛ㄧず璺敱 adapter 杩斿洖缁?placement/SA 鐨勫弽棣堛€?
@@ -522,6 +524,23 @@ struct DetailedRouteTrace {
     std::vector<std::string> warnings;
 };
 
+// 记录 DP 或全局候选在 detailed 阶段的最终落地状态，供诊断选中连接是否真正进入输出。
+struct DetailedTransitionOutcome {
+    std::string net;
+    std::string from_terminal;
+    std::string to_terminal;
+    std::string segment_id;
+    std::string lcp_id;
+    std::string source_lcp_id;
+    std::string target_lcp_id;
+    bool selected_by_dp{};
+    bool detailed_attempted{};
+    bool detailed_legalized{};
+    bool final_output{};
+    std::string failure_stage;
+    std::string failure_reason;
+};
+
 // 姹囨€?detailed routing 鐨勫彲瑙ｉ噴鎶ュ憡銆?
 struct DetailedRoutingReport {
     std::vector<DetailedRouteTrace> traces;
@@ -536,8 +555,13 @@ struct DetailedRoutingReport {
 
 // 琛ㄧず top-down performance-aware detailed routing 鐨勮緭鍑恒€?
 struct DetailedRoutingResult {
+    // 保存 detailed 阶段已提交、但可能因最终全局 DRC 被拒绝的原始金属段，仅供 routing_debug.json 诊断。
+    std::vector<RouteSegment> raw_routes;
+    // 仅保存通过最终 DRC 的可交付金属段，作为 routing.txt 的唯一来源。
     std::vector<RouteSegment> routes;
     DetailedRoutingReport report;
+    // 逐条记录 selected candidate 在 detailed 阶段是否成功落地及是否仍在最终输出中。
+    std::vector<DetailedTransitionOutcome> transition_outcomes;
     std::unordered_map<std::string, double> required_space_by_node;
     std::unordered_map<std::string, double> coupling_space_by_node;
     double detailed_wirelength{};
