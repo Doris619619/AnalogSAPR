@@ -522,6 +522,23 @@ struct DetailedRouteTrace {
     std::vector<std::string> warnings;
 };
 
+// 记录 DP 或全局候选在 detailed 阶段的最终落地状态，供诊断选中连接是否真正进入输出。
+struct DetailedTransitionOutcome {
+    std::string net;
+    std::string from_terminal;
+    std::string to_terminal;
+    std::string segment_id;
+    std::string lcp_id;
+    std::string source_lcp_id;
+    std::string target_lcp_id;
+    bool selected_by_dp{};
+    bool detailed_attempted{};
+    bool detailed_legalized{};
+    bool final_output{};
+    std::string failure_stage;
+    std::string failure_reason;
+};
+
 // 姹囨€?detailed routing 鐨勫彲瑙ｉ噴鎶ュ憡銆?
 struct DetailedRoutingReport {
     std::vector<DetailedRouteTrace> traces;
@@ -541,6 +558,8 @@ struct DetailedRoutingResult {
     // 仅保存通过最终 DRC 的可交付金属段，作为 routing.txt 的唯一来源。
     std::vector<RouteSegment> routes;
     DetailedRoutingReport report;
+    // 逐条记录 selected candidate 在 detailed 阶段是否成功落地及是否仍在最终输出中。
+    std::vector<DetailedTransitionOutcome> transition_outcomes;
     std::unordered_map<std::string, double> required_space_by_node;
     std::unordered_map<std::string, double> coupling_space_by_node;
     double detailed_wirelength{};

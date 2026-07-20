@@ -533,6 +533,78 @@ void write_detailed_trace_json(std::ostringstream& out, const DetailedRouteTrace
     out << '}';
 }
 
+// 输出单条 selected candidate 的 detailed 落地状态，供 DP 选择与最终输出逐条对照。
+void write_detailed_transition_outcome_json(std::ostringstream& out, const DetailedTransitionOutcome& outcome) {
+    out << "{\"net\": ";
+    write_json_string(out, outcome.net);
+    out << ", \"from\": ";
+    write_json_string(out, outcome.from_terminal);
+    out << ", \"to\": ";
+    write_json_string(out, outcome.to_terminal);
+    out << ", \"segment_id\": ";
+    write_json_string(out, outcome.segment_id);
+    out << ", \"lcp_id\": ";
+    write_json_string(out, outcome.lcp_id);
+    out << ", \"source_lcp_id\": ";
+    write_json_string(out, outcome.source_lcp_id);
+    out << ", \"target_lcp_id\": ";
+    write_json_string(out, outcome.target_lcp_id);
+    out << ", \"dp_status\": ";
+    write_json_string(out, outcome.selected_by_dp ? "selected" : "not_selected_by_dp");
+    out << ", \"detailed_status\": ";
+    write_json_string(out, !outcome.detailed_attempted ? "not_attempted" : outcome.detailed_legalized ? "legalized" : "failed");
+    out << ", \"final_output\": ";
+    write_json_string(out, outcome.final_output ? "included" : "excluded");
+    out << ", \"failure_stage\": ";
+    write_json_string(out, outcome.failure_stage);
+    out << ", \"failure_reason\": ";
+    write_json_string(out, outcome.failure_reason);
+    out << '}';
+}
+
+// 按 net 汇总 selected candidate 的 detailed 落地情况，避免从散落 warning 手工计数。
+void write_detailed_net_summary_json(
+    std::ostringstream& out,
+    const std::vector<DetailedTransitionOutcome>& outcomes) {
+    struct Summary {
+        std::string net;
+        std::size_t selected_by_dp{};
+        std::size_t detailed_success{};
+        std::size_t detailed_failed{};
+        std::size_t final_included{};
+    };
+    std::vector<Summary> summaries;
+    std::unordered_map<std::string, std::size_t> summary_index;
+    for (const auto& outcome : outcomes) {
+        const auto [found, inserted] = summary_index.emplace(outcome.net, summaries.size());
+        if (inserted) summaries.push_back(Summary{outcome.net});
+        auto& summary = summaries[found->second];
+        if (outcome.selected_by_dp) ++summary.selected_by_dp;
+        if (outcome.detailed_legalized) ++summary.detailed_success;
+        else ++summary.detailed_failed;
+        if (outcome.final_output) ++summary.final_included;
+    }
+    out << '[';
+    for (std::size_t index = 0; index < summaries.size(); ++index) {
+        if (index != 0) out << ',';
+        const auto& summary = summaries[index];
+        const std::string status = summary.final_included == summary.detailed_success &&
+                                           summary.detailed_failed == 0
+                                       ? "complete"
+                                       : "incomplete";
+        out << "{\"net\": ";
+        write_json_string(out, summary.net);
+        out << ", \"dp_selected_segments\": " << summary.selected_by_dp
+            << ", \"detailed_success_segments\": " << summary.detailed_success
+            << ", \"detailed_failed_segments\": " << summary.detailed_failed
+            << ", \"final_output_segments\": " << summary.final_included
+            << ", \"status\": ";
+        write_json_string(out, status);
+        out << '}';
+    }
+    out << ']';
+}
+
 // 姹囨€讳竴娆?routing evaluation 鍜?detailed routing 鐨勮瘖鏂俊鎭€?
 // 缁熻 request 涓墍鏈?LCP 鐗╃悊鍊欓€夋暟閲忋€?
 std::size_t count_lcp_location_candidates(const RoutingEvaluationRequest& request) {
@@ -743,7 +815,14 @@ std::string make_routing_debug_json(
         if (index != 0) out << ',';
         write_detailed_trace_json(out, detailed.report.traces[index]);
     }
-    out << "],\n  \"warnings\": ";
+    out << "],\n  \"detailed_transition_outcomes\": [";
+    for (std::size_t index = 0; index < detailed.transition_outcomes.size(); ++index) {
+        if (index != 0) out << ',';
+        write_detailed_transition_outcome_json(out, detailed.transition_outcomes[index]);
+    }
+    out << "],\n  \"detailed_net_summary\": ";
+    write_detailed_net_summary_json(out, detailed.transition_outcomes);
+    out << ",\n  \"warnings\": ";
     write_json_string_array(out, detailed.report.warnings);
     out << ",\n  \"design_rule_segments\": ";
     write_json_string_array(out, detailed.report.design_rule_segments);

@@ -1727,6 +1727,30 @@ std::vector<std::size_t> collect_active_region_crossings(
     return violations;
 }
 
+// 写入一条候选在 detailed 阶段的结构化落地结果，避免仅靠 warning 文本判断最终状态。
+void append_detailed_transition_outcome(
+    DetailedRoutingResult& result,
+    const routing::RouteCandidate& candidate,
+    bool selected_by_dp,
+    bool legalized,
+    const std::string& failure_reason = {}) {
+    result.transition_outcomes.push_back(DetailedTransitionOutcome{
+        candidate.net,
+        candidate.from_terminal,
+        candidate.to_terminal,
+        candidate.segment_id,
+        candidate.lcp_id,
+        candidate.source_lcp_id,
+        candidate.target_lcp_id,
+        selected_by_dp,
+        true,
+        legalized,
+        legalized,
+        legalized ? std::string{} : "detailed_route_legalization",
+        failure_reason,
+    });
+}
+
 // 判断整组候选金属是否包含 active-region DRC，供 detailed 候选筛选和 A* 重布线共用。
 bool routes_violate_active_regions(
     const RoutingEvaluationRequest& request,
@@ -2228,6 +2252,22 @@ DetailedRoutingResult run_detailed_routing(
             has_dp_traceback);
     const int dp_state_id = has_dp_traceback ? evaluation.bottom_up_dp->best_state.id : -1;
     const std::string tree_node = has_dp_traceback ? evaluation.bottom_up_dp->best_state.tree_node : std::string{};
+    // 判断 detailed 候选是否来自 DP traceback；未覆盖 net 的全局候选会被标记为非 DP 选择。
+    const auto selected_by_dp = [&](const routing::RouteCandidate& candidate) {
+        if (!has_dp_traceback) return false;
+        return std::any_of(
+            evaluation.bottom_up_dp->traceback_candidates.begin(),
+            evaluation.bottom_up_dp->traceback_candidates.end(),
+            [&](const auto& traceback) {
+                return traceback.net == candidate.net &&
+                       traceback.from_terminal == candidate.from_terminal &&
+                       traceback.to_terminal == candidate.to_terminal &&
+                       traceback.segment_id == candidate.segment_id &&
+                       traceback.lcp_candidate_id == candidate.lcp_candidate_id &&
+                       traceback.source_lcp_candidate_id == candidate.source_lcp_candidate_id &&
+                       traceback.target_lcp_candidate_id == candidate.target_lcp_candidate_id;
+            });
+    };
     if (evaluation.bottom_up_dp.has_value() && !evaluation.bottom_up_dp->success) {
         auto& trace = trace_for_net(result.report, "__dp__");
         if (evaluation.bottom_up_dp->best_state.failure_messages.empty()) {
@@ -2272,6 +2312,7 @@ DetailedRoutingResult run_detailed_routing(
             legal.routes,
             dp_state_id,
             tree_node);
+        append_detailed_transition_outcome(result, actual_candidate, selected_by_dp(actual_candidate), true);
         detailed_metrics.wirelength += legal.metrics.wirelength;
         detailed_metrics.bend_count += legal.metrics.bend_count;
         detailed_metrics.via_count += legal.metrics.via_count;
@@ -2329,6 +2370,11 @@ DetailedRoutingResult run_detailed_routing(
                     result.report.warnings.push_back(failure);
                 }
                 for (const auto& branch : group) {
+                    const std::string failure_reason = net_legal.failure_messages.empty()
+                                                           ? "LCP detailed legalization failed"
+                                                           : net_legal.failure_messages.front();
+                    append_detailed_transition_outcome(
+                        result, branch, selected_by_dp(branch), false, failure_reason);
                     add_traceback_failure(
                         result,
                         trace,
@@ -2357,6 +2403,11 @@ DetailedRoutingResult run_detailed_routing(
                     trace.warnings.push_back(failure);
                     result.report.warnings.push_back(failure);
                 }
+                const std::string failure_reason = legal.failure_messages.empty()
+                                                       ? "detailed legalization failed"
+                                                       : legal.failure_messages.front();
+                append_detailed_transition_outcome(
+                    result, candidate, selected_by_dp(candidate), false, failure_reason);
                 add_traceback_failure(
                     result,
                     trace,
@@ -2410,6 +2461,7 @@ DetailedRoutingResult run_detailed_routing(
     if (result.design_rule_violations > 0) {
         result.routing_failure_penalty += kDetailedFailurePenalty * static_cast<double>(result.design_rule_violations);
         result.report.warnings.push_back("detailed routing discarded routes with DRC violations");
+        for (auto& outcome : result.transition_outcomes) outcome.final_output = false;
         result.routes.clear();
         routed_space_nodes.clear();
         detailed_metrics = routing::PathMetrics{};
