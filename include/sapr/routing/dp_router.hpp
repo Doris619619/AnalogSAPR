@@ -48,6 +48,7 @@ struct RoutingDpCandidateEvent {
     std::string lcp_candidate_id;
     std::string state_lcp_candidate_id;
     std::string reason;
+    std::vector<std::string> occupied_route_conflicts;
     bool selected{};
 };
 

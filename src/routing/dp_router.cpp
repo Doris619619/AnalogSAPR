@@ -58,6 +58,7 @@ struct AppendCandidateResult {
     bool has_short{};
     std::string reason;
     std::string state_lcp_candidate_id;
+    std::vector<std::string> occupied_route_conflicts;
 };
 
 // 返回 terminal 所属模块，LCP 或无法识别时返回空字符串。
@@ -142,8 +143,30 @@ void append_candidate_event(
                                        ? existing_lcp_binding(state, candidate)
                                        : result.state_lcp_candidate_id;
     event.reason = result.reason;
+    event.occupied_route_conflicts = result.occupied_route_conflicts;
     event.selected = result.accepted;
     events.push_back(std::move(event));
+}
+
+std::vector<std::string> collect_occupied_route_conflicts(
+    const std::vector<RouteSegment>& candidate_routes,
+    const std::vector<RouteSegment>& occupied_routes) {
+    constexpr std::size_t kMaxConflictsPerCandidateEvent = 4;
+    std::vector<std::string> conflicts;
+    for (const auto& candidate_route : candidate_routes) {
+        for (const auto& occupied_route : occupied_routes) {
+            if (!same_layer_short(candidate_route, occupied_route)) continue;
+            conflicts.push_back(
+                candidate_route.net + ":" + candidate_route.layer + " (" +
+                std::to_string(candidate_route.x1) + "," + std::to_string(candidate_route.y1) + ")->(" +
+                std::to_string(candidate_route.x2) + "," + std::to_string(candidate_route.y2) + ") with " +
+                occupied_route.net + ":" + occupied_route.layer + " (" +
+                std::to_string(occupied_route.x1) + "," + std::to_string(occupied_route.y1) + ")->(" +
+                std::to_string(occupied_route.x2) + "," + std::to_string(occupied_route.y2) + ")");
+            if (conflicts.size() >= kMaxConflictsPerCandidateEvent) return conflicts;
+        }
+    }
+    return conflicts;
 }
 
 // 追加不重复字符串，避免 traceback 列表出现重复项。
@@ -224,6 +247,9 @@ AppendCandidateResult append_candidate_if_consistent(
     const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
     auto candidate_routes = candidate_to_route_segments(context.grid(), candidate, width);
     const bool has_short = routes_short_with_existing(candidate_routes, state.occupied_routes);
+    if (has_short) {
+        result.occupied_route_conflicts = collect_occupied_route_conflicts(candidate_routes, state.occupied_routes);
+    }
     if (!candidate.lcp_id.empty()) {
         const auto assigned = state.lcp_location_by_id.find(candidate.lcp_id);
         if (assigned != state.lcp_location_by_id.end() && assigned->second != candidate.lcp_candidate_id) {

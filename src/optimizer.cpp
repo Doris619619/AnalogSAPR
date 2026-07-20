@@ -365,6 +365,8 @@ void write_dp_candidate_event_json(std::ostringstream& out, const routing::Routi
     write_json_string(out, event.state_lcp_candidate_id);
     out << ", \"reason\": ";
     write_json_string(out, event.reason);
+    out << ", \"occupied_route_conflicts\": ";
+    write_json_string_array(out, event.occupied_route_conflicts);
     out << ", \"selected\": " << (event.selected ? "true" : "false")
         << '}';
 }
