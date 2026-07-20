@@ -2,6 +2,8 @@
 #include "sapr/routing/dp_router.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <cstdint>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -481,10 +483,34 @@ std::string state_binding_signature(const RoutingDpState& state) {
 }
 
 /* 编码对后续 DP transition 等价的状态信息，用于删除重复的高代价 state。 */
+std::string state_occupancy_signature(const RoutingDpState& state) {
+    std::vector<std::string> values;
+    values.reserve(state.occupied_routes.size());
+    for (const auto& route : state.occupied_routes) {
+        double x1 = route.x1;
+        double y1 = route.y1;
+        double x2 = route.x2;
+        double y2 = route.y2;
+        if (x2 < x1 || (x2 == x1 && y2 < y1)) {
+            std::swap(x1, x2);
+            std::swap(y1, y2);
+        }
+        values.push_back(
+            route.net + "|" + route.layer + "|" +
+            std::to_string(std::bit_cast<std::uint64_t>(x1)) + "|" +
+            std::to_string(std::bit_cast<std::uint64_t>(y1)) + "|" +
+            std::to_string(std::bit_cast<std::uint64_t>(x2)) + "|" +
+            std::to_string(std::bit_cast<std::uint64_t>(y2)) + "|" +
+            std::to_string(std::bit_cast<std::uint64_t>(route.width)));
+    }
+    return sorted_value_signature(std::move(values));
+}
+
 std::string state_semantic_signature(const RoutingDpState& state) {
     return state_binding_signature(state) + "#" +
            sorted_value_signature(state.covered_wire_segments) + "#" +
-           sorted_value_signature(state.failure_messages);
+           sorted_value_signature(state.failure_messages) + "#" +
+           state_occupancy_signature(state);
 }
 
 /* 将 state 的全部 LCP binding 加入已保留集合，供后续多样性选择计算新增决策数。 */
