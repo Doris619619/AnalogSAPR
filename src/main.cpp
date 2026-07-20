@@ -72,7 +72,7 @@ void print_usage() {
               << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n"
               << "           [--boundary-margin value] [--boundary-clearance 0]\n"
               << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
-              << "           [--cooling-rate 0.96] [--routing-layers 2]\n"
+              << "           [--cooling-rate 0.96] [--routing-layers 2] [--dp-beam-width 16]\n"
               << "           [--sa-convergence-tolerance 1e-6] [--sa-convergence-patience 20]\n"
               << "           [--dump-routing-eval]\n"
               << "           [--strict-lcp-dp]\n"
@@ -482,6 +482,10 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     config.routing_layers = option_int(args, "--routing-layers", config.routing_layers);
     if (config.routing_layers < 1 || config.routing_layers > 7) {
         throw std::runtime_error("invalid value for --routing-layers: must be in [1, 7]");
+    }
+    config.dp_beam_width = option_int(args, "--dp-beam-width", config.dp_beam_width);
+    if (config.dp_beam_width < 0) {
+        throw std::runtime_error("invalid value for --dp-beam-width: must be non-negative");
     }
     config.debug_search = has_option(args, "--debug-search");
     config.strict_lcp_dp = has_option(args, "--strict-lcp-dp");

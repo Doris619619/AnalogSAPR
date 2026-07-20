@@ -82,6 +82,7 @@ struct RoutingDpResult {
     int dp_nodes{};
     int dp_states{};
     int dp_pruned_states{};
+    int beam_width{16};
     int packing_time_dp_segments{};
     bool packing_time_dp_used{};
     std::vector<RoutingDpCandidateEvent> candidate_events;

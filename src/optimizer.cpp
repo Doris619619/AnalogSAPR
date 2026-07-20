@@ -425,6 +425,7 @@ void write_dp_result_json(std::ostringstream& out, const std::optional<routing::
         << ", \"dp_nodes\": " << dp.dp_nodes
         << ", \"dp_states\": " << dp.dp_states
         << ", \"dp_pruned_states\": " << dp.dp_pruned_states
+        << ", \"beam_width\": " << dp.beam_width
         << ", \"traceback_candidate_count\": " << dp.traceback_candidates.size()
         << ", \"best_state\": {\"id\": " << dp.best_state.id
         << ", \"tree_node\": ";
@@ -719,6 +720,7 @@ std::string make_routing_debug_json(
         << ", \"global_penalty\": " << metrics.global_penalty
         << ", \"final_penalty\": " << metrics.penalty
         << ", \"candidate_count\": " << evaluation.candidates.size()
+        << ", \"dp_beam_width\": " << request.dp_beam_width
         << ", \"lcp_candidate_filter_count\": " << evaluation.lcp_candidate_filter_events.size()
         << ", \"dp_used\": " << (evaluation.used_bottom_up_dp ? "true" : "false")
         << ", \"failed_nets\": " << evaluation.failed_nets
@@ -1786,6 +1788,7 @@ RoutingEvaluationRequest pack_enhanced_tree(
     request.strict_lcp_dp = config.strict_lcp_dp;
     request.allow_lcp_location_negotiation = config.negotiate_lcp_locations;
     request.routing_layers = config.routing_layers;
+    request.dp_beam_width = config.dp_beam_width;
     assign_space_physical_regions(circuit, request, config);
     request.tree = make_routing_tree_snapshot(tree);
     populate_routing_context(circuit, request);

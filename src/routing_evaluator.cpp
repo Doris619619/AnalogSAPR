@@ -2193,7 +2193,8 @@ RoutingEvaluation evaluate_routing(
             false,
             std::move(lcp_candidate_filter_events));
     }
-    auto bottom_up_dp = routing::run_bottom_up_routing_dp(circuit, request, context, candidates);
+    auto bottom_up_dp = routing::run_bottom_up_routing_dp(
+        circuit, request, context, candidates, request.dp_beam_width);
     if (!bottom_up_dp.success) {
         if (request.strict_lcp_dp && !lcp_nets.empty()) {
             return make_evaluation(

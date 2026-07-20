@@ -278,6 +278,7 @@ struct SolverConfig {
     bool negotiate_lcp_locations{true};
     // 允许使用的金属层数（M1..Mn）；默认两层以对齐论文实验设置并避免单层短路。
     int routing_layers{2};
+    int dp_beam_width{16};
 };
 
 // 琛ㄧず涓€娆?SA 鎵板姩鐨勮皟璇曟憳瑕侊紝渚涘懡浠よ璇婃柇鎼滅储鐘舵€佹槸鍚︾湡瀹炲彉鍖栥€?
@@ -475,6 +476,7 @@ struct RoutingEvaluationRequest {
     bool allow_lcp_location_negotiation{};
     // 传入 RoutingContext::GridConfig.layer_count，统一限制 A*/obstacle/detailed reroute。
     int routing_layers{1};
+    int dp_beam_width{16};
 };
 
 // 琛ㄧず璺敱 adapter 杩斿洖缁?placement/SA 鐨勫弽棣堛€?

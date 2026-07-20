@@ -1011,6 +1011,7 @@ RoutingDpResult run_bottom_up_routing_dp(
     (void)circuit;
     (void)context;
     RoutingDpResult result{};
+    result.beam_width = max_states_per_node;
     result.state_prune_events = std::make_unique<std::vector<RoutingDpStatePruneEvent>>();
     result.candidate_events.reserve(kMaxRecordedCandidateEvents);
     result.state_prune_events->reserve(kMaxRecordedStatePruneEvents);
