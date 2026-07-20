@@ -790,7 +790,9 @@ std::string make_routing_debug_json(
             write_dp_candidate_event_json(out, evaluation.bottom_up_dp->candidate_events[index]);
         }
     }
-    out << "],\n  \"lcp_candidate_filter_events\": [";
+    out << "],\n  \"dp_candidate_events_truncated\": "
+        << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->candidate_events_truncated ? "true" : "false");
+    out << ",\n  \"lcp_candidate_filter_events\": [";
     for (std::size_t index = 0; index < evaluation.lcp_candidate_filter_events.size(); ++index) {
         if (index != 0) out << ',';
         write_lcp_candidate_filter_event_json(out, evaluation.lcp_candidate_filter_events[index]);

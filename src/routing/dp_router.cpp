@@ -17,6 +17,7 @@ constexpr double kBendWeight = 3.0;
 constexpr double kMissingSegmentPenalty = 100000.0;
 constexpr double kShortConflictPenalty = 1000000.0;
 constexpr double kMultiTerminalMissingPenalty = 1000000.0;
+constexpr std::size_t kMaxRecordedCandidateEvents = 4096;
 constexpr std::size_t kMaxRecordedStatePruneEvents = 4096;
 
 // 为裁剪事件保留一条失败摘要，避免复制随子树合并增长的完整错误列表。
@@ -128,10 +129,15 @@ std::string existing_lcp_binding(const RoutingDpState& state, const RouteCandida
 // 写入一次 DP candidate 尝试事件，供 routing_debug.json 解释 DP 拒绝原因。
 void append_candidate_event(
     std::vector<RoutingDpCandidateEvent>& events,
+    bool& events_truncated,
     const CandidateGroup& group,
     const RoutingDpState& state,
     const RouteCandidate& candidate,
     const AppendCandidateResult& result) {
+    if (events.size() >= kMaxRecordedCandidateEvents) {
+        events_truncated = true;
+        return;
+    }
     RoutingDpCandidateEvent event;
     event.group_key = group.key;
     event.net = candidate.net;
@@ -851,6 +857,7 @@ void apply_segment_transition(
     int max_states,
     int& pruned_states,
     std::vector<RoutingDpCandidateEvent>& candidate_events,
+    bool& candidate_events_truncated,
     std::vector<RoutingDpStatePruneEvent>& state_prune_events) {
     std::vector<RoutingDpState> next_states;
     for (const auto& state : states) {
@@ -860,7 +867,7 @@ void apply_segment_transition(
             if (!candidate_matches_group(candidate, group)) continue;
             RoutingDpState next = state;
             const auto append_result = append_candidate_if_consistent(next, candidate, context);
-            append_candidate_event(candidate_events, group, state, candidate, append_result);
+            append_candidate_event(candidate_events, candidate_events_truncated, group, state, candidate, append_result);
             if (!append_result.accepted) {
                 append_unique(rejection_reasons, append_result.reason);
                 continue;
@@ -918,6 +925,7 @@ std::vector<RoutingDpState> build_states_for_node(
     int max_states,
     int& pruned_states,
     std::vector<RoutingDpCandidateEvent>& candidate_events,
+    bool& candidate_events_truncated,
     std::vector<RoutingDpStatePruneEvent>& state_prune_events) {
     auto states = merge_child_states_for_node(node, result_by_node, trace_index);
     if (states.empty()) return states;
@@ -949,6 +957,7 @@ std::vector<RoutingDpState> build_states_for_node(
             max_states,
             pruned_states,
             candidate_events,
+            candidate_events_truncated,
             state_prune_events);
     }
 
@@ -980,6 +989,8 @@ RoutingDpResult run_bottom_up_routing_dp(
     (void)context;
     RoutingDpResult result{};
     result.state_prune_events = std::make_unique<std::vector<RoutingDpStatePruneEvent>>();
+    result.candidate_events.reserve(kMaxRecordedCandidateEvents);
+    result.state_prune_events->reserve(kMaxRecordedStatePruneEvents);
     if (!request.tree.root.has_value() || request.tree.nodes.empty() || candidates.empty()) return result;
 
     const auto nodes = tree_nodes_by_id(request.tree);
@@ -1045,6 +1056,7 @@ RoutingDpResult run_bottom_up_routing_dp(
             max_states_per_node,
             result.dp_pruned_states,
             result.candidate_events,
+            result.candidate_events_truncated,
             *result.state_prune_events);
         result.dp_nodes += 1;
         result.dp_states += static_cast<int>(node_result.states.size());

@@ -85,6 +85,7 @@ struct RoutingDpResult {
     int packing_time_dp_segments{};
     bool packing_time_dp_used{};
     std::vector<RoutingDpCandidateEvent> candidate_events;
+    bool candidate_events_truncated{};
     std::unique_ptr<std::vector<RoutingDpStatePruneEvent>> state_prune_events;
     // 诊断事件独立持有，避免结果对象移动时触发 MSVC Debug 容器代理失效。
     std::unique_ptr<std::vector<RoutingDpStatePruneEvent>> state_prune_events;
