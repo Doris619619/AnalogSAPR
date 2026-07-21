@@ -1,8 +1,6 @@
 # 忽略各实验输出目录下的 btree 迭代大文件夹
 btree/
 
-# 本地 SA 调试输出，不纳入版本库
-test_by_myself_seed1_layers2_patience0_spacing0/
-test_by_myself_seed1_layers2_patience0_spacing5/
-test_by_myself_seed1_layers3_patience0_spacing3/
-output/seed1_layers2_sa250_patience0_nodump_sa_btree/
+# 本地 SA / 调试运行产物，不纳入版本库
+test_by_myself*/
+output/

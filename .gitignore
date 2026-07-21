@@ -21,6 +21,19 @@ output/cpp_stage*/
 /output/*.json
 /output/*.xlsx
 
+# 各 case 下本地跑出来的 SA / 调试结果
+cases/*/test_by_myself*/
+cases/*/fix_sam/
+cases/*/output_*/
+
+# 临时诊断运行产物
+tmp/
+
+# Python 缓存
+tools/__pycache__/
+**/__pycache__/
+*.pyc
+
 # IDE and local files
 .idea/
 .vscode/
