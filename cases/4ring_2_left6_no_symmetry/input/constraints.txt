@@ -1,5 +1,10 @@
 # WIRE_WIDTH only; this case has no symmetry constraints
 
+DEVICE_SPACING              5
+ACTIVE_ROUTE_SPACING ALL    0.20
+DIFF_NET_ROUTE_SPACING ALL  0.14
+ACTIVE_REGION_BLOCK ALL
+
 WIRE_WIDTH  8    0.05  1.0
 WIRE_WIDTH  9    0.05  1.0
 WIRE_WIDTH  12   0.05  1.0
