@@ -1461,6 +1461,21 @@ void run_routing_evaluator_tests() {
     require(lcp_detail.required_space_by_node.at("S1") >= 3.0, "required space should include route width and spacing");
     require(lcp_detail.detailed_cost > 0.0, "detailed routing should report local detailed cost");
 
+    const auto lcp_variant_eval = sapr::evaluate_routing(drc_circuit, lcp_request);
+    int left_lcp_variant_count = 0;
+    bool has_forced_detour_variant = false;
+    for (const auto& candidate : lcp_variant_eval.candidates) {
+        if (!candidate.path.success || candidate.segment_id != "N:left" ||
+            candidate.lcp_candidate_id != "LCP1:first") {
+            continue;
+        }
+        ++left_lcp_variant_count;
+        has_forced_detour_variant = has_forced_detour_variant ||
+                                     candidate.route_variant.find("avoid_pivot_") == 0;
+    }
+    require(left_lcp_variant_count >= 2, "LCP segment should retain physically distinct route variants");
+    require(has_forced_detour_variant, "LCP variants should include a forced-detour path when the base path is blocked");
+
     // LCP 与引脚重合时，单点 A* 路径是合法的零长度连接，不应导致整网 detailed traceback 失败。
     auto zero_length_lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);
     auto& zero_length_candidate = zero_length_lcp_eval.global_routing.net_routes.front().selected_candidates.front();

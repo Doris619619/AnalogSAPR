@@ -6,6 +6,11 @@
 # FLOW           net   out_pin    in_pin          — 电流流向约束
 # WIRE_WIDTH     net   min_w      max_w           — 线宽范围 (μm)
 
+DEVICE_SPACING              5
+ACTIVE_ROUTE_SPACING ALL    0.20
+DIFF_NET_ROUTE_SPACING ALL  0.14
+ACTIVE_REGION_BLOCK ALL
+
 SYMMETRY_PAIR    sg1   vertical   M1     M2
 SYMMETRY_SELF    sg3   vertical   M5
 FLOW             OUT   M3.D       M1.D

@@ -40,8 +40,8 @@ bool ObstacleMap::is_blocked(const Point& point, int layer) const {
 
 // 查询连续坐标点在指定层是否被按线宽膨胀后的障碍物阻塞。
 bool ObstacleMap::is_blocked(const Point& point, int layer, double wire_width) const {
-    const double inflate = std::max(0.0, wire_width / 2.0);
     for (const auto& obstacle : obstacles_) {
+        const double inflate = std::max(0.0, obstacle.keep_out + wire_width / 2.0);
         if (obstacle.layer == layer && contains_point(inflate_rect(obstacle.rect, inflate), point)) {
             return true;
         }

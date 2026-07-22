@@ -1,6 +1,8 @@
 // 文件职责：实现由 Circuit 和 placement 构建多层布线环境的逻辑。
 #include "sapr/routing/routing_context.hpp"
 
+#include "sapr/constraints.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -228,9 +230,14 @@ RoutingContext::RoutingContext(
     }
 
     // active region 只阻挡器件所在低层 M1；M2+ 允许从器件上方跨过，避免被建成贯穿各层的垂直障碍柱。
-    constexpr int kActiveRegionLayer = 0;  // M1
     for (const auto& [owner, active] : active_regions) {
-        obstacles_.add_obstacle(Obstacle{active, kActiveRegionLayer, "active_region", owner});
+        for (int layer = 0; layer < grid_->layer_count(); ++layer) {
+            const std::string layer_name = index_to_layer(layer);
+            if (!active_region_blocked(circuit_, layer_name)) continue;
+            obstacles_.add_obstacle(Obstacle{
+                active, layer, "active_region", owner, ObstacleKind::ActiveRegion,
+                active_route_spacing(circuit_, layer_name), true});
+        }
     }
 
     for (const auto& [key, global_pin] : global_pins_) {

@@ -4,7 +4,47 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "sapr/routing/layer.hpp"
+
 namespace sapr {
+
+namespace {
+
+// 按具体层优先、ALL 兜底查询 PDK 按层数值规则。
+double layer_rule(const std::unordered_map<std::string, double>& rules, const std::string& layer) {
+    if (const auto found = rules.find(layer); found != rules.end()) return found->second;
+    if (const auto fallback = rules.find("ALL"); fallback != rules.end()) return fallback->second;
+    return 0.0;
+}
+
+// 按具体层优先、ALL 兜底查询 active 穿越开关。
+bool block_rule(const std::unordered_map<std::string, bool>& rules, const std::string& layer) {
+    if (const auto found = rules.find(layer); found != rules.end()) return found->second;
+    if (const auto fallback = rules.find("ALL"); fallback != rules.end()) return fallback->second;
+    return true;
+}
+
+}  // namespace
+
+// 返回器件之间必须保留的最小边缘距离。
+double device_spacing(const Circuit& circuit) {
+    return circuit.constraints.spacing_rules.device_spacing;
+}
+
+// 返回指定层 active 与布线的最小边缘距离；允许跨越时豁免。
+double active_route_spacing(const Circuit& circuit, const std::string& layer) {
+    return active_region_blocked(circuit, layer) ? layer_rule(circuit.constraints.spacing_rules.active_route_spacing, layer) : 0.0;
+}
+
+// 返回指定层异网金属之间的最小边缘距离。
+double diff_net_route_spacing(const Circuit& circuit, const std::string& layer) {
+    return layer_rule(circuit.constraints.spacing_rules.diff_net_route_spacing, layer);
+}
+
+// 判断指定层是否禁止穿越 active region。
+bool active_region_blocked(const Circuit& circuit, const std::string& layer) {
+    return block_rule(circuit.constraints.spacing_rules.active_region_block, layer);
+}
 
 // 校验输入对象之间的引用和数值范围。
 std::vector<std::string> validate_circuit(const Circuit& circuit) {
@@ -54,6 +94,19 @@ std::vector<std::string> validate_circuit(const Circuit& circuit) {
     for (const auto& [net, width] : circuit.constraints.wire_widths) {
         if (!circuit.nets.contains(net)) errors.push_back("wire width references missing net " + net);
         if (width.min_width <= 0.0 || width.max_width < width.min_width) errors.push_back("wire width for " + net + " has invalid range");
+    }
+    if (circuit.constraints.spacing_rules.device_spacing < 0.0) errors.push_back("device spacing must be non-negative");
+    for (const auto& [layer, spacing] : circuit.constraints.spacing_rules.active_route_spacing) {
+        if (layer != "ALL" && !routing::is_valid_layer_index(routing::layer_to_index(layer))) {
+            errors.push_back("active route spacing uses unsupported layer " + layer);
+        }
+        if (spacing < 0.0) errors.push_back("active route spacing must be non-negative for " + layer);
+    }
+    for (const auto& [layer, spacing] : circuit.constraints.spacing_rules.diff_net_route_spacing) {
+        if (layer != "ALL" && !routing::is_valid_layer_index(routing::layer_to_index(layer))) {
+            errors.push_back("diff-net route spacing uses unsupported layer " + layer);
+        }
+        if (spacing < 0.0) errors.push_back("diff-net route spacing must be non-negative for " + layer);
     }
     return errors;
 }

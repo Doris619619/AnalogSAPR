@@ -1,6 +1,8 @@
 ﻿// 瀹炵幇璁烘枃 placement-aware 澧炲己 B*-tree contour packing銆乺outing adapter 鍜屾ā鎷熼€€鐏富寰幆銆?
 #include "sapr/optimizer.hpp"
 
+#include "sapr/constraints.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -326,6 +328,8 @@ void write_route_candidate_json(std::ostringstream& out, const routing::RouteCan
     write_json_string(out, candidate.source_lcp_candidate_id);
     out << ", \"target_lcp_candidate_id\": ";
     write_json_string(out, candidate.target_lcp_candidate_id);
+    out << ", \"route_variant\": ";
+    write_json_string(out, candidate.route_variant);
     out << ", \"path_success\": " << (candidate.path.success ? "true" : "false")
         << ", \"path_message\": ";
     write_json_string(out, candidate.path.message);
@@ -927,7 +931,8 @@ std::pair<double, double> asf_node_occupied_size(const Circuit& circuit, const A
     const double outer = node.space_node_groups.empty() ? 0.0 : required_space_for_group(node.space_node_groups.front());
     const double top = node.space_node_groups.size() < 2 ? 0.0 : required_space_for_group(node.space_node_groups[1]);
     const double cluster = required_space_for_cluster(node.space_node_cluster);
-    return {size.first + std::max({outer, cluster, config.spacing}), size.second + std::max(top, config.spacing)};
+    const double spacing = device_spacing(circuit);
+    return {size.first + std::max({outer, cluster, spacing}), size.second + std::max(top, spacing)};
 }
 
 Rect placement_rect(const Circuit& circuit, const Placement& placement) {
@@ -1122,11 +1127,12 @@ AsfPackingResult pack_asf_bstar_tree(const Circuit& circuit, const SymmetryGroup
             {},
         });
         packed.push_back({x, y, x + occupied.first, y + occupied.second});
-        if (node.left.has_value()) place_node(*node.left, x + occupied.first + config.spacing, y);
-        if (node.right.has_value()) place_node(*node.right, x, y + occupied.second + config.spacing);
+        const double spacing = device_spacing(circuit);
+        if (node.left.has_value()) place_node(*node.left, x + occupied.first + spacing, y);
+        if (node.right.has_value()) place_node(*node.right, x, y + occupied.second + spacing);
     };
 
-    const double axis_clearance = std::max(1.0, config.spacing);
+    const double axis_clearance = std::max(1.0, device_spacing(circuit));
     place_node(*asf.root, axis_clearance, 0.0);
 
     std::string symmetry_error;
@@ -1339,7 +1345,7 @@ void assign_space_physical_regions(
             continue;
         }
         const Rect owner = placed_module_rect(circuit, request.placements, space.owner);
-        const double reserved_width = std::max({space.required_space(), config.spacing, kMinRegionWidth});
+        const double reserved_width = std::max({space.required_space(), device_spacing(circuit), kMinRegionWidth});
         if (space.kind == SpaceNodeKind::Right) {
             space.physical_region = Rect{owner.x2, owner.y1, owner.x2 + reserved_width, owner.y2};
         } else if (space.kind == SpaceNodeKind::Top) {
@@ -1760,10 +1766,10 @@ RoutingEvaluationRequest pack_enhanced_tree(
         }
         packed.push_back({x, y, x + occupied.first, y + occupied.second});
         if (node.left.has_value()) {
-            place_node(*node.left, x + occupied.first + config.spacing, y);
+            place_node(*node.left, x + occupied.first + device_spacing(circuit), y);
         }
         if (node.right.has_value()) {
-            place_node(*node.right, x, y + occupied.second + config.spacing);
+            place_node(*node.right, x, y + device_spacing(circuit));
         }
     };
 

@@ -69,7 +69,7 @@ bool has_option(const std::vector<std::string>& args, const std::string& option)
 void print_usage() {
     std::cerr << "Usage:\n"
               << "  sapr validate [--input input]\n"
-              << "  sapr run [--input input] [--output output] [--spacing 5] [--row-width 40]\n"
+              << "  sapr run [--input input] [--output output] [--row-width 40]\n"
               << "           [--boundary-margin value] [--boundary-clearance 0]\n"
               << "           [--seed 1] [--sa-iterations 250] [--initial-temperature 5]\n"
               << "           [--cooling-rate 0.96] [--routing-layers 2] [--dp-beam-width 16]\n"
@@ -452,7 +452,6 @@ int run_solver(const std::vector<std::string>& args, const char* executable_path
     const auto input = std::filesystem::path(option_value(args, "--input", "input"));
     const auto output = std::filesystem::path(option_value(args, "--output", "output"));
     sapr::SolverConfig config;
-    config.spacing = option_double(args, "--spacing", config.spacing);
     config.row_width = option_double(args, "--row-width", config.row_width);
     if (has_option(args, "--boundary-margin")) {
         config.boundary_margin = option_double(args, "--boundary-margin", config.boundary_margin);
