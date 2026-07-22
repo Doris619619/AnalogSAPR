@@ -54,7 +54,6 @@ struct RoutingDpCandidateEvent {
 
 // 记录 DP 裁剪整个 state 时丢失的候选组合，区分语义去重与 beam 截断。
 struct RoutingDpStatePruneEvent {
-struct RoutingDpStatePruneEvent {
     std::string tree_node;
     std::string stage;
     std::string reason;
@@ -87,7 +86,6 @@ struct RoutingDpResult {
     bool packing_time_dp_used{};
     std::vector<RoutingDpCandidateEvent> candidate_events;
     bool candidate_events_truncated{};
-    std::unique_ptr<std::vector<RoutingDpStatePruneEvent>> state_prune_events;
     // 诊断事件独立持有，避免结果对象移动时触发 MSVC Debug 容器代理失效。
     std::unique_ptr<std::vector<RoutingDpStatePruneEvent>> state_prune_events;
 };

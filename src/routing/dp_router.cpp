@@ -23,7 +23,6 @@ constexpr std::size_t kMaxRecordedStatePruneEvents = 4096;
 
 // 为裁剪事件保留一条失败摘要，避免复制随子树合并增长的完整错误列表。
 std::vector<std::string> state_failure_summary(const RoutingDpState& state) {
-std::vector<std::string> state_failure_summary(const RoutingDpState& state) {
     if (!state.choice_message.empty()) return {state.choice_message};
     if (!state.failure_messages.empty()) return {state.failure_messages.front()};
     return {};
