@@ -9,6 +9,14 @@
 
 namespace sapr::routing {
 
+class RoutingContext;
+
+// 按线宽约束计算候选的最终物理线宽，供 DP、detailed 和最终 DRC 使用同一规则。
+double effective_candidate_width(
+    const Circuit& circuit,
+    const RoutingContext& context,
+    const RouteCandidate& candidate);
+
 // 将 A* 候选路径压缩成同层共线的金属中心线段。
 std::vector<RouteSegment> candidate_to_route_segments(
     const Grid& grid,
@@ -21,6 +29,12 @@ std::vector<RouteSegment> candidate_to_route_segments(
     const RouteCandidate& candidate,
     double width,
     const std::vector<Rect>& split_rects);
+
+// 生成候选可输出的完整物理金属：A* 主干、active 切段和两端专属 pin-access corridor。
+std::vector<RouteSegment> candidate_to_physical_route_segments(
+    const RoutingContext& context,
+    const RouteCandidate& candidate,
+    double width);
 
 // 判断两条已压缩金属线段是否形成同层异网短路。
 bool same_layer_short(const RouteSegment& lhs, const RouteSegment& rhs);

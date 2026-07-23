@@ -316,8 +316,8 @@ AppendCandidateResult append_candidate_if_consistent(
             candidate.path.message.find("multi_terminal_missing") != std::string::npos ? "multi_terminal_missing" : "path_fail";
         return result;
     }
-    const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
-    auto candidate_routes = candidate_to_route_segments(context.grid(), candidate, width, context.active_regions());
+    const double width = effective_candidate_width(circuit, context, candidate);
+    auto candidate_routes = candidate_to_physical_route_segments(context, candidate, width);
     const bool has_short = routes_short_with_existing(candidate_routes, state.occupied_routes);
     if (has_short) {
         result.occupied_route_conflicts = collect_occupied_route_conflicts(candidate_routes, state.occupied_routes);
@@ -1163,8 +1163,8 @@ RoutingDpResult run_bottom_up_routing_dp(
         std::vector<std::vector<RouteSegment>> group_routes;
         group_routes.reserve(group.candidates.size());
         for (const auto& candidate : group.candidates) {
-            const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
-            group_routes.push_back(candidate_to_route_segments(context.grid(), candidate, width, context.active_regions()));
+            const double width = effective_candidate_width(circuit, context, candidate);
+            group_routes.push_back(candidate_to_physical_route_segments(context, candidate, width));
         }
         candidate_routes.push_back(std::move(group_routes));
     }

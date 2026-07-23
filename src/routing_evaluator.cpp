@@ -897,12 +897,7 @@ double detailed_width_for_candidate(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate) {
-    double width = candidate.wire_width > 0.0 ? candidate.wire_width : evaluation.context.default_width_for_net(candidate.net);
-    const auto constraint = circuit.constraints.wire_widths.find(candidate.net);
-    if (constraint == circuit.constraints.wire_widths.end()) return width;
-    width = std::max(width, constraint->second.min_width);
-    if (constraint->second.max_width > 0.0) width = std::min(width, constraint->second.max_width);
-    return width;
+    return routing::effective_candidate_width(circuit, evaluation.context, candidate);
 }
 
 // 杩斿洖鏃ц皟璇曟帴鍙ｄ娇鐢ㄧ殑绾垮锛屼笉渚濊禆 Circuit 浠ヤ繚鎸佸叕寮€鍑芥暟绛惧悕绋冲畾銆?
@@ -1039,42 +1034,13 @@ bool astar_path_converts_to_segments(
     return true;
 }
 
-// 将登记的专属 pin access corridor 追加到已验证的 A* 中间金属段，供 detailed routing 做动态合法化。
+// 生成 detailed 候选的完整物理金属，复用 DP 选择阶段使用的共享几何接口。
 std::vector<RouteSegment> detailed_path_segments(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate) {
-    const double width = detailed_width_for_candidate(circuit, evaluation, candidate);
-    auto routes = astar_path_segments(circuit, evaluation, candidate);
-    const auto append_access = [&](const std::string& terminal) {
-        const auto found = evaluation.context.pin_access_corridors().find(terminal);
-        if (found == evaluation.context.pin_access_corridors().end()) return;
-        const auto& access = found->second;
-        const auto append_orthogonal_access_segment = [&](const routing::Point& start, const routing::Point& end) {
-            if (same_coord(start.x, end.x) && same_coord(start.y, end.y)) return;
-            RouteSegment segment{
-                candidate.net,
-                routing::index_to_layer(access.layer),
-                start.x,
-                start.y,
-                end.x,
-                end.y,
-                width};
-            const auto duplicate = std::any_of(routes.begin(), routes.end(), [&](const RouteSegment& route) {
-                return route.net == segment.net && route.layer == segment.layer &&
-                       ((same_coord(route.x1, segment.x1) && same_coord(route.y1, segment.y1) &&
-                         same_coord(route.x2, segment.x2) && same_coord(route.y2, segment.y2)) ||
-                        (same_coord(route.x1, segment.x2) && same_coord(route.y1, segment.y2) &&
-                         same_coord(route.x2, segment.x1) && same_coord(route.y2, segment.y1)));
-            });
-            if (!duplicate) routes.push_back(std::move(segment));
-        };
-        append_orthogonal_access_segment(access.pin_location, access.bend_point);
-        append_orthogonal_access_segment(access.bend_point, access.access_point);
-    };
-    append_access(candidate.from_terminal);
-    append_access(candidate.to_terminal);
-    return routes;
+    return routing::candidate_to_physical_route_segments(
+        evaluation.context, candidate, detailed_width_for_candidate(circuit, evaluation, candidate));
 }
 
 // 在 bottom-up DP 前剔除无法表达为连续金属段的 A* 候选；不检查动态短路、耦合或 detailed 顺序。
