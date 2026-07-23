@@ -53,20 +53,6 @@ GridConfig make_effective_grid_config(const Circuit& circuit, const GridConfig& 
     return adapted;
 }
 
-void add_access_line(ObstacleMap& obstacles, const Grid& grid, GridPoint start, GridPoint end) {
-    const int dx = (end.ix > start.ix) ? 1 : (end.ix < start.ix ? -1 : 0);
-    const int dy = (end.iy > start.iy) ? 1 : (end.iy < start.iy ? -1 : 0);
-    GridPoint current = start;
-    while (true) {
-        for (int layer = 0; layer < grid.layer_count(); ++layer) {
-            obstacles.add_terminal_point(GridPoint{current.ix, current.iy, layer});
-        }
-        if (current.ix == end.ix && current.iy == end.iy) break;
-        current.ix += dx;
-        current.iy += dy;
-    }
-}
-
 // 选择 pin 到 active 外最近边界的逃逸目标点。
 Point pin_access_target(const Point& pin_location, const Rect& active, double escape) {
     const Rect rect = normalize_rect(active);
@@ -97,18 +83,60 @@ Point pin_access_target(const Point& pin_location, const Rect& active, double es
     return Point{std::max(0.0, legal->target.x), std::max(0.0, legal->target.y)};
 }
 
-// 为 pin 选择离 active region 最近的一侧，并放行一条到 active 外的短 access corridor。
+// 返回可能使用该 pin 的 net 所需的最大默认线宽，保证 access point 对所有关联 net 都在 keep-out 外。
+double maximum_width_for_pin(const Circuit& circuit, const std::string& pin_key) {
+    double result = 1.0;
+    for (const auto& [net_name, net] : circuit.nets) {
+        if (std::find(net.terminals.begin(), net.terminals.end(), pin_key) == net.terminals.end()) continue;
+        const auto width = circuit.constraints.wire_widths.find(net_name);
+        if (width != circuit.constraints.wire_widths.end()) {
+            result = std::max(result, width->second.min_width);
+        }
+    }
+    return result;
+}
+
+// 将 access 网格点沿既定逃逸方向推至 active keep-out 外，避免网格吸附把端点拉回禁入区。
+GridPoint push_access_outside_keep_out(
+    const Grid& grid,
+    GridPoint access,
+    const Point& pin_location,
+    const Point& target,
+    const Rect& active,
+    double clearance) {
+    const Rect rect = normalize_rect(active);
+    const bool horizontal = std::abs(target.x - pin_location.x) > std::abs(target.y - pin_location.y);
+    const int direction = horizontal
+                              ? (target.x < pin_location.x ? -1 : 1)
+                              : (target.y < pin_location.y ? -1 : 1);
+    const auto outside = [&](const Point& point) {
+        return horizontal
+                   ? (direction < 0 ? point.x <= rect.x1 - clearance : point.x >= rect.x2 + clearance)
+                   : (direction < 0 ? point.y <= rect.y1 - clearance : point.y >= rect.y2 + clearance);
+    };
+    while (grid.in_bounds(access) && !outside(grid.grid_to_point(access))) {
+        if (horizontal) access.ix += direction;
+        else access.iy += direction;
+    }
+    return access;
+}
+
+// 为 pin 选择离 active region 最近的一侧，并登记一条终点位于 keep-out 外的正交 access corridor。
 void add_pin_access(
-    ObstacleMap& obstacles,
+    const Circuit& circuit,
     const Grid& grid,
     const GlobalPin& pin,
     const Rect& active,
     std::unordered_map<std::string, PinAccessCorridor>& corridors) {
     const Rect rect = normalize_rect(active);
-    const double escape = 2.0 * grid.step();
-    const Point target = pin_access_target(pin.location, rect, escape);
-    const GridPoint access = grid.snap_to_grid(target, pin.layer);
-    obstacles.add_terminal_point(access);
+    const double wire_width = maximum_width_for_pin(circuit, pin.key);
+    const double clearance = active_route_spacing(circuit, index_to_layer(pin.layer)) + wire_width / 2.0 + grid.step();
+    const Point target = pin_access_target(pin.location, rect, clearance);
+    const GridPoint access = push_access_outside_keep_out(
+        grid, grid.snap_to_grid(target, pin.layer), pin.location, target, rect, clearance);
+    if (!grid.in_bounds(access)) {
+        throw std::runtime_error("pin access point exceeds routing grid: " + pin.key);
+    }
     const Point access_point = grid.grid_to_point(access);
     const bool escapes_horizontally = std::abs(target.x - pin.location.x) > std::abs(target.y - pin.location.y);
     const Point bend = escapes_horizontally
@@ -246,10 +274,10 @@ RoutingContext::RoutingContext(
     for (auto& [key, global_pin] : global_pins_) {
         const auto active_it = active_by_module.find(global_pin.module);
         if (active_it != active_by_module.end() && contains_point(active_it->second, global_pin.location)) {
-            add_pin_access(obstacles_, *grid_, global_pin, active_it->second, pin_access_corridors_);
+            add_pin_access(circuit_, *grid_, global_pin, active_it->second, pin_access_corridors_);
             global_pin.location = pin_access_corridors_.at(key).access_point;
         } else {
-            obstacles_.add_terminal_point(grid_->snap_to_grid(global_pin.location, global_pin.layer));
+            // 非 active 内 pin 无需障碍物例外；A* 起终点也必须通过统一 keep-out 检查。
         }
     }
 }

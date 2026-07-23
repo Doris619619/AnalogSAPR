@@ -171,7 +171,8 @@ GridPath find_astar_path(
             if (!metal_inside_chip_boundary(neighbor, grid, config.wire_width)) {
                 continue;
             }
-            if (!same_point(neighbor, goal) && obstacles.is_blocked(neighbor, grid, config.wire_width)) {
+            // 起终点同样必须满足 keep-out；active 内 pin 的唯一例外由预先登记的 access corridor 落地。
+            if (obstacles.is_blocked(neighbor, grid, config.wire_width)) {
                 continue;
             }
 
