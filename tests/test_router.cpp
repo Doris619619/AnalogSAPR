@@ -418,7 +418,7 @@ void run_router_tests() {
     require(approx(space.formula_required_space(), 4.0), "feedback allocation should not change formula value");
     require(approx(space.required_space(), 9.0), "feedback allocation should override smaller formula result");
 
-    const sapr::SolverConfig config{5.0, 40.0, 7, 0};
+    const sapr::SolverConfig config{40.0, 7, 0};
     sapr::initialize_lcp_topology(circuit, tree, config);
     const auto request = sapr::pack_enhanced_tree(circuit, tree, config);
     require(request.placements.contains("M1"), "representative placement should exist");

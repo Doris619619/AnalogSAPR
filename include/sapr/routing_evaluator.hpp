@@ -23,6 +23,10 @@ struct LcpCandidateFilterEvent {
     std::string source_lcp_candidate_id;
     std::string target_lcp_candidate_id;
     std::string reason;
+    // 记录被预检查剔除的 LCP 物理位置，便于在 routing_debug.json 中定位通道不足位置。
+    std::string lcp_id;
+    double x{};
+    double y{};
 };
 
 // 姹囨€讳竴娆?placement 甯冪嚎璇勪及浜х敓鐨勪笂涓嬫枃銆佸€欓€夎矾寰勫拰鍏ㄥ眬甯冪嚎缁撴灉銆?

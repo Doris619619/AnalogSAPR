@@ -440,9 +440,66 @@ void filter_multi_terminal_unreachable_lcp_candidates(
                 candidate.source_lcp_candidate_id,
                 candidate.target_lcp_candidate_id,
                 candidate.path.message,
+                {},
+                0.0,
+                0.0,
             });
         }
     }
+}
+
+// 按 A* 预检查结果删除无法覆盖全部关联线段的 LCP 物理候选，避免其进入正式 DP 状态空间。
+RoutingEvaluationRequest filter_lcp_locations_by_access_reachability(
+    const RoutingEvaluationRequest& request,
+    const std::vector<routing::RouteCandidate>& preflight_candidates,
+    std::vector<LcpCandidateFilterEvent>* filter_events) {
+    RoutingEvaluationRequest filtered = request;
+    const auto coverages = collect_lcp_candidate_coverage(request, preflight_candidates);
+    std::unordered_map<std::string, bool> reachable_by_location;
+    for (const auto& coverage : coverages) {
+        reachable_by_location[lcp_location_key(coverage.lcp_id, coverage.candidate_id)] =
+            coverage.covers_all_incident_segments;
+    }
+
+    for (auto& point : filtered.linking_points) {
+        const WireSegmentRef* representative_segment = point.segments.empty() ? nullptr : &point.segments.front();
+        std::vector<PhysicalLocationCandidate> reachable;
+        reachable.reserve(point.location_candidates.size());
+        for (const auto& location : point.location_candidates) {
+            const bool reachable_from_all_endpoints =
+                reachable_by_location[lcp_location_key(point.id, location.id)];
+            if (reachable_from_all_endpoints) {
+                reachable.push_back(location);
+                continue;
+            }
+            if (filter_events != nullptr) {
+                filter_events->push_back(LcpCandidateFilterEvent{
+                    representative_segment == nullptr ? std::string{} : representative_segment->net,
+                    representative_segment == nullptr ? std::string{} : representative_segment->from,
+                    representative_segment == nullptr ? std::string{} : representative_segment->to,
+                    representative_segment == nullptr ? std::string{} : representative_segment->id,
+                    location.id,
+                    {},
+                    {},
+                    "unreachable_pin_access: LCP location cannot reach all incident segments",
+                    point.id,
+                    location.x,
+                    location.y,
+                });
+            }
+        }
+        point.location_candidates = std::move(reachable);
+    }
+
+    for (auto& space : filtered.space_nodes) {
+        for (auto& point : space.linking_points) {
+            const auto source = std::find_if(
+                filtered.linking_points.begin(), filtered.linking_points.end(),
+                [&](const LinkingControlPoint& candidate) { return candidate.id == point.id; });
+            if (source != filtered.linking_points.end()) point.location_candidates = source->location_candidates;
+        }
+    }
+    return filtered;
 }
 
 // 表示同一端点绑定下由不同寻路策略得到的一条物理候选路径。
@@ -2276,7 +2333,12 @@ RoutingEvaluation evaluate_routing(
     std::vector<routing::RouteCandidate> debug_candidates = direct_candidates;
     std::vector<LcpCandidateFilterEvent> lcp_candidate_filter_events;
     const auto lcp_nets = nets_with_lcp_topology(request);
+    RoutingEvaluationRequest routable_request = request;
     if (!lcp_nets.empty()) {
+        // 先使用完整 LCP 候选执行只读 A* 覆盖预检查，再把不可从全部关联端点到达的位置排除。
+        const auto preflight_candidates = generate_lcp_route_candidates(context, request, circuit);
+        routable_request = filter_lcp_locations_by_access_reachability(
+            request, preflight_candidates, &lcp_candidate_filter_events);
         candidates.erase(
             std::remove_if(
                 candidates.begin(),
@@ -2292,7 +2354,7 @@ RoutingEvaluation evaluate_routing(
         std::vector<routing::RouteCandidate> raw_lcp_candidates;
         auto lcp_candidates = generate_lcp_route_candidates(
             context,
-            request,
+            routable_request,
             circuit,
             &raw_lcp_candidates,
             &lcp_candidate_filter_events);
@@ -2305,7 +2367,7 @@ RoutingEvaluation evaluate_routing(
             std::make_move_iterator(raw_lcp_candidates.begin()),
             std::make_move_iterator(raw_lcp_candidates.end()));
     }
-    if (request.net_topologies.empty() || !request.tree.root.has_value()) {
+    if (routable_request.net_topologies.empty() || !routable_request.tree.root.has_value()) {
         return make_evaluation(
             std::move(context),
             std::move(candidates),
@@ -2316,7 +2378,7 @@ RoutingEvaluation evaluate_routing(
             std::move(lcp_candidate_filter_events));
     }
     auto bottom_up_dp = routing::run_bottom_up_routing_dp(
-        circuit, request, context, candidates, request.dp_beam_width);
+        circuit, routable_request, context, candidates, routable_request.dp_beam_width);
     if (!bottom_up_dp.success) {
         if (request.strict_lcp_dp && !lcp_nets.empty()) {
             return make_evaluation(

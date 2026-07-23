@@ -393,6 +393,10 @@ void write_lcp_candidate_filter_event_json(std::ostringstream& out, const LcpCan
     write_json_string(out, event.target_lcp_candidate_id);
     out << ", \"reason\": ";
     write_json_string(out, event.reason);
+    out << ", \"lcp_id\": ";
+    write_json_string(out, event.lcp_id);
+    out << ", \"x\": " << event.x;
+    out << ", \"y\": " << event.y;
     out << '}';
 }
 
@@ -620,6 +624,16 @@ std::size_t count_lcp_location_candidates(const RoutingEvaluationRequest& reques
     return total;
 }
 
+// 统计因 pin access 到 LCP 不可达而提前剔除的物理候选数量。
+std::size_t count_unreachable_pin_access_lcp_locations(const RoutingEvaluation& evaluation) {
+    return static_cast<std::size_t>(std::count_if(
+        evaluation.lcp_candidate_filter_events.begin(),
+        evaluation.lcp_candidate_filter_events.end(),
+        [](const LcpCandidateFilterEvent& event) {
+            return event.reason.starts_with("unreachable_pin_access:");
+        }));
+}
+
 // 缁熻宸查€氳繃 A* 涓?multi-terminal 杩囨护鐨勫敮涓€ LCP 鐗╃悊鍊欓€夋暟閲忋€?
 std::size_t count_reachable_lcp_locations(const RoutingEvaluation& evaluation) {
     std::unordered_set<std::string> reachable;
@@ -726,6 +740,8 @@ std::string make_routing_debug_json(
         << ", \"candidate_count\": " << evaluation.candidates.size()
         << ", \"dp_beam_width\": " << request.dp_beam_width
         << ", \"lcp_candidate_filter_count\": " << evaluation.lcp_candidate_filter_events.size()
+        << ", \"lcp_candidates_unreachable_pin_access\": "
+        << count_unreachable_pin_access_lcp_locations(evaluation)
         << ", \"dp_used\": " << (evaluation.used_bottom_up_dp ? "true" : "false")
         << ", \"failed_nets\": " << evaluation.failed_nets
         << ", \"detailed_routes\": " << detailed.routes.size()
@@ -1518,6 +1534,32 @@ double compute_phi_cost(Metrics& metrics, const Metrics& base, const SolverConfi
     return metrics.phi_cost;
 }
 
+// 根据不可达 LCP 诊断计算所属 space node 的最小路由通道宽度。
+std::unordered_map<std::string, double> lcp_access_channel_requirements(
+    const Circuit& circuit,
+    const RoutingEvaluationRequest& request,
+    const RoutingEvaluation& evaluation) {
+    double max_route_spacing = 0.0;
+    for (int layer = 0; layer < request.routing_layers; ++layer) {
+        max_route_spacing = std::max(
+            max_route_spacing,
+            diff_net_route_spacing(circuit, routing::index_to_layer(layer)));
+    }
+
+    std::unordered_map<std::string, double> result;
+    for (const auto& event : evaluation.lcp_candidate_filter_events) {
+        if (!event.reason.starts_with("unreachable_pin_access:") || event.lcp_id.empty()) continue;
+        const auto point = std::find_if(
+            request.linking_points.begin(), request.linking_points.end(),
+            [&](const LinkingControlPoint& candidate) { return candidate.id == event.lcp_id; });
+        if (point == request.linking_points.end()) continue;
+        const double channel_width = point->required_width() + 2.0 * max_route_spacing;
+        auto& required = result[point->space_node_id];
+        required = std::max(required, channel_width);
+    }
+    return result;
+}
+
 // 璇勪环涓€妫靛寮?B*-tree 瀵瑰簲鐨勫€欓€夌姸鎬併€?
 // 鍒ゆ柇褰撳墠鍊欓€夋槸鍚﹀凡缁忓緱鍒板彲鐩存帴杈撳嚭鐨勫悎娉?detailed routing銆?
 bool feedback_expands_space(
@@ -1907,6 +1949,7 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     const bool lcp_direct_fallback =
         !routing_evaluation.strict_lcp_dp_blocked_fallback &&
         !request.linking_points.empty() && routing_evaluation.bottom_up_dp.has_value() && !routing_evaluation.bottom_up_dp->success;
+    const auto lcp_access_channels = lcp_access_channel_requirements(circuit, request, routing_evaluation);
     for (const auto& space : request.space_nodes) {
         const auto detailed_space = detailed.required_space_by_node.find(space.id);
         // required_space_by_node 的语义是基础预留宽度，不能混入 coupling_extra_space。
@@ -1919,6 +1962,10 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
             required_space = std::max(
                 required_space,
                 std::max(0.0, space.required_space() - space.coupling_extra_space) + max_lcp_width_for_space(space));
+        }
+        const auto access_channel = lcp_access_channels.find(space.id);
+        if (access_channel != lcp_access_channels.end()) {
+            required_space = std::max(required_space, access_channel->second);
         }
         feedback.required_space_by_node[space.id] = required_space;
         const auto detailed_coupling = detailed.coupling_space_by_node.find(space.id);
