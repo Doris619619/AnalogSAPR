@@ -96,6 +96,12 @@ double maximum_width_for_pin(const Circuit& circuit, const std::string& pin_key)
     return result;
 }
 
+// 计算引脚 access point 必须跨出的 keep-out 距离，并为网格吸附保留一个步长余量。
+double pin_access_clearance(const Circuit& circuit, const std::string& pin_key, int layer, double grid_step) {
+    return active_route_spacing(circuit, index_to_layer(layer)) +
+           maximum_width_for_pin(circuit, pin_key) / 2.0 + grid_step;
+}
+
 // 将 access 网格点沿既定逃逸方向推至 active keep-out 外，避免网格吸附把端点拉回禁入区。
 GridPoint push_access_outside_keep_out(
     const Grid& grid,
@@ -129,8 +135,7 @@ void add_pin_access(
     const Rect& active,
     std::unordered_map<std::string, PinAccessCorridor>& corridors) {
     const Rect rect = normalize_rect(active);
-    const double wire_width = maximum_width_for_pin(circuit, pin.key);
-    const double clearance = active_route_spacing(circuit, index_to_layer(pin.layer)) + wire_width / 2.0 + grid.step();
+    const double clearance = pin_access_clearance(circuit, pin.key, pin.layer, grid.step());
     const Point target = pin_access_target(pin.location, rect, clearance);
     const GridPoint access = push_access_outside_keep_out(
         grid, grid.snap_to_grid(target, pin.layer), pin.location, target, rect, clearance);
@@ -232,8 +237,10 @@ RoutingContext::RoutingContext(
     for (const auto& [_, global_pin] : global_pins_) {
         const auto active_it = active_by_module.find(global_pin.module);
         if (active_it != active_by_module.end() && contains_point(active_it->second, global_pin.location)) {
+            const int layer = std::clamp(global_pin.layer, 0, config.layer_count - 1);
+            const double clearance = pin_access_clearance(circuit_, global_pin.key, layer, config.step);
             include_point(
-                pin_access_target(global_pin.location, active_it->second, 2.0 * config.step),
+                pin_access_target(global_pin.location, active_it->second, clearance),
                 min_x,
                 min_y,
                 max_x,
