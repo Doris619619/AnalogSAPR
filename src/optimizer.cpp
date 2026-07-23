@@ -375,6 +375,19 @@ void write_dp_candidate_event_json(std::ostringstream& out, const routing::Routi
         << '}';
 }
 
+// 写出 DP 合并 child state 时拒绝的组合，定位局部合法状态之间的物理冲突。
+void write_dp_state_merge_event_json(std::ostringstream& out, const routing::RoutingDpStateMergeEvent& event) {
+    out << "{\"tree_node\": ";
+    write_json_string(out, event.tree_node);
+    out << ", \"left_state_id\": " << event.left_state_id
+        << ", \"right_state_id\": " << event.right_state_id
+        << ", \"reason\": ";
+    write_json_string(out, event.reason);
+    out << ", \"occupied_route_conflicts\": ";
+    write_json_string_array(out, event.occupied_route_conflicts);
+    out << '}';
+}
+
 // 写出 LCP 多端覆盖检查删除的 A* 候选，区分其与后续 DP 阶段的拒绝和裁剪。
 void write_lcp_candidate_filter_event_json(std::ostringstream& out, const LcpCandidateFilterEvent& event) {
     out << "{\"net\": ";
@@ -768,6 +781,10 @@ std::string make_routing_debug_json(
                     evaluation.bottom_up_dp->state_prune_events->size() >= 4096
                 ? "true"
                 : "false")
+        << ", \"dp_state_merge_event_count\": "
+        << (evaluation.bottom_up_dp.has_value() ? evaluation.bottom_up_dp->state_merge_events.size() : 0)
+        << ", \"dp_state_merge_events_truncated\": "
+        << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->state_merge_events_truncated ? "true" : "false")
         << ", \"first_uncovered_lcp_location\": ";
     write_json_string(out, first_uncovered);
     out
@@ -814,6 +831,14 @@ std::string make_routing_debug_json(
     }
     out << "],\n  \"dp_candidate_events_truncated\": "
         << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->candidate_events_truncated ? "true" : "false");
+    out << ",\n  \"dp_state_merge_events\": [";
+    if (evaluation.bottom_up_dp.has_value()) {
+        for (std::size_t index = 0; index < evaluation.bottom_up_dp->state_merge_events.size(); ++index) {
+            if (index != 0) out << ',';
+            write_dp_state_merge_event_json(out, evaluation.bottom_up_dp->state_merge_events[index]);
+        }
+    }
+    out << ']';
     out << ",\n  \"lcp_candidate_filter_events\": [";
     for (std::size_t index = 0; index < evaluation.lcp_candidate_filter_events.size(); ++index) {
         if (index != 0) out << ',';

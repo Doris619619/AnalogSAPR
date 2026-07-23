@@ -52,6 +52,15 @@ struct RoutingDpCandidateEvent {
     bool selected{};
 };
 
+// 记录两个 child state 合并时发现的兼容性冲突，供 routing_debug.json 区分候选拒绝与子树合并拒绝。
+struct RoutingDpStateMergeEvent {
+    std::string tree_node;
+    int left_state_id{-1};
+    int right_state_id{-1};
+    std::string reason;
+    std::vector<std::string> occupied_route_conflicts;
+};
+
 // 记录 DP 裁剪整个 state 时丢失的候选组合，区分语义去重与 beam 截断。
 struct RoutingDpStatePruneEvent {
     std::string tree_node;
@@ -86,6 +95,9 @@ struct RoutingDpResult {
     bool packing_time_dp_used{};
     std::vector<RoutingDpCandidateEvent> candidate_events;
     bool candidate_events_truncated{};
+    // 合并事件独立保存，避免把 child-state 兼容性问题误记为单条候选路径失败。
+    std::vector<RoutingDpStateMergeEvent> state_merge_events;
+    bool state_merge_events_truncated{};
     // 诊断事件独立持有，避免结果对象移动时触发 MSVC Debug 容器代理失效。
     std::unique_ptr<std::vector<RoutingDpStatePruneEvent>> state_prune_events;
 };

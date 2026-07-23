@@ -362,6 +362,57 @@ sapr::RoutingEvaluationRequest make_lcp_request(
     return request;
 }
 
+// 构造左右叶子各自负责一条线段的 DP 树，用于验证 child state 合并时的物理兼容性检查。
+sapr::RoutingEvaluationRequest make_dp_merge_compatibility_request(
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::RoutingEvaluationRequest request;
+    request.placements = placements;
+    request.placement_order = {"M"};
+    request.tree.root = "ROOT";
+    request.tree.nodes = {
+        {"ROOT", "M", std::optional<std::string>{"LEFT"}, std::optional<std::string>{"RIGHT"}},
+        {"LEFT", "M", std::nullopt, std::nullopt},
+        {"RIGHT", "M", std::nullopt, std::nullopt},
+    };
+    sapr::PackingContourStep left;
+    left.tree_node = "LEFT";
+    left.module = "M";
+    left.subtree_modules = {"M"};
+    left.local_wire_segments = {"LEFT_SEGMENT"};
+    sapr::PackingContourStep right;
+    right.tree_node = "RIGHT";
+    right.module = "M";
+    right.subtree_modules = {"M"};
+    right.local_wire_segments = {"RIGHT_SEGMENT"};
+    sapr::PackingContourStep root;
+    root.tree_node = "ROOT";
+    root.module = "M";
+    root.left = "LEFT";
+    root.right = "RIGHT";
+    root.subtree_modules = {"M"};
+    request.packing_trace.steps = {left, right, root};
+    return request;
+}
+
+// 构造指定坐标的成功 DP 候选，保持测试只关注子树合并而非 A* 搜索。
+sapr::routing::RouteCandidate make_dp_merge_candidate(
+    const sapr::routing::RoutingContext& context,
+    const std::string& net,
+    const std::string& segment_id,
+    const sapr::routing::Point& start,
+    const sapr::routing::Point& end) {
+    sapr::routing::RouteCandidate candidate;
+    candidate.net = net;
+    candidate.from_terminal = segment_id + ":from";
+    candidate.to_terminal = segment_id + ":to";
+    candidate.segment_id = segment_id;
+    candidate.wire_width = 1.0;
+    candidate.path.success = true;
+    candidate.path.points = {context.grid().snap_to_grid(start, 0), context.grid().snap_to_grid(end, 0)};
+    candidate.path.metrics.wirelength = 1.0;
+    return candidate;
+}
+
 // 构造一组经过 LCP 的 selected candidates，用于验证 top-down traceback。
 sapr::RoutingEvaluationRequest make_reverse_lcp_request(
     const sapr::Circuit& circuit,
@@ -1317,6 +1368,52 @@ void run_routing_evaluator_tests() {
     sapr::RoutingEvaluationRequest drc_request;
     drc_request.placements = drc_placements;
     drc_request.placement_order = {"M"};
+
+    const sapr::routing::RoutingContext merge_context(drc_circuit, drc_placements);
+    const auto merge_request = make_dp_merge_compatibility_request(drc_placements);
+    const auto merge_left = make_dp_merge_candidate(
+        merge_context, "N_LEFT", "LEFT_SEGMENT", sapr::routing::Point{0.0, 2.0}, sapr::routing::Point{9.0, 2.0});
+    const auto merge_right_short = make_dp_merge_candidate(
+        merge_context, "N_RIGHT", "RIGHT_SEGMENT", sapr::routing::Point{4.0, 0.0}, sapr::routing::Point{4.0, 4.0});
+    const auto short_merge_dp = sapr::routing::run_bottom_up_routing_dp(
+        drc_circuit, merge_request, merge_context, {merge_left, merge_right_short}, 16);
+    require(!short_merge_dp.success, "DP must reject root states assembled from shorting child routes");
+    require(
+        std::any_of(
+            short_merge_dp.state_merge_events.begin(),
+            short_merge_dp.state_merge_events.end(),
+            [](const auto& event) { return event.reason == "occupied_route_short"; }),
+        "DP child merge should record occupied-route short diagnostics");
+
+    auto spacing_circuit = drc_circuit;
+    spacing_circuit.constraints.spacing_rules.diff_net_route_spacing["M1"] = 1.0;
+    const sapr::routing::RoutingContext spacing_merge_context(spacing_circuit, drc_placements);
+    const auto merge_right_spacing = make_dp_merge_candidate(
+        spacing_merge_context, "N_RIGHT", "RIGHT_SEGMENT", sapr::routing::Point{0.0, 4.0}, sapr::routing::Point{9.0, 4.0});
+    const auto spacing_merge_dp = sapr::routing::run_bottom_up_routing_dp(
+        spacing_circuit, merge_request, spacing_merge_context, {merge_left, merge_right_spacing}, 16);
+    require(!spacing_merge_dp.success, "DP must reject child routes that violate different-net spacing");
+    require(
+        std::any_of(
+            spacing_merge_dp.state_merge_events.begin(),
+            spacing_merge_dp.state_merge_events.end(),
+            [](const auto& event) { return event.reason == "route_spacing"; }),
+        "DP child merge should record route-spacing diagnostics");
+
+    const auto merge_right_legal = make_dp_merge_candidate(
+        merge_context, "N_RIGHT", "RIGHT_SEGMENT", sapr::routing::Point{4.0, 7.0}, sapr::routing::Point{9.0, 7.0});
+    const auto legal_merge_dp = sapr::routing::run_bottom_up_routing_dp(
+        drc_circuit, merge_request, merge_context, {merge_left, merge_right_short, merge_right_legal}, 16);
+    require(legal_merge_dp.success, "DP should retain a higher-cost child combination when the cheaper one shorts");
+    require(
+        std::any_of(
+            legal_merge_dp.traceback_candidates.begin(),
+            legal_merge_dp.traceback_candidates.end(),
+            [](const auto& candidate) {
+                return candidate.segment_id == "RIGHT_SEGMENT" && candidate.path.points.front().iy == 7;
+            }),
+        "successful DP traceback should select the legal right-child candidate");
+
     drc_request.active_region_blockers.push_back(
         sapr::routing::transform_active_to_global(drc_circuit.modules.at("M"), drc_placements.at("M")));
 
