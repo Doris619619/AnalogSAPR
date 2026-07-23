@@ -2169,18 +2169,11 @@ std::vector<routing::RouteCandidate> selected_candidates_for_detailed_routing(
     const RoutingEvaluation& evaluation) {
     if (evaluation.bottom_up_dp.has_value()) {
         if (evaluation.bottom_up_dp->success) {
-            std::vector<routing::RouteCandidate> selected = evaluation.bottom_up_dp->traceback_candidates;
-            std::unordered_set<std::string> covered_nets;
-            for (const auto& candidate : selected) covered_nets.insert(candidate.net);
-            for (const auto& net_route : evaluation.global_routing.net_routes) {
-                if (!net_route.success || covered_nets.contains(net_route.net)) continue;
-                selected.insert(
-                    selected.end(),
-                    net_route.selected_candidates.begin(),
-                    net_route.selected_candidates.end());
-            }
-            return selected;
+            // 成功 DP 的 traceback 已覆盖 LCP 与 direct net；禁止由 global routing 补入未参与 DP 的路径。
+            return evaluation.bottom_up_dp->traceback_candidates;
         }
+        // 统一 DP 不可行时不能回退到未纳入 state 的 global 路径，否则会重新引入阶段不一致。
+        return {};
     }
     std::vector<routing::RouteCandidate> candidates;
     for (const auto& net_route : evaluation.global_routing.net_routes) {

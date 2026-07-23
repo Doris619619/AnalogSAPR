@@ -30,6 +30,12 @@ bool routes_short_with_existing(
     const std::vector<RouteSegment>& routes,
     const std::vector<RouteSegment>& existing);
 
+// 判断一组新线段是否与既有异网线段违反同层最小边缘间距；间距为零时不构成违例。
+bool routes_violate_spacing_with_existing(
+    const std::vector<RouteSegment>& routes,
+    const std::vector<RouteSegment>& existing,
+    double spacing);
+
 // 合并同网同层同宽的共线重叠或相接线段，用于输出前清理重复金属段。
 std::vector<RouteSegment> merge_collinear_same_net_routes(
     const std::vector<RouteSegment>& routes);

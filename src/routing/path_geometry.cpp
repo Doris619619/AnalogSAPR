@@ -255,6 +255,21 @@ bool routes_short_with_existing(
     return false;
 }
 
+// 按 detailed DRC 使用的金属矩形语义检查异网最小边缘间距。
+bool routes_violate_spacing_with_existing(
+    const std::vector<RouteSegment>& routes,
+    const std::vector<RouteSegment>& existing,
+    double spacing) {
+    if (spacing <= 0.0) return false;
+    for (const auto& route : routes) {
+        for (const auto& occupied : existing) {
+            if (route.net == occupied.net || route.layer != occupied.layer) continue;
+            if (intersects(expand_rect(route_to_rect(route), spacing), route_to_rect(occupied))) return true;
+        }
+    }
+    return false;
+}
+
 // 合并同网同层同宽的共线输出段，去掉重复、包含、重叠和首尾相接区间。
 std::vector<RouteSegment> merge_collinear_same_net_routes(
     const std::vector<RouteSegment>& routes) {

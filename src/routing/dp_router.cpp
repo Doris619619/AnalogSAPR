@@ -10,6 +10,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "sapr/constraints.hpp"
 #include "sapr/routing/path_geometry.hpp"
 
 namespace sapr::routing {
@@ -240,9 +241,11 @@ bool merge_child_state(RoutingDpState& target, const RoutingDpState& child, bool
 }
 
 // 尝试把 candidate 加入 state，并维护 LCP 位置一致性。
+// 将候选加入 DP 状态前执行与 detailed 共用的短路和最小间距物理占用检查。
 AppendCandidateResult append_candidate_if_consistent(
     RoutingDpState& state,
     const RouteCandidate& candidate,
+    const Circuit& circuit,
     const RoutingContext& context) {
     AppendCandidateResult result;
     if (!candidate.path.success) {
@@ -251,12 +254,21 @@ AppendCandidateResult append_candidate_if_consistent(
         return result;
     }
     const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
-    auto candidate_routes = candidate_to_route_segments(context.grid(), candidate, width);
+    auto candidate_routes = candidate_to_route_segments(context.grid(), candidate, width, context.active_regions());
     const bool has_short = routes_short_with_existing(candidate_routes, state.occupied_routes);
     if (has_short) {
         result.occupied_route_conflicts = collect_occupied_route_conflicts(candidate_routes, state.occupied_routes);
         result.has_short = true;
         result.reason = "occupied_route_short";
+        return result;
+    }
+    const bool has_spacing_violation = std::any_of(
+        candidate_routes.begin(), candidate_routes.end(), [&](const RouteSegment& route) {
+            return routes_violate_spacing_with_existing(
+                {route}, state.occupied_routes, diff_net_route_spacing(circuit, route.layer));
+        });
+    if (has_spacing_violation) {
+        result.reason = "route_spacing";
         return result;
     }
     if (!candidate.lcp_id.empty()) {
@@ -319,14 +331,17 @@ void append_candidate_packing_trace(
         transition);
 }
 
-// 收集论文 LCP topology 中必须被 DP 覆盖的唯一 wire segment id。
-std::vector<std::string> required_segment_keys(const RoutingEvaluationRequest& request) {
+// 收集必须被 DP 覆盖的唯一逻辑线段，包含论文 LCP topology 与 direct-net candidate。
+std::vector<std::string> required_segment_keys(
+    const RoutingEvaluationRequest& request,
+    const std::vector<RouteCandidate>& candidates) {
     std::vector<std::string> keys;
     for (const auto& topology : request.net_topologies) {
         for (const auto& segment : topology.segments) {
             append_unique(keys, segment_key(segment.net, segment.from, segment.to, segment.id));
         }
     }
+    for (const auto& candidate : candidates) append_unique(keys, candidate_segment_key(candidate));
     return keys;
 }
 
@@ -870,6 +885,7 @@ std::vector<RoutingDpState> merge_child_states_for_node(
 void apply_segment_transition(
     std::vector<RoutingDpState>& states,
     const CandidateGroup& group,
+    const Circuit& circuit,
     const RoutingContext& context,
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
     const std::unordered_map<std::string, std::string>& lcp_space_by_id,
@@ -888,7 +904,7 @@ void apply_segment_transition(
         for (const auto& candidate : group.candidates) {
             if (!candidate_matches_group(candidate, group)) continue;
             RoutingDpState next = state;
-            const auto append_result = append_candidate_if_consistent(next, candidate, context);
+            const auto append_result = append_candidate_if_consistent(next, candidate, circuit, context);
             append_candidate_event(candidate_events, candidate_events_truncated, group, state, candidate, append_result);
             if (!append_result.accepted) {
                 append_unique(rejection_reasons, append_result.reason);
@@ -937,6 +953,7 @@ std::vector<RoutingDpState> build_states_for_node(
     const std::unordered_set<std::string>& subtree_modules,
     const ChildSubtreeModules& children,
     const std::vector<CandidateGroup>& groups,
+    const Circuit& circuit,
     const RoutingContext& context,
     const CandidateRouteCache& candidate_routes,
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
@@ -953,9 +970,12 @@ std::vector<RoutingDpState> build_states_for_node(
     if (states.empty()) return states;
 
     for (const auto& group : groups) {
-        if (use_packing_time_segments) {
-            if (packing_time_segments == nullptr || !contains_value(*packing_time_segments, group.key)) continue;
+        const bool recorded_at_packing_step =
+            packing_time_segments != nullptr && contains_value(*packing_time_segments, group.key);
+        if (use_packing_time_segments && recorded_at_packing_step) {
+            // packing trace 已显式记录的线段严格按其记录节点激活。
         } else if (!is_local_segment_for_node(group, subtree_modules, children, lcp_owner_by_id)) {
+            // 未写入 LCP packing trace 的 direct net 在端点首次同属的最小子树激活。
             continue;
         }
         bool already_covered = true;
@@ -970,6 +990,7 @@ std::vector<RoutingDpState> build_states_for_node(
         apply_segment_transition(
             states,
             group,
+            circuit,
             context,
             lcp_owner_by_id,
             lcp_space_by_id,
@@ -1007,8 +1028,6 @@ RoutingDpResult run_bottom_up_routing_dp(
     const RoutingContext& context,
     const std::vector<RouteCandidate>& candidates,
     int max_states_per_node) {
-    (void)circuit;
-    (void)context;
     RoutingDpResult result{};
     result.beam_width = max_states_per_node;
     result.state_prune_events = std::make_unique<std::vector<RoutingDpStatePruneEvent>>();
@@ -1022,7 +1041,7 @@ RoutingDpResult run_bottom_up_routing_dp(
     collect_post_order(*request.tree.root, nodes, visited, post_order);
     if (post_order.empty()) return result;
 
-    const auto required_segments = required_segment_keys(request);
+    const auto required_segments = required_segment_keys(request, candidates);
     const auto required_lcps = required_lcp_ids(request);
     const auto groups = make_candidate_groups(request, candidates);
     CandidateRouteCache candidate_routes;
@@ -1032,7 +1051,7 @@ RoutingDpResult run_bottom_up_routing_dp(
         group_routes.reserve(group.candidates.size());
         for (const auto& candidate : group.candidates) {
             const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
-            group_routes.push_back(candidate_to_route_segments(context.grid(), candidate, width));
+            group_routes.push_back(candidate_to_route_segments(context.grid(), candidate, width, context.active_regions()));
         }
         candidate_routes.push_back(std::move(group_routes));
     }
@@ -1069,6 +1088,7 @@ RoutingDpResult run_bottom_up_routing_dp(
             subtree_modules,
             children,
             groups,
+            circuit,
             context,
             candidate_routes,
             lcp_owner_by_id,
