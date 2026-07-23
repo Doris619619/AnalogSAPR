@@ -1,0 +1,15 @@
+# WIRE_WIDTH only; this case has no symmetry constraints
+
+DEVICE_SPACING              5
+ACTIVE_ROUTE_SPACING ALL    0.20
+DIFF_NET_ROUTE_SPACING ALL  0.14
+ACTIVE_REGION_BLOCK ALL
+
+WIRE_WIDTH  8    0.05  1.0
+WIRE_WIDTH  9    0.05  1.0
+WIRE_WIDTH  12   0.05  1.0
+WIRE_WIDTH  GND  0.05  1.0
+WIRE_WIDTH  VDD  0.05  1.0
+
+# 对照实验：仅允许 M2 跨越 active，且豁免 M2 active-to-route 间距
+ACTIVE_REGION_ALLOW M2
