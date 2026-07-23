@@ -977,16 +977,75 @@ void append_path_segments(
 }
 
 // 灏嗕竴鏉?A* 缃戞牸璺緞鎸?detailed routing 绾垮瑙勫垯鍘嬬缉鎴?route segment銆?
+// 将一条 A* 网格路径压缩成中间金属线段；不包含固定的 pin access corridor。
+std::vector<RouteSegment> astar_path_segments(
+    const Circuit& circuit,
+    const RoutingEvaluation& evaluation,
+    const routing::RouteCandidate& candidate) {
+    const double width = detailed_width_for_candidate(circuit, evaluation, candidate);
+    return routing::candidate_to_route_segments(
+        evaluation.context.grid(),
+        candidate,
+        width,
+        evaluation.context.active_regions());
+}
+
+// 判断一条金属线段是否完整覆盖同层、正交的 A* 网格边，避免压缩后丢失路径连通性。
+bool route_segment_covers_grid_edge(
+    const RouteSegment& route,
+    const routing::Point& start,
+    const routing::Point& end,
+    int layer) {
+    if (routing::layer_to_index(route.layer) != layer) return false;
+    if (same_coord(start.y, end.y)) {
+        if (!same_coord(route.y1, route.y2) || !same_coord(route.y1, start.y)) return false;
+        const double edge_min = std::min(start.x, end.x);
+        const double edge_max = std::max(start.x, end.x);
+        const double route_min = std::min(route.x1, route.x2);
+        const double route_max = std::max(route.x1, route.x2);
+        return route_min <= edge_min + 1e-9 && route_max + 1e-9 >= edge_max;
+    }
+    if (same_coord(start.x, end.x)) {
+        if (!same_coord(route.x1, route.x2) || !same_coord(route.x1, start.x)) return false;
+        const double edge_min = std::min(start.y, end.y);
+        const double edge_max = std::max(start.y, end.y);
+        const double route_min = std::min(route.y1, route.y2);
+        const double route_max = std::max(route.y1, route.y2);
+        return route_min <= edge_min + 1e-9 && route_max + 1e-9 >= edge_max;
+    }
+    return false;
+}
+
+// 验证 A* 网格路径可无损转换为 routing.txt 金属段；跨层步由原路径的 via 表示，不要求平面金属段。
+bool astar_path_converts_to_segments(
+    const routing::Grid& grid,
+    const routing::RouteCandidate& candidate,
+    const std::vector<RouteSegment>& routes) {
+    if (!candidate.path.success || candidate.path.points.empty()) return false;
+    if (candidate.path.points.size() == 1) return true;
+    for (std::size_t index = 1; index < candidate.path.points.size(); ++index) {
+        const auto& start = candidate.path.points[index - 1];
+        const auto& end = candidate.path.points[index];
+        if (start.ix == end.ix && start.iy == end.iy && start.layer != end.layer) continue;
+        if (start.layer != end.layer || (start.ix != end.ix && start.iy != end.iy)) return false;
+        const auto start_xy = grid.grid_to_point(start);
+        const auto end_xy = grid.grid_to_point(end);
+        if (same_coord(start_xy.x, end_xy.x) && same_coord(start_xy.y, end_xy.y)) continue;
+        const bool covered = std::any_of(routes.begin(), routes.end(), [&](const RouteSegment& route) {
+            return route_segment_covers_grid_edge(route, start_xy, end_xy, start.layer);
+        });
+        if (!covered) return false;
+    }
+    return true;
+}
+
+// 将登记的专属 pin access corridor 追加到已验证的 A* 中间金属段，供 detailed routing 做动态合法化。
 std::vector<RouteSegment> detailed_path_segments(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate) {
     const double width = detailed_width_for_candidate(circuit, evaluation, candidate);
-    auto routes = routing::candidate_to_route_segments(
-        evaluation.context.grid(),
-        candidate,
-        width,
-        evaluation.context.active_regions());
+    auto routes = astar_path_segments(circuit, evaluation, candidate);
     const auto append_access = [&](const std::string& terminal) {
         const auto found = evaluation.context.pin_access_corridors().find(terminal);
         if (found == evaluation.context.pin_access_corridors().end()) return;
@@ -1016,6 +1075,22 @@ std::vector<RouteSegment> detailed_path_segments(
     append_access(candidate.from_terminal);
     append_access(candidate.to_terminal);
     return routes;
+}
+
+// 在 bottom-up DP 前剔除无法表达为连续金属段的 A* 候选；不检查动态短路、耦合或 detailed 顺序。
+void reject_nonconvertible_astar_candidates(
+    const routing::RoutingContext& context,
+    std::vector<routing::RouteCandidate>& candidates) {
+    for (auto& candidate : candidates) {
+        if (!candidate.path.success) continue;
+        const double width =
+            candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
+        const auto routes = routing::candidate_to_route_segments(
+            context.grid(), candidate, width, context.active_regions());
+        if (astar_path_converts_to_segments(context.grid(), candidate, routes)) continue;
+        candidate.path.success = false;
+        candidate.path.message = "A* path cannot be converted into connected route segments";
+    }
 }
 
 // 琛ㄧず detailed routing 鍚堟硶鍖栧悗瀹為檯閲囩敤鐨勫€欓€夊拰閲戝睘绾挎銆?
@@ -1240,22 +1315,6 @@ routing::PathMetrics route_metrics_from_candidate_path(
 }
 
 // 纭鍘嬬缉鍚庣殑閲戝睘绾挎浠嶈兘杩炴帴鍒板師濮嬭捣缁堢偣鍧愭爣锛涚鐐瑰眰宸敱 A* path 鐨?via move 琛ㄧず銆?
-bool route_segments_connect_path_endpoints(
-    const std::vector<RouteSegment>& routes,
-    const routing::Grid& grid,
-    const routing::GridPoint& start,
-    const routing::GridPoint& goal) {
-    if (routes.empty()) return false;
-    const auto start_xy = grid.grid_to_point(start);
-    const auto goal_xy = grid.grid_to_point(goal);
-    const auto& first = routes.front();
-    const auto& last = routes.back();
-    return same_coord(first.x1, start_xy.x) &&
-           same_coord(first.y1, start_xy.y) &&
-           same_coord(last.x2, goal_xy.x) &&
-           same_coord(last.y2, goal_xy.y);
-}
-
 // 鎸夎鏂?detailed routing 璇箟瀵瑰€欓€夊仛灞€閮ㄥ悎娉曞寲锛氭浛浠ｅ€欓€変紭鍏堬紝涓嶈繘琛屽厤璐规暣鏉℃崲灞傘€?
 // 灏嗗凡甯冨紓缃?detailed 閲戝睘娉ㄥ唽涓?A* 闅滅锛岄噸鏂板鎵句竴鏉＄湡瀹炲惈 via 鎴愭湰鐨勫悎娉曞寲璺緞銆?
 // 鐢熸垚鍊欓€夌殑 detailed 绾挎锛屽苟鎷掔粷鍘嬬缉鍚庢棤娉曡繛鎺ュ師濮嬭矾寰勮捣缁堢偣鐨勭粨鏋溿€?
@@ -1272,15 +1331,12 @@ std::optional<std::vector<RouteSegment>> legal_candidate_routes(
     }
     // LCP 与引脚落在同一网格点时，A* 正确返回单点路径；该连接无需写入金属线段。
     if (candidate.path.points.size() == 1) return std::vector<RouteSegment>{};
-    auto routes = detailed_path_segments(circuit, evaluation, candidate);
-    if (!route_segments_connect_path_endpoints(
-            routes,
-            evaluation.context.grid(),
-            candidate.path.points.front(),
-            candidate.path.points.back())) {
-        if (failure_reason != nullptr) *failure_reason = "candidate route segments do not connect endpoints";
+    const auto middle_routes = astar_path_segments(circuit, evaluation, candidate);
+    if (!astar_path_converts_to_segments(evaluation.context.grid(), candidate, middle_routes)) {
+        if (failure_reason != nullptr) *failure_reason = "A* path cannot be converted into connected route segments";
         return std::nullopt;
     }
+    auto routes = detailed_path_segments(circuit, evaluation, candidate);
     if (routes_violate_active_regions(circuit, request, evaluation.context, routes)) {
         if (failure_reason != nullptr) *failure_reason = "candidate route segments cross active region";
         return std::nullopt;
@@ -1367,11 +1423,12 @@ std::optional<DetailedLegalization> reroute_candidate_avoiding_detailed_routes(
             routing::RouteCandidate rerouted = candidate;
             rerouted.path = std::move(path);
             rerouted.path.points = std::move(full_points);
-            auto routes = detailed_path_segments(circuit, evaluation, rerouted);
-            if (!route_segments_connect_path_endpoints(routes, evaluation.context.grid(), start, goal)) {
-                last_failure = "reroute route segments do not connect endpoints";
+            const auto middle_routes = astar_path_segments(circuit, evaluation, rerouted);
+            if (!astar_path_converts_to_segments(evaluation.context.grid(), rerouted, middle_routes)) {
+                last_failure = "reroute A* path cannot be converted into connected route segments";
                 continue;
             }
+            auto routes = detailed_path_segments(circuit, evaluation, rerouted);
             if (routes_violate_active_regions(circuit, request, evaluation.context, routes)) {
                 last_failure = "reroute route segments cross active region";
                 continue;
@@ -2349,6 +2406,7 @@ RoutingEvaluation evaluate_routing(
     for (auto& candidate : candidates) {
         annotate_candidate(circuit, candidate, 50000.0, 50000.0);
     }
+    reject_nonconvertible_astar_candidates(context, candidates);
     return make_evaluation(std::move(context), std::move(candidates), circuit);
 }
 
@@ -2403,6 +2461,9 @@ RoutingEvaluation evaluate_routing(
             std::make_move_iterator(raw_lcp_candidates.begin()),
             std::make_move_iterator(raw_lcp_candidates.end()));
     }
+    // 仅过滤无法保真输出的 A* 几何候选，保持论文规定的动态 detailed routing 在 DP traceback 之后执行。
+    reject_nonconvertible_astar_candidates(context, candidates);
+    reject_nonconvertible_astar_candidates(context, debug_candidates);
     if (routable_request.net_topologies.empty() || !routable_request.tree.root.has_value()) {
         return make_evaluation(
             std::move(context),
