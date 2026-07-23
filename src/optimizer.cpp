@@ -573,8 +573,11 @@ void write_detailed_transition_outcome_json(std::ostringstream& out, const Detai
     write_json_string(out, outcome.source_lcp_id);
     out << ", \"target_lcp_id\": ";
     write_json_string(out, outcome.target_lcp_id);
+    out << ", \"route_variant\": ";
+    write_json_string(out, outcome.route_variant);
     out << ", \"dp_status\": ";
     write_json_string(out, outcome.selected_by_dp ? "selected" : "not_selected_by_dp");
+    out << ", \"exact_traceback_match\": " << (outcome.selected_by_dp ? "true" : "false");
     out << ", \"detailed_status\": ";
     write_json_string(out, !outcome.detailed_attempted ? "not_attempted" : outcome.detailed_legalized ? "legalized" : "failed");
     out << ", \"final_output\": ";

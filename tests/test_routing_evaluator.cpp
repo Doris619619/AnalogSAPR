@@ -1334,6 +1334,24 @@ void run_routing_evaluator_tests() {
     require(net_routes_are_contiguous(cost_compare_detail.routes, "N2"), "cost-selected via route should stay connected");
     require(net_has_implicit_via(cost_compare_detail.routes, "N2"), "cost-selected via route should expose implicit vias");
 
+    // 成功 DP 的 traceback 必须锁定精确物理路径，detailed 不得为了局部低代价替换为跨层候选。
+    sapr::routing::RoutingDpResult locked_dp;
+    locked_dp.success = true;
+    locked_dp.traceback_candidates = {long_no_via};
+    cost_compare_eval.bottom_up_dp = std::move(locked_dp);
+    cost_compare_eval.used_bottom_up_dp = true;
+    const auto locked_dp_detail = sapr::run_detailed_routing(conflict_circuit, short_detail_request, cost_compare_eval);
+    require(
+        std::none_of(locked_dp_detail.routes.begin(), locked_dp_detail.routes.end(), [](const auto& route) {
+            return route.layer == "M2";
+        }),
+        "successful DP traceback must prevent detailed from replacing its selected path");
+    require(
+        std::all_of(locked_dp_detail.transition_outcomes.begin(), locked_dp_detail.transition_outcomes.end(), [](const auto& outcome) {
+            return outcome.selected_by_dp;
+        }),
+        "detailed output for successful DP should retain exact traceback candidate identity");
+
     sapr::routing::GlobalRoutingResult layer_global;
     layer_global.net_routes.push_back(first_choice);
     layer_global.net_routes.push_back(second_choice);

@@ -541,6 +541,8 @@ struct DetailedTransitionOutcome {
     std::string lcp_id;
     std::string source_lcp_id;
     std::string target_lcp_id;
+    // 保存 detailed 实际落地的物理走廊标识，验证其是否与 DP traceback 的精确路径一致。
+    std::string route_variant;
     bool selected_by_dp{};
     bool detailed_attempted{};
     bool detailed_legalized{};

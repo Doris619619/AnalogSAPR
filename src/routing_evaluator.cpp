@@ -1454,6 +1454,7 @@ std::optional<DetailedLegalization> reroute_candidate_avoiding_detailed_routes(
 }
 
 // 鎸夎鏂?detailed routing 璇箟瀵瑰€欓€夊仛灞€閮ㄥ悎娉曞寲锛氬悓 LCP 缁戝畾鍐呯殑鏇夸唬璺緞浼樺厛锛岀劧鍚?A* reroute銆?
+// 成功 DP 时只合法化其精确 traceback 路径，禁止 detailed 替换候选或重新寻路。
 DetailedLegalization legalize_detailed_candidate(
     const Circuit& circuit,
     const RoutingEvaluationRequest& request,
@@ -1461,20 +1462,22 @@ DetailedLegalization legalize_detailed_candidate(
     const routing::RouteCandidate& selected,
     const std::vector<RouteSegment>& occupied_routes) {
     std::vector<const routing::RouteCandidate*> attempts{&selected};
-    for (const auto& candidate : evaluation.candidates) {
-        if (!candidate.path.success || !same_logical_candidate_pair(candidate, selected)) continue;
-        // 鏈?LCP 鏃剁姝㈡崲鍒颁笉鍚?lcp_candidate_id锛岄伩鍏嶅悇鏀矾鎷嗘暎 DP 涓€鑷存€с€?
-        if (!same_lcp_location_binding(candidate, selected)) continue;
-        bool duplicate = false;
-        for (const auto* existing : attempts) {
-            if (existing == &candidate ||
-                (existing->segment_id == candidate.segment_id &&
-                 existing->lcp_candidate_id == candidate.lcp_candidate_id &&
-                 same_candidate_path(*existing, candidate))) {
-                duplicate = true;
+    const bool lock_dp_traceback = evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->success;
+    if (!lock_dp_traceback) {
+        for (const auto& candidate : evaluation.candidates) {
+            if (!candidate.path.success || !same_logical_candidate_pair(candidate, selected)) continue;
+            if (!same_lcp_location_binding(candidate, selected)) continue;
+            bool duplicate = false;
+            for (const auto* existing : attempts) {
+                if (existing == &candidate ||
+                    (existing->segment_id == candidate.segment_id &&
+                     existing->lcp_candidate_id == candidate.lcp_candidate_id &&
+                     same_candidate_path(*existing, candidate))) {
+                    duplicate = true;
+                }
             }
+            if (!duplicate) attempts.push_back(&candidate);
         }
-        if (!duplicate) attempts.push_back(&candidate);
     }
 
     std::optional<DetailedLegalization> best_legal;
@@ -1502,6 +1505,12 @@ DetailedLegalization legalize_detailed_candidate(
         }
     }
     if (best_legal.has_value()) return std::move(*best_legal);
+
+    if (lock_dp_traceback) {
+        failure_messages.push_back(
+            selected.net + ": exact DP traceback candidate cannot be legalized without replacement");
+        return DetailedLegalization{false, selected, {}, {}, false, false, std::move(failure_messages)};
+    }
 
     for (const auto* candidate : attempts) {
         std::string failure_reason;
@@ -1991,6 +2000,7 @@ void append_detailed_transition_outcome(
         candidate.lcp_id,
         candidate.source_lcp_id,
         candidate.target_lcp_id,
+        candidate.route_variant,
         selected_by_dp,
         true,
         legalized,
@@ -2529,7 +2539,7 @@ DetailedRoutingResult run_detailed_routing(
             has_dp_traceback);
     const int dp_state_id = has_dp_traceback ? evaluation.bottom_up_dp->best_state.id : -1;
     const std::string tree_node = has_dp_traceback ? evaluation.bottom_up_dp->best_state.tree_node : std::string{};
-    // 判断 detailed 候选是否来自 DP traceback；未覆盖 net 的全局候选会被标记为非 DP 选择。
+    // 仅当物理走廊和网格路径均一致时，候选才可标记为 DP traceback 的原始物理路径。
     const auto selected_by_dp = [&](const routing::RouteCandidate& candidate) {
         if (!has_dp_traceback) return false;
         return std::any_of(
@@ -2542,7 +2552,9 @@ DetailedRoutingResult run_detailed_routing(
                        traceback.segment_id == candidate.segment_id &&
                        traceback.lcp_candidate_id == candidate.lcp_candidate_id &&
                        traceback.source_lcp_candidate_id == candidate.source_lcp_candidate_id &&
-                       traceback.target_lcp_candidate_id == candidate.target_lcp_candidate_id;
+                       traceback.target_lcp_candidate_id == candidate.target_lcp_candidate_id &&
+                       traceback.route_variant == candidate.route_variant &&
+                       same_candidate_path(traceback, candidate);
             });
     };
     if (evaluation.bottom_up_dp.has_value() && !evaluation.bottom_up_dp->success) {
@@ -2644,7 +2656,12 @@ DetailedRoutingResult run_detailed_routing(
 
         if (is_lcp_net) {
             auto net_legal = legalize_lcp_net(
-                circuit, request, evaluation, group, result.routes, request.allow_lcp_location_negotiation);
+                circuit,
+                request,
+                evaluation,
+                group,
+                result.routes,
+                request.allow_lcp_location_negotiation && !has_dp_traceback);
             if (!net_legal.success) {
                 for (const auto& failure : net_legal.failure_messages) {
                     trace.warnings.push_back(failure);
