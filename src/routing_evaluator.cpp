@@ -925,11 +925,36 @@ std::vector<RouteSegment> detailed_path_segments(
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate) {
     const double width = detailed_width_for_candidate(circuit, evaluation, candidate);
-    return routing::candidate_to_route_segments(
+    auto routes = routing::candidate_to_route_segments(
         evaluation.context.grid(),
         candidate,
         width,
         evaluation.context.active_regions());
+    const auto append_access = [&](const std::string& terminal) {
+        const auto found = evaluation.context.pin_access_corridors().find(terminal);
+        if (found == evaluation.context.pin_access_corridors().end()) return;
+        const auto& access = found->second;
+        if (access.pin_location.x == access.access_point.x && access.pin_location.y == access.access_point.y) return;
+        RouteSegment segment{
+            candidate.net,
+            routing::index_to_layer(access.layer),
+            access.pin_location.x,
+            access.pin_location.y,
+            access.access_point.x,
+            access.access_point.y,
+            width};
+        const auto duplicate = std::any_of(routes.begin(), routes.end(), [&](const RouteSegment& route) {
+            return route.net == segment.net && route.layer == segment.layer &&
+                   ((same_coord(route.x1, segment.x1) && same_coord(route.y1, segment.y1) &&
+                     same_coord(route.x2, segment.x2) && same_coord(route.y2, segment.y2)) ||
+                    (same_coord(route.x1, segment.x2) && same_coord(route.y1, segment.y2) &&
+                     same_coord(route.x2, segment.x1) && same_coord(route.y2, segment.y1)));
+        });
+        if (!duplicate) routes.push_back(std::move(segment));
+    };
+    append_access(candidate.from_terminal);
+    append_access(candidate.to_terminal);
+    return routes;
 }
 
 // 琛ㄧず detailed routing 鍚堟硶鍖栧悗瀹為檯閲囩敤鐨勫€欓€夊拰閲戝睘绾挎銆?

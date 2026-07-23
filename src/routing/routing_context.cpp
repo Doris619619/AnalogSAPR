@@ -102,16 +102,14 @@ void add_pin_access(
     ObstacleMap& obstacles,
     const Grid& grid,
     const GlobalPin& pin,
-    const Rect& active) {
+    const Rect& active,
+    std::unordered_map<std::string, PinAccessCorridor>& corridors) {
     const Rect rect = normalize_rect(active);
-    GridPoint start = grid.snap_to_grid(pin.location, pin.layer);
-    for (int layer = 0; layer < grid.layer_count(); ++layer) {
-        obstacles.add_terminal_point(GridPoint{start.ix, start.iy, layer});
-    }
-
     const double escape = 2.0 * grid.step();
     const Point target = pin_access_target(pin.location, rect, escape);
-    add_access_line(obstacles, grid, start, grid.snap_to_grid(target, pin.layer));
+    const GridPoint access = grid.snap_to_grid(target, pin.layer);
+    obstacles.add_terminal_point(access);
+    corridors[pin.key] = PinAccessCorridor{pin.key, pin.layer, pin.location, grid.grid_to_point(access)};
 }
 
 }  // namespace
@@ -240,11 +238,11 @@ RoutingContext::RoutingContext(
         }
     }
 
-    for (const auto& [key, global_pin] : global_pins_) {
-        (void)key;
+    for (auto& [key, global_pin] : global_pins_) {
         const auto active_it = active_by_module.find(global_pin.module);
         if (active_it != active_by_module.end() && contains_point(active_it->second, global_pin.location)) {
-            add_pin_access(obstacles_, *grid_, global_pin, active_it->second);
+            add_pin_access(obstacles_, *grid_, global_pin, active_it->second, pin_access_corridors_);
+            global_pin.location = pin_access_corridors_.at(key).access_point;
         } else {
             obstacles_.add_terminal_point(grid_->snap_to_grid(global_pin.location, global_pin.layer));
         }
@@ -271,6 +269,10 @@ const std::vector<Rect>& RoutingContext::active_regions() const {
 // 返回全局 pin 查询表。
 const std::unordered_map<std::string, GlobalPin>& RoutingContext::global_pins() const {
     return global_pins_;
+}
+
+const std::unordered_map<std::string, PinAccessCorridor>& RoutingContext::pin_access_corridors() const {
+    return pin_access_corridors_;
 }
 
 // 根据 WIRE_WIDTH 约束返回 net 默认线宽。

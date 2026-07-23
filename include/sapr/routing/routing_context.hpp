@@ -31,6 +31,14 @@ struct GlobalPin {
     int layer{};
 };
 
+// 表示 active 内引脚到边界外 access point 的专属合法逃逸走廊。
+struct PinAccessCorridor {
+    std::string pin_key;
+    int layer{};
+    Point pin_location;
+    Point access_point;
+};
+
 // 汇总规则网格、障碍物和全局 pin，供 A* 与 DP 布线查询。
 class RoutingContext {
 public:
@@ -58,6 +66,8 @@ public:
     [[nodiscard]] const std::vector<Rect>& active_regions() const;
     // 返回所有成功转换的全局 pin。
     [[nodiscard]] const std::unordered_map<std::string, GlobalPin>& global_pins() const;
+    // 返回 active 内引脚的专属逃逸走廊。
+    [[nodiscard]] const std::unordered_map<std::string, PinAccessCorridor>& pin_access_corridors() const;
     // 返回指定 net 的默认线宽。
     [[nodiscard]] double default_width_for_net(const std::string& net) const;
     // 返回构建上下文时收集到的非致命警告。
@@ -69,6 +79,7 @@ private:
     ObstacleMap obstacles_;
     std::vector<Rect> active_regions_;
     std::unordered_map<std::string, GlobalPin> global_pins_;
+    std::unordered_map<std::string, PinAccessCorridor> pin_access_corridors_;
     std::vector<std::string> warnings_;
 };
 
