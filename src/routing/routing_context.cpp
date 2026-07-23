@@ -134,26 +134,22 @@ GridPoint push_access_outside_keep_out(
     return access;
 }
 
-// 为 pin 选择离 active region 最近的一侧，并登记一条终点位于 keep-out 外的正交 access corridor。
-void add_pin_access(
+// 在给定网格上计算 pin 的正交 access corridor 及其实际 A* access 格点，不直接修改上下文状态。
+std::pair<PinAccessCorridor, GridPoint> make_pin_access_corridor(
     const Circuit& circuit,
     const Grid& grid,
     const GlobalPin& pin,
-    const Rect& active,
-    std::unordered_map<std::string, PinAccessCorridor>& corridors) {
+    const Rect& active) {
     const Rect rect = normalize_rect(active);
     const double clearance = pin_access_clearance(circuit, pin.key, pin.layer, grid.step());
     const PinAccessTarget target = pin_access_target(pin.location, rect, clearance);
     const GridPoint access = push_access_outside_keep_out(
         grid, grid.snap_to_grid(target.point, pin.layer), target, rect, clearance);
-    if (!grid.in_bounds(access)) {
-        throw std::runtime_error("pin access point exceeds routing grid: " + pin.key);
-    }
     const Point access_point = grid.grid_to_point(access);
     const Point bend = target.horizontal
                            ? Point{access_point.x, pin.location.y}
                            : Point{pin.location.x, access_point.y};
-    corridors[pin.key] = PinAccessCorridor{pin.key, pin.layer, pin.location, bend, access_point};
+    return {PinAccessCorridor{pin.key, pin.layer, pin.location, bend, access_point}, access};
 }
 
 }  // namespace
@@ -259,6 +255,9 @@ RoutingContext::RoutingContext(
         min_x = min_y = 0.0;
         max_x = max_y = 0.0;
     }
+    // 芯片左/下边界固定为 0；即使最左器件不贴边，也必须为边界侧 pin access 保留网格点。
+    min_x = 0.0;
+    min_y = 0.0;
 
     const GridConfig effective_config =
         effective_grid_config_for_layout(circuit_, config, max_x - min_x, max_y - min_y);
@@ -274,6 +273,20 @@ RoutingContext::RoutingContext(
     }
 
     // active region 只阻挡器件所在低层 M1；M2+ 允许从器件上方跨过，避免被建成贯穿各层的垂直障碍柱。
+    // 第一阶段网格只用于求出离散化后的真实 access 格点；若其越界，则将该格点纳入边界后重建正式网格。
+    bool expand_for_access = false;
+    for (const auto& [_, global_pin] : global_pins_) {
+        const auto active_it = active_by_module.find(global_pin.module);
+        if (active_it == active_by_module.end() || !contains_point(active_it->second, global_pin.location)) continue;
+        const auto [corridor, access] = make_pin_access_corridor(circuit_, *grid_, global_pin, active_it->second);
+        if (grid_->in_bounds(access)) continue;
+        include_point(corridor.access_point, min_x, min_y, max_x, max_y, has_bounds);
+        expand_for_access = true;
+    }
+    if (expand_for_access) {
+        grid_ = std::make_unique<Grid>(effective_config, min_x, min_y, max_x, max_y);
+    }
+
     for (const auto& [owner, active] : active_regions) {
         for (int layer = 0; layer < grid_->layer_count(); ++layer) {
             const std::string layer_name = index_to_layer(layer);
@@ -287,8 +300,17 @@ RoutingContext::RoutingContext(
     for (auto& [key, global_pin] : global_pins_) {
         const auto active_it = active_by_module.find(global_pin.module);
         if (active_it != active_by_module.end() && contains_point(active_it->second, global_pin.location)) {
-            add_pin_access(circuit_, *grid_, global_pin, active_it->second, pin_access_corridors_);
-            global_pin.location = pin_access_corridors_.at(key).access_point;
+            const auto [corridor, access] = make_pin_access_corridor(circuit_, *grid_, global_pin, active_it->second);
+            if (!grid_->in_bounds(access)) {
+                throw std::runtime_error(
+                    "pin access point exceeds rebuilt routing grid: " + key +
+                    " access=(" + std::to_string(corridor.access_point.x) + "," +
+                    std::to_string(corridor.access_point.y) + ") grid=[(" +
+                    std::to_string(grid_->min_x()) + "," + std::to_string(grid_->min_y()) + ")-(" +
+                    std::to_string(grid_->max_x()) + "," + std::to_string(grid_->max_y()) + ")]");
+            }
+            pin_access_corridors_[key] = corridor;
+            global_pin.location = corridor.access_point;
         } else {
             // 非 active 内 pin 无需障碍物例外；A* 起终点也必须通过统一 keep-out 检查。
         }
