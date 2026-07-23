@@ -1023,14 +1023,22 @@ void set_region(SpaceNode& space, const Rect& region) {
     space.physical_region = fixed;
 }
 
+// 声明路由禁入包络计算，供 ASF 空间节点生成复用。
+Rect routing_envelope_rect(
+    const Circuit& circuit,
+    const std::unordered_map<std::string, Placement>& placements,
+    const std::string& module_id,
+    int routing_layers);
+
 void append_asf_spaces_for_node(
     const Circuit& circuit,
     const AsfBStarNode& source_node,
     const std::unordered_map<std::string, Placement>& placements,
-    std::vector<SpaceNode>& spaces) {
-    const Rect rep = placement_rect(circuit, placements.at(source_node.module));
+    std::vector<SpaceNode>& spaces,
+    const SolverConfig& config) {
+    const Rect rep = routing_envelope_rect(circuit, placements, source_node.module, config.routing_layers);
     const Rect mirror = source_node.mirror_module.has_value()
-                            ? placement_rect(circuit, placements.at(*source_node.mirror_module))
+                            ? routing_envelope_rect(circuit, placements, *source_node.mirror_module, config.routing_layers)
                             : rep;
     const double outer_width = source_node.space_node_groups.empty() ? 1.0 : std::max(1.0, required_space_for_group(source_node.space_node_groups.front()));
     const double top_width = source_node.space_node_groups.size() < 2 ? 1.0 : std::max(1.0, required_space_for_group(source_node.space_node_groups[1]));
@@ -1156,7 +1164,7 @@ AsfPackingResult pack_asf_bstar_tree(const Circuit& circuit, const SymmetryGroup
     }
     result.bbox = bbox;
     for (const auto& id : asf.representative_order) {
-        append_asf_spaces_for_node(circuit, asf.nodes.at(id), result.placements, result.space_nodes);
+        append_asf_spaces_for_node(circuit, asf.nodes.at(id), result.placements, result.space_nodes, config);
     }
     for (const auto& space : result.space_nodes) {
         if (!space.physical_region.has_value()) continue;
@@ -1332,6 +1340,28 @@ Rect placed_module_rect(const Circuit& circuit, const std::unordered_map<std::st
     return {placement->second.x, placement->second.y, placement->second.x + size.first, placement->second.y + size.second};
 }
 
+// 返回器件外框与 active 路由禁入包络的并集，作为 SpaceNode 的安全起始边界。
+Rect routing_envelope_rect(
+    const Circuit& circuit,
+    const std::unordered_map<std::string, Placement>& placements,
+    const std::string& module_id,
+    int routing_layers) {
+    const Rect module = placed_module_rect(circuit, placements, module_id);
+    const auto placement = placements.find(module_id);
+    if (placement == placements.end()) return module;
+    double max_spacing = 0.0;
+    for (int layer = 0; layer < routing_layers; ++layer) {
+        const std::string name = routing::index_to_layer(layer);
+        if (active_region_blocked(circuit, name)) max_spacing = std::max(max_spacing, active_route_spacing(circuit, name));
+    }
+    double max_width = 1.0;
+    for (const auto& [_, rule] : circuit.constraints.wire_widths) max_width = std::max(max_width, rule.max_width);
+    const Rect active = routing::expand_rect(
+        placed_active_rect(circuit.modules.at(module_id), placement->second), max_spacing + max_width / 2.0);
+    return {std::min(module.x1, active.x1), std::min(module.y1, active.y1),
+            std::max(module.x2, active.x2), std::max(module.y2, active.y2)};
+}
+
 // 涓烘瘡涓?space node 鐢熸垚褰撳墠 placement 涓嬪彲閲囨牱鐨勭墿鐞嗛€氶亾鍖哄煙銆?
 void assign_space_physical_regions(
     const Circuit& circuit,
@@ -1344,7 +1374,7 @@ void assign_space_physical_regions(
             space.physical_region = Rect{0.0, 0.0, kMinRegionWidth, kMinRegionWidth};
             continue;
         }
-        const Rect owner = placed_module_rect(circuit, request.placements, space.owner);
+        const Rect owner = routing_envelope_rect(circuit, request.placements, space.owner, config.routing_layers);
         const double reserved_width = std::max({space.required_space(), device_spacing(circuit), kMinRegionWidth});
         if (space.kind == SpaceNodeKind::Right) {
             space.physical_region = Rect{owner.x2, owner.y1, owner.x2 + reserved_width, owner.y2};
