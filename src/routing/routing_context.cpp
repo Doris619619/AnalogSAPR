@@ -53,8 +53,15 @@ GridConfig make_effective_grid_config(const Circuit& circuit, const GridConfig& 
     return adapted;
 }
 
-// 选择 pin 到 active 外最近边界的逃逸目标点。
-Point pin_access_target(const Point& pin_location, const Rect& active, double escape) {
+// 表示 pin access 的目标点及其不可由坐标截断推断的逃逸方向。
+struct PinAccessTarget {
+    Point point;
+    bool horizontal{};
+    int direction{};
+};
+
+// 选择 pin 到 active 外最近且仍位于芯片范围内的逃逸目标与方向。
+PinAccessTarget pin_access_target(const Point& pin_location, const Rect& active, double escape) {
     const Rect rect = normalize_rect(active);
     const double left = std::abs(pin_location.x - rect.x1);
     const double right = std::abs(rect.x2 - pin_location.x);
@@ -64,12 +71,14 @@ Point pin_access_target(const Point& pin_location, const Rect& active, double es
     struct AccessCandidate {
         double distance{};
         Point target;
+        bool horizontal{};
+        int direction{};
     };
     const std::vector<AccessCandidate> candidates{
-        {left, Point{rect.x1 - escape, pin_location.y}},
-        {right, Point{rect.x2 + escape, pin_location.y}},
-        {bottom, Point{pin_location.x, rect.y1 - escape}},
-        {top, Point{pin_location.x, rect.y2 + escape}},
+        {left, Point{rect.x1 - escape, pin_location.y}, true, -1},
+        {right, Point{rect.x2 + escape, pin_location.y}, true, 1},
+        {bottom, Point{pin_location.x, rect.y1 - escape}, false, -1},
+        {top, Point{pin_location.x, rect.y2 + escape}, false, 1},
     };
     const auto legal = std::min_element(
         candidates.begin(),
@@ -80,7 +89,10 @@ Point pin_access_target(const Point& pin_location, const Rect& active, double es
             if (lhs_legal != rhs_legal) return lhs_legal;
             return lhs.distance < rhs.distance;
         });
-    return Point{std::max(0.0, legal->target.x), std::max(0.0, legal->target.y)};
+    if (legal == candidates.end() || legal->target.x < 0.0 || legal->target.y < 0.0) {
+        throw std::runtime_error("pin has no in-chip access direction");
+    }
+    return PinAccessTarget{legal->target, legal->horizontal, legal->direction};
 }
 
 // 返回可能使用该 pin 的 net 所需的最大默认线宽，保证 access point 对所有关联 net 都在 keep-out 外。
@@ -106,23 +118,18 @@ double pin_access_clearance(const Circuit& circuit, const std::string& pin_key, 
 GridPoint push_access_outside_keep_out(
     const Grid& grid,
     GridPoint access,
-    const Point& pin_location,
-    const Point& target,
+    const PinAccessTarget& target,
     const Rect& active,
     double clearance) {
     const Rect rect = normalize_rect(active);
-    const bool horizontal = std::abs(target.x - pin_location.x) > std::abs(target.y - pin_location.y);
-    const int direction = horizontal
-                              ? (target.x < pin_location.x ? -1 : 1)
-                              : (target.y < pin_location.y ? -1 : 1);
     const auto outside = [&](const Point& point) {
-        return horizontal
-                   ? (direction < 0 ? point.x <= rect.x1 - clearance : point.x >= rect.x2 + clearance)
-                   : (direction < 0 ? point.y <= rect.y1 - clearance : point.y >= rect.y2 + clearance);
+        return target.horizontal
+                   ? (target.direction < 0 ? point.x <= rect.x1 - clearance : point.x >= rect.x2 + clearance)
+                   : (target.direction < 0 ? point.y <= rect.y1 - clearance : point.y >= rect.y2 + clearance);
     };
     while (grid.in_bounds(access) && !outside(grid.grid_to_point(access))) {
-        if (horizontal) access.ix += direction;
-        else access.iy += direction;
+        if (target.horizontal) access.ix += target.direction;
+        else access.iy += target.direction;
     }
     return access;
 }
@@ -136,15 +143,14 @@ void add_pin_access(
     std::unordered_map<std::string, PinAccessCorridor>& corridors) {
     const Rect rect = normalize_rect(active);
     const double clearance = pin_access_clearance(circuit, pin.key, pin.layer, grid.step());
-    const Point target = pin_access_target(pin.location, rect, clearance);
+    const PinAccessTarget target = pin_access_target(pin.location, rect, clearance);
     const GridPoint access = push_access_outside_keep_out(
-        grid, grid.snap_to_grid(target, pin.layer), pin.location, target, rect, clearance);
+        grid, grid.snap_to_grid(target.point, pin.layer), target, rect, clearance);
     if (!grid.in_bounds(access)) {
         throw std::runtime_error("pin access point exceeds routing grid: " + pin.key);
     }
     const Point access_point = grid.grid_to_point(access);
-    const bool escapes_horizontally = std::abs(target.x - pin.location.x) > std::abs(target.y - pin.location.y);
-    const Point bend = escapes_horizontally
+    const Point bend = target.horizontal
                            ? Point{access_point.x, pin.location.y}
                            : Point{pin.location.x, access_point.y};
     corridors[pin.key] = PinAccessCorridor{pin.key, pin.layer, pin.location, bend, access_point};
@@ -240,7 +246,7 @@ RoutingContext::RoutingContext(
             const int layer = std::clamp(global_pin.layer, 0, config.layer_count - 1);
             const double clearance = pin_access_clearance(circuit_, global_pin.key, layer, config.step);
             include_point(
-                pin_access_target(global_pin.location, active_it->second, clearance),
+                pin_access_target(global_pin.location, active_it->second, clearance).point,
                 min_x,
                 min_y,
                 max_x,
