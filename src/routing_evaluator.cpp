@@ -991,23 +991,27 @@ std::vector<RouteSegment> detailed_path_segments(
         const auto found = evaluation.context.pin_access_corridors().find(terminal);
         if (found == evaluation.context.pin_access_corridors().end()) return;
         const auto& access = found->second;
-        if (access.pin_location.x == access.access_point.x && access.pin_location.y == access.access_point.y) return;
-        RouteSegment segment{
-            candidate.net,
-            routing::index_to_layer(access.layer),
-            access.pin_location.x,
-            access.pin_location.y,
-            access.access_point.x,
-            access.access_point.y,
-            width};
-        const auto duplicate = std::any_of(routes.begin(), routes.end(), [&](const RouteSegment& route) {
-            return route.net == segment.net && route.layer == segment.layer &&
-                   ((same_coord(route.x1, segment.x1) && same_coord(route.y1, segment.y1) &&
-                     same_coord(route.x2, segment.x2) && same_coord(route.y2, segment.y2)) ||
-                    (same_coord(route.x1, segment.x2) && same_coord(route.y1, segment.y2) &&
-                     same_coord(route.x2, segment.x1) && same_coord(route.y2, segment.y1)));
-        });
-        if (!duplicate) routes.push_back(std::move(segment));
+        const auto append_orthogonal_access_segment = [&](const routing::Point& start, const routing::Point& end) {
+            if (same_coord(start.x, end.x) && same_coord(start.y, end.y)) return;
+            RouteSegment segment{
+                candidate.net,
+                routing::index_to_layer(access.layer),
+                start.x,
+                start.y,
+                end.x,
+                end.y,
+                width};
+            const auto duplicate = std::any_of(routes.begin(), routes.end(), [&](const RouteSegment& route) {
+                return route.net == segment.net && route.layer == segment.layer &&
+                       ((same_coord(route.x1, segment.x1) && same_coord(route.y1, segment.y1) &&
+                         same_coord(route.x2, segment.x2) && same_coord(route.y2, segment.y2)) ||
+                        (same_coord(route.x1, segment.x2) && same_coord(route.y1, segment.y2) &&
+                         same_coord(route.x2, segment.x1) && same_coord(route.y2, segment.y1)));
+            });
+            if (!duplicate) routes.push_back(std::move(segment));
+        };
+        append_orthogonal_access_segment(access.pin_location, access.bend_point);
+        append_orthogonal_access_segment(access.bend_point, access.access_point);
     };
     append_access(candidate.from_terminal);
     append_access(candidate.to_terminal);
@@ -1131,6 +1135,7 @@ bool same_grid_point(const routing::GridPoint& lhs, const routing::GridPoint& rh
 bool routes_violate_active_regions(
     const Circuit& circuit,
     const RoutingEvaluationRequest& request,
+    const routing::RoutingContext& context,
     const std::vector<RouteSegment>& routes);
 
 std::optional<std::vector<RouteSegment>> legal_routes_without_short(
@@ -1276,7 +1281,7 @@ std::optional<std::vector<RouteSegment>> legal_candidate_routes(
         if (failure_reason != nullptr) *failure_reason = "candidate route segments do not connect endpoints";
         return std::nullopt;
     }
-    if (routes_violate_active_regions(circuit, request, routes)) {
+    if (routes_violate_active_regions(circuit, request, evaluation.context, routes)) {
         if (failure_reason != nullptr) *failure_reason = "candidate route segments cross active region";
         return std::nullopt;
     }
@@ -1367,7 +1372,7 @@ std::optional<DetailedLegalization> reroute_candidate_avoiding_detailed_routes(
                 last_failure = "reroute route segments do not connect endpoints";
                 continue;
             }
-            if (routes_violate_active_regions(circuit, request, routes)) {
+            if (routes_violate_active_regions(circuit, request, evaluation.context, routes)) {
                 last_failure = "reroute route segments cross active region";
                 continue;
             }
@@ -1819,7 +1824,7 @@ std::optional<double> access_distance_from_pin_to_boundary(
 }
 
 // 鍙厑璁哥湡瀹?pin 闄勮繎鐨勪竴灏忔 active 閫冮€歌蛋绾匡紝绂佹鐢?pin 绔偣璞佸厤闀胯窛绂绘í绌?active銆?
-bool route_is_local_pin_access(
+[[maybe_unused]] bool route_is_local_pin_access(
     const RoutingEvaluationRequest& request,
     const RouteSegment& route,
     const Rect& active) {
@@ -1862,11 +1867,41 @@ bool route_is_local_pin_access(
     return false;
 }
 
+// 判断线段是否与某个同网引脚登记的正交逃逸走廊段完全一致。
+bool route_is_registered_pin_access(
+    const Circuit& circuit,
+    const routing::RoutingContext& context,
+    const RouteSegment& route) {
+    const auto route_matches = [&](const routing::Point& start, const routing::Point& end) {
+        const bool same_direction =
+            same_coord(route.x1, start.x) && same_coord(route.y1, start.y) &&
+            same_coord(route.x2, end.x) && same_coord(route.y2, end.y);
+        const bool reverse_direction =
+            same_coord(route.x1, end.x) && same_coord(route.y1, end.y) &&
+            same_coord(route.x2, start.x) && same_coord(route.y2, start.y);
+        return same_direction || reverse_direction;
+    };
+    for (const auto& [pin_key, access] : context.pin_access_corridors()) {
+        if (route.layer != routing::index_to_layer(access.layer)) continue;
+        const auto net = circuit.nets.find(route.net);
+        if (net == circuit.nets.end() ||
+            std::find(net->second.terminals.begin(), net->second.terminals.end(), pin_key) == net->second.terminals.end()) {
+            continue;
+        }
+        if (route_matches(access.pin_location, access.bend_point) ||
+            route_matches(access.bend_point, access.access_point)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 鏀堕泦 detailed route 绌胯秺 active region 鐨勫熀纭€ DRC 杩濆弽绾挎绱㈠紩銆?
 // 浠呮鏌?M1锛歛ctive region 瀵瑰簲鍣ㄤ欢浣庡眰鍗犵敤锛岄珮灞傞噾灞炶法杩囦笉绠?active crossing銆?
 std::vector<std::size_t> collect_active_region_crossings(
     const Circuit& circuit,
     const RoutingEvaluationRequest& request,
+    const routing::RoutingContext& context,
     const std::vector<RouteSegment>& routes) {
     std::vector<std::size_t> violations;
     for (std::size_t index = 0; index < routes.size(); ++index) {
@@ -1876,7 +1911,7 @@ std::vector<std::size_t> collect_active_region_crossings(
         for (const auto& active : request.active_region_blockers) {
             const Rect keep_out = routing::expand_rect(active, active_route_spacing(circuit, route.layer));
             if (!routing::intersects(metal, keep_out)) continue;
-            if (route_is_local_pin_access(request, route, active)) continue;
+            if (route_is_registered_pin_access(circuit, context, route)) continue;
             violations.push_back(index);
             break;
         }
@@ -1912,8 +1947,9 @@ void append_detailed_transition_outcome(
 bool routes_violate_active_regions(
     const Circuit& circuit,
     const RoutingEvaluationRequest& request,
+    const routing::RoutingContext& context,
     const std::vector<RouteSegment>& routes) {
-    return !collect_active_region_crossings(circuit, request, routes).empty();
+    return !collect_active_region_crossings(circuit, request, context, routes).empty();
 }
 
 // 鍒ゆ柇涓ゆ潯鍚屽眰寮傜綉绾挎鏄惁瀛樺湪杩戣窛绂诲钩琛岃€﹀悎椋庨櫓銆?
@@ -2616,7 +2652,7 @@ DetailedRoutingResult run_detailed_routing(
     }
     // 在最终全局 DRC 前保留已成功 detailed legalization 的路线，避免 routes 清空后丢失诊断证据。
     result.raw_routes = result.routes;
-    const auto drc_routes = collect_active_region_crossings(circuit, request, result.routes);
+    const auto drc_routes = collect_active_region_crossings(circuit, request, evaluation.context, result.routes);
     const auto short_pairs = collect_same_layer_shorts(result.routes);
     const auto spacing_pairs = collect_diff_net_spacing_violations(circuit, result.routes);
     result.design_rule_violations = static_cast<int>(drc_routes.size() + short_pairs.size() + spacing_pairs.size());

@@ -109,7 +109,12 @@ void add_pin_access(
     const Point target = pin_access_target(pin.location, rect, escape);
     const GridPoint access = grid.snap_to_grid(target, pin.layer);
     obstacles.add_terminal_point(access);
-    corridors[pin.key] = PinAccessCorridor{pin.key, pin.layer, pin.location, grid.grid_to_point(access)};
+    const Point access_point = grid.grid_to_point(access);
+    const bool escapes_horizontally = std::abs(target.x - pin.location.x) > std::abs(target.y - pin.location.y);
+    const Point bend = escapes_horizontally
+                           ? Point{access_point.x, pin.location.y}
+                           : Point{pin.location.x, access_point.y};
+    corridors[pin.key] = PinAccessCorridor{pin.key, pin.layer, pin.location, bend, access_point};
 }
 
 }  // namespace

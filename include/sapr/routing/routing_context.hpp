@@ -36,6 +36,8 @@ struct PinAccessCorridor {
     std::string pin_key;
     int layer{};
     Point pin_location;
+    // 逃逸走廊的唯一转折点，保证 pin 至网格 access point 始终由正交金属段组成。
+    Point bend_point;
     Point access_point;
 };
 
