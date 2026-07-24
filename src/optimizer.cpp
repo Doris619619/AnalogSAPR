@@ -352,6 +352,11 @@ void write_route_candidate_json(std::ostringstream& out, const routing::RouteCan
 }
 
 // 鍐欏嚭 DP 瀵瑰€欓€夌殑閫夋嫨鎴栨嫆缁濅簨浠讹紝瑙ｉ噴 path fail銆丩CP 缁戝畾鍐茬獊鍜岀煭璺?penalty銆?
+// 提前声明结构化冲突序列化器，使候选事件和合并事件共享同一 JSON 格式。
+void write_dp_physical_route_conflicts_json(
+    std::ostringstream& out,
+    const std::vector<routing::RoutingDpPhysicalRouteConflict>& conflicts);
+
 void write_dp_candidate_event_json(std::ostringstream& out, const routing::RoutingDpCandidateEvent& event) {
     out << "{\"group_key\": ";
     write_json_string(out, event.group_key);
@@ -371,8 +376,41 @@ void write_dp_candidate_event_json(std::ostringstream& out, const routing::Routi
     write_json_string(out, event.reason);
     out << ", \"occupied_route_conflicts\": ";
     write_json_string_array(out, event.occupied_route_conflicts);
+    out << ", \"physical_route_conflicts\": ";
+    write_dp_physical_route_conflicts_json(out, event.physical_route_conflicts);
     out << ", \"selected\": " << (event.selected ? "true" : "false")
         << '}';
+}
+
+// 写出带主路由或 pin-access 来源的物理金属段，供 DP 冲突诊断定位几何角色。
+void write_physical_route_segment_json(std::ostringstream& out, const routing::PhysicalRouteSegment& segment) {
+    out << "{\"net\": ";
+    write_json_string(out, segment.route.net);
+    out << ", \"layer\": ";
+    write_json_string(out, segment.route.layer);
+    out << ", \"x1\": " << segment.route.x1 << ", \"y1\": " << segment.route.y1
+        << ", \"x2\": " << segment.route.x2 << ", \"y2\": " << segment.route.y2
+        << ", \"width\": " << segment.route.width << ", \"origin\": ";
+    write_json_string(out, routing::physical_route_segment_origin(segment));
+    out << ", \"pin_access_keys\": ";
+    write_json_string_array(out, segment.pin_access_keys);
+    out << '}';
+}
+
+// 写出一次 DP 冲突的候选段和已占用段，保留双方的物理来源。
+void write_dp_physical_route_conflicts_json(
+    std::ostringstream& out,
+    const std::vector<routing::RoutingDpPhysicalRouteConflict>& conflicts) {
+    out << '[';
+    for (std::size_t index = 0; index < conflicts.size(); ++index) {
+        if (index != 0) out << ',';
+        out << "{\"candidate_segment\": ";
+        write_physical_route_segment_json(out, conflicts[index].candidate_segment);
+        out << ", \"occupied_segment\": ";
+        write_physical_route_segment_json(out, conflicts[index].occupied_segment);
+        out << '}';
+    }
+    out << ']';
 }
 
 // 写出 DP 合并 child state 时拒绝的组合，定位局部合法状态之间的物理冲突。
@@ -385,6 +423,17 @@ void write_dp_state_merge_event_json(std::ostringstream& out, const routing::Rou
     write_json_string(out, event.reason);
     out << ", \"occupied_route_conflicts\": ";
     write_json_string_array(out, event.occupied_route_conflicts);
+    out << ", \"physical_route_conflicts\": ";
+    write_dp_physical_route_conflicts_json(out, event.physical_route_conflicts);
+    out << '}';
+}
+
+// 写出 root 审计拒绝事件，区分其与候选追加和子树合并阶段。
+void write_dp_root_audit_event_json(std::ostringstream& out, const routing::RoutingDpRootAuditEvent& event) {
+    out << "{\"state_id\": " << event.state_id << ", \"reason\": ";
+    write_json_string(out, event.reason);
+    out << ", \"physical_route_conflicts\": ";
+    write_dp_physical_route_conflicts_json(out, event.physical_route_conflicts);
     out << '}';
 }
 
@@ -744,6 +793,32 @@ std::string make_routing_debug_json(
     const auto& debug_candidates = evaluation.debug_candidates.empty() ? evaluation.candidates : evaluation.debug_candidates;
     const auto lcp_coverages = analyze_lcp_candidate_coverage(request, debug_candidates);
     const std::string first_uncovered = first_uncovered_lcp_location(lcp_coverages);
+    // 按 DP 阶段统计结构化冲突来源，避免将 access 问题误归为主路由拥塞。
+    struct OriginConflictCounts {
+        int main_to_main{};
+        int main_to_access{};
+        int access_to_access{};
+        int mixed{};
+    };
+    const auto add_origin_conflicts = [](OriginConflictCounts& counts,
+                                         const std::vector<routing::RoutingDpPhysicalRouteConflict>& conflicts) {
+        for (const auto& conflict : conflicts) {
+            const auto left = routing::physical_route_segment_origin(conflict.candidate_segment);
+            const auto right = routing::physical_route_segment_origin(conflict.occupied_segment);
+            if (left == "main_route+pin_access" || right == "main_route+pin_access") ++counts.mixed;
+            else if (left == "main_route" && right == "main_route") ++counts.main_to_main;
+            else if (left == "pin_access" && right == "pin_access") ++counts.access_to_access;
+            else ++counts.main_to_access;
+        }
+    };
+    OriginConflictCounts candidate_origin_counts;
+    OriginConflictCounts merge_origin_counts;
+    OriginConflictCounts root_origin_counts;
+    if (evaluation.bottom_up_dp.has_value()) {
+        for (const auto& event : evaluation.bottom_up_dp->candidate_events) add_origin_conflicts(candidate_origin_counts, event.physical_route_conflicts);
+        for (const auto& event : evaluation.bottom_up_dp->state_merge_events) add_origin_conflicts(merge_origin_counts, event.physical_route_conflicts);
+        for (const auto& event : evaluation.bottom_up_dp->root_audit_events) add_origin_conflicts(root_origin_counts, event.physical_route_conflicts);
+    }
     out << "{\n";
     // summary 涓?routing_cost/global_* 鏉ヨ嚜 global 闃舵锛沠inal_penalty/detailed_cost 鏉ヨ嚜鏈€缁堝彛寰勩€?
     out << "  \"summary\": {"
@@ -788,6 +863,10 @@ std::string make_routing_debug_json(
         << (evaluation.bottom_up_dp.has_value() ? evaluation.bottom_up_dp->state_merge_events.size() : 0)
         << ", \"dp_state_merge_events_truncated\": "
         << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->state_merge_events_truncated ? "true" : "false")
+        << ", \"dp_root_audit_event_count\": "
+        << (evaluation.bottom_up_dp.has_value() ? evaluation.bottom_up_dp->root_audit_events.size() : 0)
+        << ", \"dp_root_audit_events_truncated\": "
+        << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->root_audit_events_truncated ? "true" : "false")
         << ", \"first_uncovered_lcp_location\": ";
     write_json_string(out, first_uncovered);
     out
@@ -842,6 +921,27 @@ std::string make_routing_debug_json(
         }
     }
     out << ']';
+    out << ",\n  \"dp_root_audit_events\": [";
+    if (evaluation.bottom_up_dp.has_value()) {
+        for (std::size_t index = 0; index < evaluation.bottom_up_dp->root_audit_events.size(); ++index) {
+            if (index != 0) out << ',';
+            write_dp_root_audit_event_json(out, evaluation.bottom_up_dp->root_audit_events[index]);
+        }
+    }
+    out << ']';
+    const auto write_origin_counts = [&](const OriginConflictCounts& counts) {
+        out << "{\"main_route_to_main_route\": " << counts.main_to_main
+            << ", \"main_route_to_pin_access\": " << counts.main_to_access
+            << ", \"pin_access_to_pin_access\": " << counts.access_to_access
+            << ", \"mixed_origin\": " << counts.mixed << '}';
+    };
+    out << ",\n  \"dp_physical_conflict_summary\": {\"candidate_append\": ";
+    write_origin_counts(candidate_origin_counts);
+    out << ", \"state_merge\": ";
+    write_origin_counts(merge_origin_counts);
+    out << ", \"root_audit\": ";
+    write_origin_counts(root_origin_counts);
+    out << '}';
     out << ",\n  \"lcp_candidate_filter_events\": [";
     for (std::size_t index = 0; index < evaluation.lcp_candidate_filter_events.size(); ++index) {
         if (index != 0) out << ',';

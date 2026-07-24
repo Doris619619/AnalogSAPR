@@ -1402,6 +1402,12 @@ void run_routing_evaluator_tests() {
             short_merge_dp.state_merge_events.end(),
             [](const auto& event) { return event.reason == "occupied_route_short"; }),
         "DP child merge should record occupied-route short diagnostics");
+    require(
+        std::any_of(
+            short_merge_dp.state_merge_events.begin(),
+            short_merge_dp.state_merge_events.end(),
+            [](const auto& event) { return !event.physical_route_conflicts.empty(); }),
+        "DP child merge short diagnostics should retain structured physical conflict segments");
 
     auto spacing_circuit = drc_circuit;
     spacing_circuit.constraints.spacing_rules.diff_net_route_spacing["M1"] = 1.0;
@@ -1417,6 +1423,12 @@ void run_routing_evaluator_tests() {
             spacing_merge_dp.state_merge_events.end(),
             [](const auto& event) { return event.reason == "route_spacing"; }),
         "DP child merge should record route-spacing diagnostics");
+    require(
+        std::any_of(
+            spacing_merge_dp.state_merge_events.begin(),
+            spacing_merge_dp.state_merge_events.end(),
+            [](const auto& event) { return !event.physical_route_conflicts.empty(); }),
+        "DP child merge spacing diagnostics should retain structured physical conflict segments");
 
     const auto merge_right_legal = make_dp_merge_candidate(
         merge_context, "N_RIGHT", "RIGHT_SEGMENT", sapr::routing::Point{4.0, 7.0}, sapr::routing::Point{9.0, 7.0});
@@ -1588,6 +1600,28 @@ void run_routing_evaluator_tests() {
         has_forced_detour_variant = has_forced_detour_variant ||
                                      candidate.route_variant.find("avoid_pivot_") == 0;
     }
+    // 验证完整物理几何保留 pin access 来源，且兼容接口输出的几何数量不变。
+    const auto access_candidate = std::find_if(
+        boundary_eval.candidates.begin(), boundary_eval.candidates.end(), [](const auto& candidate) { return candidate.path.success; });
+    require(access_candidate != boundary_eval.candidates.end(), "boundary case should expose a successful access candidate");
+    const double access_width = sapr::routing::effective_candidate_width(
+        boundary_circuit, boundary_eval.context, *access_candidate);
+    const auto access_details = sapr::routing::candidate_to_physical_route_details(
+        boundary_eval.context, *access_candidate, access_width);
+    const auto access_routes = sapr::routing::candidate_to_physical_route_segments(
+        boundary_eval.context, *access_candidate, access_width);
+    require(access_details.size() == access_routes.size(), "provenance geometry must preserve detailed route count");
+    require(
+        std::any_of(access_details.begin(), access_details.end(), [](const auto& segment) {
+            return sapr::routing::physical_route_segment_origin(segment) == "pin_access" &&
+                   !segment.pin_access_keys.empty();
+        }),
+        "active pin candidate should expose pin_access provenance with its pin key");
+    require(
+        std::any_of(access_details.begin(), access_details.end(), [](const auto& segment) {
+            return sapr::routing::physical_route_segment_origin(segment).find("main_route") != std::string::npos;
+        }),
+        "active pin candidate should retain main-route provenance");
     require(left_lcp_variant_count >= 2, "LCP segment should retain physically distinct route variants");
     require(has_forced_detour_variant, "LCP variants should include a forced-detour path when the base path is blocked");
 

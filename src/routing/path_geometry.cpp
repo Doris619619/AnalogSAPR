@@ -270,12 +270,37 @@ bool routes_short_with_existing(
     return false;
 }
 
-// 生成与 detailed 输出完全一致的候选金属集合，并把 active 内引脚的固定逃逸走廊计入物理占用。
-std::vector<RouteSegment> candidate_to_physical_route_segments(
+// 判断两条物理金属段是否表示同一无向几何，供来源合并而非 DRC 使用。
+bool same_physical_route_geometry(const RouteSegment& lhs, const RouteSegment& rhs) {
+    return lhs.net == rhs.net && lhs.layer == rhs.layer && lhs.width == rhs.width &&
+           ((lhs.x1 == rhs.x1 && lhs.y1 == rhs.y1 && lhs.x2 == rhs.x2 && lhs.y2 == rhs.y2) ||
+            (lhs.x1 == rhs.x2 && lhs.y1 == rhs.y2 && lhs.x2 == rhs.x1 && lhs.y2 == rhs.y1));
+}
+
+// 返回物理金属段的来源标签；双来源用于解释 access 与主路由重合的局部段。
+std::string physical_route_segment_origin(const PhysicalRouteSegment& segment) {
+    if (segment.main_route && !segment.pin_access_keys.empty()) return "main_route+pin_access";
+    if (segment.main_route) return "main_route";
+    return "pin_access";
+}
+
+// 提取带来源物理段的 RouteSegment，复用既有 DRC 而不改变其几何语义。
+std::vector<RouteSegment> physical_route_segments_to_routes(const std::vector<PhysicalRouteSegment>& segments) {
+    std::vector<RouteSegment> routes;
+    routes.reserve(segments.size());
+    for (const auto& segment : segments) routes.push_back(segment.route);
+    return routes;
+}
+
+// 生成与 detailed 输出完全一致的候选物理金属，并保留主干和 pin access 的来源。
+std::vector<PhysicalRouteSegment> candidate_to_physical_route_details(
     const RoutingContext& context,
     const RouteCandidate& candidate,
     double width) {
-    auto routes = candidate_to_route_segments(context.grid(), candidate, width, context.active_regions());
+    std::vector<PhysicalRouteSegment> details;
+    for (const auto& route : candidate_to_route_segments(context.grid(), candidate, width, context.active_regions())) {
+        details.push_back({route, true, {}});
+    }
     const auto append_access = [&](const std::string& terminal) {
         const auto found = context.pin_access_corridors().find(terminal);
         if (found == context.pin_access_corridors().end()) return;
@@ -289,19 +314,32 @@ std::vector<RouteSegment> candidate_to_physical_route_segments(
                                  end.x,
                                  end.y,
                                  width};
-            const bool duplicate = std::any_of(routes.begin(), routes.end(), [&](const RouteSegment& route) {
-                return route.net == segment.net && route.layer == segment.layer &&
-                       ((route.x1 == segment.x1 && route.y1 == segment.y1 && route.x2 == segment.x2 && route.y2 == segment.y2) ||
-                        (route.x1 == segment.x2 && route.y1 == segment.y2 && route.x2 == segment.x1 && route.y2 == segment.y1));
+            const auto duplicate = std::find_if(details.begin(), details.end(), [&](const PhysicalRouteSegment& detail) {
+                return same_physical_route_geometry(detail.route, segment);
             });
-            if (!duplicate) routes.push_back(std::move(segment));
+            if (duplicate == details.end()) {
+                details.push_back({std::move(segment), false, {terminal}});
+                return;
+            }
+            if (std::find(duplicate->pin_access_keys.begin(), duplicate->pin_access_keys.end(), terminal) ==
+                duplicate->pin_access_keys.end()) {
+                duplicate->pin_access_keys.push_back(terminal);
+            }
         };
         append_segment(access.pin_location, access.bend_point);
         append_segment(access.bend_point, access.access_point);
     };
     append_access(candidate.from_terminal);
     append_access(candidate.to_terminal);
-    return routes;
+    return details;
+}
+
+// 生成候选可输出的完整物理金属，保持既有 detailed 输出接口不变。
+std::vector<RouteSegment> candidate_to_physical_route_segments(
+    const RoutingContext& context,
+    const RouteCandidate& candidate,
+    double width) {
+    return physical_route_segments_to_routes(candidate_to_physical_route_details(context, candidate, width));
 }
 
 // 按 detailed DRC 使用的金属矩形语义检查异网最小边缘间距。

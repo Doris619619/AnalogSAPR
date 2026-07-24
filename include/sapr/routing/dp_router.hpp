@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "sapr/model.hpp"
+#include "sapr/routing/path_geometry.hpp"
 #include "sapr/routing/path.hpp"
 #include "sapr/routing/routing_context.hpp"
 
@@ -30,6 +31,8 @@ struct RoutingDpState {
     std::vector<RouteCandidate> selected_candidates;
     // 记录当前 state 已选候选的金属占用，用于提前排除异网同层短路。
     std::vector<RouteSegment> occupied_routes;
+    // 与 occupied_routes 一一对应的物理来源，仅用于诊断，不参与 DP 代价或判定。
+    std::vector<PhysicalRouteSegment> occupied_route_details;
     PathMetrics metrics;
     double penalty{};
     double cost{};
@@ -39,6 +42,12 @@ struct RoutingDpState {
 };
 
 // 记录 DP transition 尝试某条候选路径时的选择或拒绝原因。
+// 表示一次 DP 物理冲突中候选段与既有段的结构化来源和几何。
+struct RoutingDpPhysicalRouteConflict {
+    PhysicalRouteSegment candidate_segment;
+    PhysicalRouteSegment occupied_segment;
+};
+
 struct RoutingDpCandidateEvent {
     std::string group_key;
     std::string net;
@@ -49,6 +58,7 @@ struct RoutingDpCandidateEvent {
     std::string state_lcp_candidate_id;
     std::string reason;
     std::vector<std::string> occupied_route_conflicts;
+    std::vector<RoutingDpPhysicalRouteConflict> physical_route_conflicts;
     bool selected{};
 };
 
@@ -59,6 +69,14 @@ struct RoutingDpStateMergeEvent {
     int right_state_id{-1};
     std::string reason;
     std::vector<std::string> occupied_route_conflicts;
+    std::vector<RoutingDpPhysicalRouteConflict> physical_route_conflicts;
+};
+
+// 记录 root 全局审计拒绝的完整状态，防止其与候选或子树合并失败混淆。
+struct RoutingDpRootAuditEvent {
+    int state_id{-1};
+    std::string reason;
+    std::vector<RoutingDpPhysicalRouteConflict> physical_route_conflicts;
 };
 
 // 记录 DP 裁剪整个 state 时丢失的候选组合，区分语义去重与 beam 截断。
@@ -98,6 +116,8 @@ struct RoutingDpResult {
     // 合并事件独立保存，避免把 child-state 兼容性问题误记为单条候选路径失败。
     std::vector<RoutingDpStateMergeEvent> state_merge_events;
     bool state_merge_events_truncated{};
+    std::vector<RoutingDpRootAuditEvent> root_audit_events;
+    bool root_audit_events_truncated{};
     // 诊断事件独立持有，避免结果对象移动时触发 MSVC Debug 容器代理失效。
     std::unique_ptr<std::vector<RoutingDpStatePruneEvent>> state_prune_events;
 };
