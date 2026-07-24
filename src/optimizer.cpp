@@ -1,6 +1,8 @@
 ﻿// 瀹炵幇璁烘枃 placement-aware 澧炲己 B*-tree contour packing銆乺outing adapter 鍜屾ā鎷熼€€鐏富寰幆銆?
 #include "sapr/optimizer.hpp"
 
+#include "sapr/constraints.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -326,6 +328,8 @@ void write_route_candidate_json(std::ostringstream& out, const routing::RouteCan
     write_json_string(out, candidate.source_lcp_candidate_id);
     out << ", \"target_lcp_candidate_id\": ";
     write_json_string(out, candidate.target_lcp_candidate_id);
+    out << ", \"route_variant\": ";
+    write_json_string(out, candidate.route_variant);
     out << ", \"path_success\": " << (candidate.path.success ? "true" : "false")
         << ", \"path_message\": ";
     write_json_string(out, candidate.path.message);
@@ -348,6 +352,11 @@ void write_route_candidate_json(std::ostringstream& out, const routing::RouteCan
 }
 
 // 鍐欏嚭 DP 瀵瑰€欓€夌殑閫夋嫨鎴栨嫆缁濅簨浠讹紝瑙ｉ噴 path fail銆丩CP 缁戝畾鍐茬獊鍜岀煭璺?penalty銆?
+// 提前声明结构化冲突序列化器，使候选事件和合并事件共享同一 JSON 格式。
+void write_dp_physical_route_conflicts_json(
+    std::ostringstream& out,
+    const std::vector<routing::RoutingDpPhysicalRouteConflict>& conflicts);
+
 void write_dp_candidate_event_json(std::ostringstream& out, const routing::RoutingDpCandidateEvent& event) {
     out << "{\"group_key\": ";
     write_json_string(out, event.group_key);
@@ -367,8 +376,65 @@ void write_dp_candidate_event_json(std::ostringstream& out, const routing::Routi
     write_json_string(out, event.reason);
     out << ", \"occupied_route_conflicts\": ";
     write_json_string_array(out, event.occupied_route_conflicts);
+    out << ", \"physical_route_conflicts\": ";
+    write_dp_physical_route_conflicts_json(out, event.physical_route_conflicts);
     out << ", \"selected\": " << (event.selected ? "true" : "false")
         << '}';
+}
+
+// 写出带主路由或 pin-access 来源的物理金属段，供 DP 冲突诊断定位几何角色。
+void write_physical_route_segment_json(std::ostringstream& out, const routing::PhysicalRouteSegment& segment) {
+    out << "{\"net\": ";
+    write_json_string(out, segment.route.net);
+    out << ", \"layer\": ";
+    write_json_string(out, segment.route.layer);
+    out << ", \"x1\": " << segment.route.x1 << ", \"y1\": " << segment.route.y1
+        << ", \"x2\": " << segment.route.x2 << ", \"y2\": " << segment.route.y2
+        << ", \"width\": " << segment.route.width << ", \"origin\": ";
+    write_json_string(out, routing::physical_route_segment_origin(segment));
+    out << ", \"pin_access_keys\": ";
+    write_json_string_array(out, segment.pin_access_keys);
+    out << '}';
+}
+
+// 写出一次 DP 冲突的候选段和已占用段，保留双方的物理来源。
+void write_dp_physical_route_conflicts_json(
+    std::ostringstream& out,
+    const std::vector<routing::RoutingDpPhysicalRouteConflict>& conflicts) {
+    out << '[';
+    for (std::size_t index = 0; index < conflicts.size(); ++index) {
+        if (index != 0) out << ',';
+        out << "{\"candidate_segment\": ";
+        write_physical_route_segment_json(out, conflicts[index].candidate_segment);
+        out << ", \"occupied_segment\": ";
+        write_physical_route_segment_json(out, conflicts[index].occupied_segment);
+        out << '}';
+    }
+    out << ']';
+}
+
+// 写出 DP 合并 child state 时拒绝的组合，定位局部合法状态之间的物理冲突。
+void write_dp_state_merge_event_json(std::ostringstream& out, const routing::RoutingDpStateMergeEvent& event) {
+    out << "{\"tree_node\": ";
+    write_json_string(out, event.tree_node);
+    out << ", \"left_state_id\": " << event.left_state_id
+        << ", \"right_state_id\": " << event.right_state_id
+        << ", \"reason\": ";
+    write_json_string(out, event.reason);
+    out << ", \"occupied_route_conflicts\": ";
+    write_json_string_array(out, event.occupied_route_conflicts);
+    out << ", \"physical_route_conflicts\": ";
+    write_dp_physical_route_conflicts_json(out, event.physical_route_conflicts);
+    out << '}';
+}
+
+// 写出 root 审计拒绝事件，区分其与候选追加和子树合并阶段。
+void write_dp_root_audit_event_json(std::ostringstream& out, const routing::RoutingDpRootAuditEvent& event) {
+    out << "{\"state_id\": " << event.state_id << ", \"reason\": ";
+    write_json_string(out, event.reason);
+    out << ", \"physical_route_conflicts\": ";
+    write_dp_physical_route_conflicts_json(out, event.physical_route_conflicts);
+    out << '}';
 }
 
 // 写出 LCP 多端覆盖检查删除的 A* 候选，区分其与后续 DP 阶段的拒绝和裁剪。
@@ -389,6 +455,10 @@ void write_lcp_candidate_filter_event_json(std::ostringstream& out, const LcpCan
     write_json_string(out, event.target_lcp_candidate_id);
     out << ", \"reason\": ";
     write_json_string(out, event.reason);
+    out << ", \"lcp_id\": ";
+    write_json_string(out, event.lcp_id);
+    out << ", \"x\": " << event.x;
+    out << ", \"y\": " << event.y;
     out << '}';
 }
 
@@ -552,8 +622,11 @@ void write_detailed_transition_outcome_json(std::ostringstream& out, const Detai
     write_json_string(out, outcome.source_lcp_id);
     out << ", \"target_lcp_id\": ";
     write_json_string(out, outcome.target_lcp_id);
+    out << ", \"route_variant\": ";
+    write_json_string(out, outcome.route_variant);
     out << ", \"dp_status\": ";
     write_json_string(out, outcome.selected_by_dp ? "selected" : "not_selected_by_dp");
+    out << ", \"exact_traceback_match\": " << (outcome.selected_by_dp ? "true" : "false");
     out << ", \"detailed_status\": ";
     write_json_string(out, !outcome.detailed_attempted ? "not_attempted" : outcome.detailed_legalized ? "legalized" : "failed");
     out << ", \"final_output\": ";
@@ -614,6 +687,16 @@ std::size_t count_lcp_location_candidates(const RoutingEvaluationRequest& reques
     std::size_t total = 0;
     for (const auto& point : request.linking_points) total += point.location_candidates.size();
     return total;
+}
+
+// 统计因 pin access 到 LCP 不可达而提前剔除的物理候选数量。
+std::size_t count_unreachable_pin_access_lcp_locations(const RoutingEvaluation& evaluation) {
+    return static_cast<std::size_t>(std::count_if(
+        evaluation.lcp_candidate_filter_events.begin(),
+        evaluation.lcp_candidate_filter_events.end(),
+        [](const LcpCandidateFilterEvent& event) {
+            return event.reason.starts_with("unreachable_pin_access:");
+        }));
 }
 
 // 缁熻宸查€氳繃 A* 涓?multi-terminal 杩囨护鐨勫敮涓€ LCP 鐗╃悊鍊欓€夋暟閲忋€?
@@ -710,6 +793,32 @@ std::string make_routing_debug_json(
     const auto& debug_candidates = evaluation.debug_candidates.empty() ? evaluation.candidates : evaluation.debug_candidates;
     const auto lcp_coverages = analyze_lcp_candidate_coverage(request, debug_candidates);
     const std::string first_uncovered = first_uncovered_lcp_location(lcp_coverages);
+    // 按 DP 阶段统计结构化冲突来源，避免将 access 问题误归为主路由拥塞。
+    struct OriginConflictCounts {
+        int main_to_main{};
+        int main_to_access{};
+        int access_to_access{};
+        int mixed{};
+    };
+    const auto add_origin_conflicts = [](OriginConflictCounts& counts,
+                                         const std::vector<routing::RoutingDpPhysicalRouteConflict>& conflicts) {
+        for (const auto& conflict : conflicts) {
+            const auto left = routing::physical_route_segment_origin(conflict.candidate_segment);
+            const auto right = routing::physical_route_segment_origin(conflict.occupied_segment);
+            if (left == "main_route+pin_access" || right == "main_route+pin_access") ++counts.mixed;
+            else if (left == "main_route" && right == "main_route") ++counts.main_to_main;
+            else if (left == "pin_access" && right == "pin_access") ++counts.access_to_access;
+            else ++counts.main_to_access;
+        }
+    };
+    OriginConflictCounts candidate_origin_counts;
+    OriginConflictCounts merge_origin_counts;
+    OriginConflictCounts root_origin_counts;
+    if (evaluation.bottom_up_dp.has_value()) {
+        for (const auto& event : evaluation.bottom_up_dp->candidate_events) add_origin_conflicts(candidate_origin_counts, event.physical_route_conflicts);
+        for (const auto& event : evaluation.bottom_up_dp->state_merge_events) add_origin_conflicts(merge_origin_counts, event.physical_route_conflicts);
+        for (const auto& event : evaluation.bottom_up_dp->root_audit_events) add_origin_conflicts(root_origin_counts, event.physical_route_conflicts);
+    }
     out << "{\n";
     // summary 涓?routing_cost/global_* 鏉ヨ嚜 global 闃舵锛沠inal_penalty/detailed_cost 鏉ヨ嚜鏈€缁堝彛寰勩€?
     out << "  \"summary\": {"
@@ -722,6 +831,8 @@ std::string make_routing_debug_json(
         << ", \"candidate_count\": " << evaluation.candidates.size()
         << ", \"dp_beam_width\": " << request.dp_beam_width
         << ", \"lcp_candidate_filter_count\": " << evaluation.lcp_candidate_filter_events.size()
+        << ", \"lcp_candidates_unreachable_pin_access\": "
+        << count_unreachable_pin_access_lcp_locations(evaluation)
         << ", \"dp_used\": " << (evaluation.used_bottom_up_dp ? "true" : "false")
         << ", \"failed_nets\": " << evaluation.failed_nets
         << ", \"detailed_routes\": " << detailed.routes.size()
@@ -748,6 +859,14 @@ std::string make_routing_debug_json(
                     evaluation.bottom_up_dp->state_prune_events->size() >= 4096
                 ? "true"
                 : "false")
+        << ", \"dp_state_merge_event_count\": "
+        << (evaluation.bottom_up_dp.has_value() ? evaluation.bottom_up_dp->state_merge_events.size() : 0)
+        << ", \"dp_state_merge_events_truncated\": "
+        << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->state_merge_events_truncated ? "true" : "false")
+        << ", \"dp_root_audit_event_count\": "
+        << (evaluation.bottom_up_dp.has_value() ? evaluation.bottom_up_dp->root_audit_events.size() : 0)
+        << ", \"dp_root_audit_events_truncated\": "
+        << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->root_audit_events_truncated ? "true" : "false")
         << ", \"first_uncovered_lcp_location\": ";
     write_json_string(out, first_uncovered);
     out
@@ -794,6 +913,35 @@ std::string make_routing_debug_json(
     }
     out << "],\n  \"dp_candidate_events_truncated\": "
         << (evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->candidate_events_truncated ? "true" : "false");
+    out << ",\n  \"dp_state_merge_events\": [";
+    if (evaluation.bottom_up_dp.has_value()) {
+        for (std::size_t index = 0; index < evaluation.bottom_up_dp->state_merge_events.size(); ++index) {
+            if (index != 0) out << ',';
+            write_dp_state_merge_event_json(out, evaluation.bottom_up_dp->state_merge_events[index]);
+        }
+    }
+    out << ']';
+    out << ",\n  \"dp_root_audit_events\": [";
+    if (evaluation.bottom_up_dp.has_value()) {
+        for (std::size_t index = 0; index < evaluation.bottom_up_dp->root_audit_events.size(); ++index) {
+            if (index != 0) out << ',';
+            write_dp_root_audit_event_json(out, evaluation.bottom_up_dp->root_audit_events[index]);
+        }
+    }
+    out << ']';
+    const auto write_origin_counts = [&](const OriginConflictCounts& counts) {
+        out << "{\"main_route_to_main_route\": " << counts.main_to_main
+            << ", \"main_route_to_pin_access\": " << counts.main_to_access
+            << ", \"pin_access_to_pin_access\": " << counts.access_to_access
+            << ", \"mixed_origin\": " << counts.mixed << '}';
+    };
+    out << ",\n  \"dp_physical_conflict_summary\": {\"candidate_append\": ";
+    write_origin_counts(candidate_origin_counts);
+    out << ", \"state_merge\": ";
+    write_origin_counts(merge_origin_counts);
+    out << ", \"root_audit\": ";
+    write_origin_counts(root_origin_counts);
+    out << '}';
     out << ",\n  \"lcp_candidate_filter_events\": [";
     for (std::size_t index = 0; index < evaluation.lcp_candidate_filter_events.size(); ++index) {
         if (index != 0) out << ',';
@@ -927,7 +1075,8 @@ std::pair<double, double> asf_node_occupied_size(const Circuit& circuit, const A
     const double outer = node.space_node_groups.empty() ? 0.0 : required_space_for_group(node.space_node_groups.front());
     const double top = node.space_node_groups.size() < 2 ? 0.0 : required_space_for_group(node.space_node_groups[1]);
     const double cluster = required_space_for_cluster(node.space_node_cluster);
-    return {size.first + std::max({outer, cluster, config.spacing}), size.second + std::max(top, config.spacing)};
+    const double spacing = device_spacing(circuit);
+    return {size.first + std::max({outer, cluster, spacing}), size.second + std::max(top, spacing)};
 }
 
 Rect placement_rect(const Circuit& circuit, const Placement& placement) {
@@ -1018,14 +1167,22 @@ void set_region(SpaceNode& space, const Rect& region) {
     space.physical_region = fixed;
 }
 
+// 声明路由禁入包络计算，供 ASF 空间节点生成复用。
+Rect routing_envelope_rect(
+    const Circuit& circuit,
+    const std::unordered_map<std::string, Placement>& placements,
+    const std::string& module_id,
+    int routing_layers);
+
 void append_asf_spaces_for_node(
     const Circuit& circuit,
     const AsfBStarNode& source_node,
     const std::unordered_map<std::string, Placement>& placements,
-    std::vector<SpaceNode>& spaces) {
-    const Rect rep = placement_rect(circuit, placements.at(source_node.module));
+    std::vector<SpaceNode>& spaces,
+    const SolverConfig& config) {
+    const Rect rep = routing_envelope_rect(circuit, placements, source_node.module, config.routing_layers);
     const Rect mirror = source_node.mirror_module.has_value()
-                            ? placement_rect(circuit, placements.at(*source_node.mirror_module))
+                            ? routing_envelope_rect(circuit, placements, *source_node.mirror_module, config.routing_layers)
                             : rep;
     const double outer_width = source_node.space_node_groups.empty() ? 1.0 : std::max(1.0, required_space_for_group(source_node.space_node_groups.front()));
     const double top_width = source_node.space_node_groups.size() < 2 ? 1.0 : std::max(1.0, required_space_for_group(source_node.space_node_groups[1]));
@@ -1122,11 +1279,12 @@ AsfPackingResult pack_asf_bstar_tree(const Circuit& circuit, const SymmetryGroup
             {},
         });
         packed.push_back({x, y, x + occupied.first, y + occupied.second});
-        if (node.left.has_value()) place_node(*node.left, x + occupied.first + config.spacing, y);
-        if (node.right.has_value()) place_node(*node.right, x, y + occupied.second + config.spacing);
+        const double spacing = device_spacing(circuit);
+        if (node.left.has_value()) place_node(*node.left, x + occupied.first + spacing, y);
+        if (node.right.has_value()) place_node(*node.right, x, y + occupied.second + spacing);
     };
 
-    const double axis_clearance = std::max(1.0, config.spacing);
+    const double axis_clearance = std::max(1.0, device_spacing(circuit));
     place_node(*asf.root, axis_clearance, 0.0);
 
     std::string symmetry_error;
@@ -1150,7 +1308,7 @@ AsfPackingResult pack_asf_bstar_tree(const Circuit& circuit, const SymmetryGroup
     }
     result.bbox = bbox;
     for (const auto& id : asf.representative_order) {
-        append_asf_spaces_for_node(circuit, asf.nodes.at(id), result.placements, result.space_nodes);
+        append_asf_spaces_for_node(circuit, asf.nodes.at(id), result.placements, result.space_nodes, config);
     }
     for (const auto& space : result.space_nodes) {
         if (!space.physical_region.has_value()) continue;
@@ -1326,6 +1484,28 @@ Rect placed_module_rect(const Circuit& circuit, const std::unordered_map<std::st
     return {placement->second.x, placement->second.y, placement->second.x + size.first, placement->second.y + size.second};
 }
 
+// 返回器件外框与 active 路由禁入包络的并集，作为 SpaceNode 的安全起始边界。
+Rect routing_envelope_rect(
+    const Circuit& circuit,
+    const std::unordered_map<std::string, Placement>& placements,
+    const std::string& module_id,
+    int routing_layers) {
+    const Rect module = placed_module_rect(circuit, placements, module_id);
+    const auto placement = placements.find(module_id);
+    if (placement == placements.end()) return module;
+    double max_spacing = 0.0;
+    for (int layer = 0; layer < routing_layers; ++layer) {
+        const std::string name = routing::index_to_layer(layer);
+        if (active_region_blocked(circuit, name)) max_spacing = std::max(max_spacing, active_route_spacing(circuit, name));
+    }
+    double max_width = 1.0;
+    for (const auto& [_, rule] : circuit.constraints.wire_widths) max_width = std::max(max_width, rule.max_width);
+    const Rect active = routing::expand_rect(
+        placed_active_rect(circuit.modules.at(module_id), placement->second), max_spacing + max_width / 2.0);
+    return {std::min(module.x1, active.x1), std::min(module.y1, active.y1),
+            std::max(module.x2, active.x2), std::max(module.y2, active.y2)};
+}
+
 // 涓烘瘡涓?space node 鐢熸垚褰撳墠 placement 涓嬪彲閲囨牱鐨勭墿鐞嗛€氶亾鍖哄煙銆?
 void assign_space_physical_regions(
     const Circuit& circuit,
@@ -1338,8 +1518,8 @@ void assign_space_physical_regions(
             space.physical_region = Rect{0.0, 0.0, kMinRegionWidth, kMinRegionWidth};
             continue;
         }
-        const Rect owner = placed_module_rect(circuit, request.placements, space.owner);
-        const double reserved_width = std::max({space.required_space(), config.spacing, kMinRegionWidth});
+        const Rect owner = routing_envelope_rect(circuit, request.placements, space.owner, config.routing_layers);
+        const double reserved_width = std::max({space.required_space(), device_spacing(circuit), kMinRegionWidth});
         if (space.kind == SpaceNodeKind::Right) {
             space.physical_region = Rect{owner.x2, owner.y1, owner.x2 + reserved_width, owner.y2};
         } else if (space.kind == SpaceNodeKind::Top) {
@@ -1480,6 +1660,32 @@ double compute_phi_cost(Metrics& metrics, const Metrics& base, const SolverConfi
                        metrics.row_width_penalty +
                        metrics.penalty;
     return metrics.phi_cost;
+}
+
+// 根据不可达 LCP 诊断计算所属 space node 的最小路由通道宽度。
+std::unordered_map<std::string, double> lcp_access_channel_requirements(
+    const Circuit& circuit,
+    const RoutingEvaluationRequest& request,
+    const RoutingEvaluation& evaluation) {
+    double max_route_spacing = 0.0;
+    for (int layer = 0; layer < request.routing_layers; ++layer) {
+        max_route_spacing = std::max(
+            max_route_spacing,
+            diff_net_route_spacing(circuit, routing::index_to_layer(layer)));
+    }
+
+    std::unordered_map<std::string, double> result;
+    for (const auto& event : evaluation.lcp_candidate_filter_events) {
+        if (!event.reason.starts_with("unreachable_pin_access:") || event.lcp_id.empty()) continue;
+        const auto point = std::find_if(
+            request.linking_points.begin(), request.linking_points.end(),
+            [&](const LinkingControlPoint& candidate) { return candidate.id == event.lcp_id; });
+        if (point == request.linking_points.end()) continue;
+        const double channel_width = point->required_width() + 2.0 * max_route_spacing;
+        auto& required = result[point->space_node_id];
+        required = std::max(required, channel_width);
+    }
+    return result;
 }
 
 // 璇勪环涓€妫靛寮?B*-tree 瀵瑰簲鐨勫€欓€夌姸鎬併€?
@@ -1760,10 +1966,10 @@ RoutingEvaluationRequest pack_enhanced_tree(
         }
         packed.push_back({x, y, x + occupied.first, y + occupied.second});
         if (node.left.has_value()) {
-            place_node(*node.left, x + occupied.first + config.spacing, y);
+            place_node(*node.left, x + occupied.first + device_spacing(circuit), y);
         }
         if (node.right.has_value()) {
-            place_node(*node.right, x, y + occupied.second + config.spacing);
+            place_node(*node.right, x, y + device_spacing(circuit));
         }
     };
 
@@ -1871,6 +2077,7 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
     const bool lcp_direct_fallback =
         !routing_evaluation.strict_lcp_dp_blocked_fallback &&
         !request.linking_points.empty() && routing_evaluation.bottom_up_dp.has_value() && !routing_evaluation.bottom_up_dp->success;
+    const auto lcp_access_channels = lcp_access_channel_requirements(circuit, request, routing_evaluation);
     for (const auto& space : request.space_nodes) {
         const auto detailed_space = detailed.required_space_by_node.find(space.id);
         // required_space_by_node 的语义是基础预留宽度，不能混入 coupling_extra_space。
@@ -1883,6 +2090,10 @@ RoutingFeedback evaluate_with_routing_adapter(const Circuit& circuit, const Rout
             required_space = std::max(
                 required_space,
                 std::max(0.0, space.required_space() - space.coupling_extra_space) + max_lcp_width_for_space(space));
+        }
+        const auto access_channel = lcp_access_channels.find(space.id);
+        if (access_channel != lcp_access_channels.end()) {
+            required_space = std::max(required_space, access_channel->second);
         }
         feedback.required_space_by_node[space.id] = required_space;
         const auto detailed_coupling = detailed.coupling_space_by_node.find(space.id);

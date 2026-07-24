@@ -1,0 +1,15 @@
+{
+  "sa_iterations": 0,
+  "recorded": 0,
+  "summary": {
+    "converged_count": 0,
+    "not_converged_count": 0,
+    "max_routing_feedback_iterations": 0,
+    "final_routing_feedback_converged": true,
+    "final_routing_feedback_iterations": 2,
+    "final_space_feedback_nodes": 10
+  },
+  "iterations": [
+
+  ]
+}

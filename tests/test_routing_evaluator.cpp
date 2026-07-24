@@ -362,6 +362,57 @@ sapr::RoutingEvaluationRequest make_lcp_request(
     return request;
 }
 
+// 构造左右叶子各自负责一条线段的 DP 树，用于验证 child state 合并时的物理兼容性检查。
+sapr::RoutingEvaluationRequest make_dp_merge_compatibility_request(
+    const std::unordered_map<std::string, sapr::Placement>& placements) {
+    sapr::RoutingEvaluationRequest request;
+    request.placements = placements;
+    request.placement_order = {"M"};
+    request.tree.root = "ROOT";
+    request.tree.nodes = {
+        {"ROOT", "M", std::optional<std::string>{"LEFT"}, std::optional<std::string>{"RIGHT"}},
+        {"LEFT", "M", std::nullopt, std::nullopt},
+        {"RIGHT", "M", std::nullopt, std::nullopt},
+    };
+    sapr::PackingContourStep left;
+    left.tree_node = "LEFT";
+    left.module = "M";
+    left.subtree_modules = {"M"};
+    left.local_wire_segments = {"LEFT_SEGMENT"};
+    sapr::PackingContourStep right;
+    right.tree_node = "RIGHT";
+    right.module = "M";
+    right.subtree_modules = {"M"};
+    right.local_wire_segments = {"RIGHT_SEGMENT"};
+    sapr::PackingContourStep root;
+    root.tree_node = "ROOT";
+    root.module = "M";
+    root.left = "LEFT";
+    root.right = "RIGHT";
+    root.subtree_modules = {"M"};
+    request.packing_trace.steps = {left, right, root};
+    return request;
+}
+
+// 构造指定坐标的成功 DP 候选，保持测试只关注子树合并而非 A* 搜索。
+sapr::routing::RouteCandidate make_dp_merge_candidate(
+    const sapr::routing::RoutingContext& context,
+    const std::string& net,
+    const std::string& segment_id,
+    const sapr::routing::Point& start,
+    const sapr::routing::Point& end) {
+    sapr::routing::RouteCandidate candidate;
+    candidate.net = net;
+    candidate.from_terminal = segment_id + ":from";
+    candidate.to_terminal = segment_id + ":to";
+    candidate.segment_id = segment_id;
+    candidate.wire_width = 1.0;
+    candidate.path.success = true;
+    candidate.path.points = {context.grid().snap_to_grid(start, 0), context.grid().snap_to_grid(end, 0)};
+    candidate.path.metrics.wirelength = 1.0;
+    return candidate;
+}
+
 // 构造一组经过 LCP 的 selected candidates，用于验证 top-down traceback。
 sapr::RoutingEvaluationRequest make_reverse_lcp_request(
     const sapr::Circuit& circuit,
@@ -1283,6 +1334,24 @@ void run_routing_evaluator_tests() {
     require(net_routes_are_contiguous(cost_compare_detail.routes, "N2"), "cost-selected via route should stay connected");
     require(net_has_implicit_via(cost_compare_detail.routes, "N2"), "cost-selected via route should expose implicit vias");
 
+    // 成功 DP 的 traceback 必须锁定精确物理路径，detailed 不得为了局部低代价替换为跨层候选。
+    sapr::routing::RoutingDpResult locked_dp;
+    locked_dp.success = true;
+    locked_dp.traceback_candidates = {long_no_via};
+    cost_compare_eval.bottom_up_dp = std::move(locked_dp);
+    cost_compare_eval.used_bottom_up_dp = true;
+    const auto locked_dp_detail = sapr::run_detailed_routing(conflict_circuit, short_detail_request, cost_compare_eval);
+    require(
+        std::none_of(locked_dp_detail.routes.begin(), locked_dp_detail.routes.end(), [](const auto& route) {
+            return route.layer == "M2";
+        }),
+        "successful DP traceback must prevent detailed from replacing its selected path");
+    require(
+        std::all_of(locked_dp_detail.transition_outcomes.begin(), locked_dp_detail.transition_outcomes.end(), [](const auto& outcome) {
+            return outcome.selected_by_dp;
+        }),
+        "detailed output for successful DP should retain exact traceback candidate identity");
+
     sapr::routing::GlobalRoutingResult layer_global;
     layer_global.net_routes.push_back(first_choice);
     layer_global.net_routes.push_back(second_choice);
@@ -1317,6 +1386,64 @@ void run_routing_evaluator_tests() {
     sapr::RoutingEvaluationRequest drc_request;
     drc_request.placements = drc_placements;
     drc_request.placement_order = {"M"};
+
+    const sapr::routing::RoutingContext merge_context(drc_circuit, drc_placements);
+    const auto merge_request = make_dp_merge_compatibility_request(drc_placements);
+    const auto merge_left = make_dp_merge_candidate(
+        merge_context, "N_LEFT", "LEFT_SEGMENT", sapr::routing::Point{0.0, 2.0}, sapr::routing::Point{9.0, 2.0});
+    const auto merge_right_short = make_dp_merge_candidate(
+        merge_context, "N_RIGHT", "RIGHT_SEGMENT", sapr::routing::Point{4.0, 0.0}, sapr::routing::Point{4.0, 4.0});
+    const auto short_merge_dp = sapr::routing::run_bottom_up_routing_dp(
+        drc_circuit, merge_request, merge_context, {merge_left, merge_right_short}, 16);
+    require(!short_merge_dp.success, "DP must reject root states assembled from shorting child routes");
+    require(
+        std::any_of(
+            short_merge_dp.state_merge_events.begin(),
+            short_merge_dp.state_merge_events.end(),
+            [](const auto& event) { return event.reason == "occupied_route_short"; }),
+        "DP child merge should record occupied-route short diagnostics");
+    require(
+        std::any_of(
+            short_merge_dp.state_merge_events.begin(),
+            short_merge_dp.state_merge_events.end(),
+            [](const auto& event) { return !event.physical_route_conflicts.empty(); }),
+        "DP child merge short diagnostics should retain structured physical conflict segments");
+
+    auto spacing_circuit = drc_circuit;
+    spacing_circuit.constraints.spacing_rules.diff_net_route_spacing["M1"] = 1.0;
+    const sapr::routing::RoutingContext spacing_merge_context(spacing_circuit, drc_placements);
+    const auto merge_right_spacing = make_dp_merge_candidate(
+        spacing_merge_context, "N_RIGHT", "RIGHT_SEGMENT", sapr::routing::Point{0.0, 4.0}, sapr::routing::Point{9.0, 4.0});
+    const auto spacing_merge_dp = sapr::routing::run_bottom_up_routing_dp(
+        spacing_circuit, merge_request, spacing_merge_context, {merge_left, merge_right_spacing}, 16);
+    require(!spacing_merge_dp.success, "DP must reject child routes that violate different-net spacing");
+    require(
+        std::any_of(
+            spacing_merge_dp.state_merge_events.begin(),
+            spacing_merge_dp.state_merge_events.end(),
+            [](const auto& event) { return event.reason == "route_spacing"; }),
+        "DP child merge should record route-spacing diagnostics");
+    require(
+        std::any_of(
+            spacing_merge_dp.state_merge_events.begin(),
+            spacing_merge_dp.state_merge_events.end(),
+            [](const auto& event) { return !event.physical_route_conflicts.empty(); }),
+        "DP child merge spacing diagnostics should retain structured physical conflict segments");
+
+    const auto merge_right_legal = make_dp_merge_candidate(
+        merge_context, "N_RIGHT", "RIGHT_SEGMENT", sapr::routing::Point{4.0, 7.0}, sapr::routing::Point{9.0, 7.0});
+    const auto legal_merge_dp = sapr::routing::run_bottom_up_routing_dp(
+        drc_circuit, merge_request, merge_context, {merge_left, merge_right_short, merge_right_legal}, 16);
+    require(legal_merge_dp.success, "DP should retain a higher-cost child combination when the cheaper one shorts");
+    require(
+        std::any_of(
+            legal_merge_dp.traceback_candidates.begin(),
+            legal_merge_dp.traceback_candidates.end(),
+            [](const auto& candidate) {
+                return candidate.segment_id == "RIGHT_SEGMENT" && candidate.path.points.front().iy == 7;
+            }),
+        "successful DP traceback should select the legal right-child candidate");
+
     drc_request.active_region_blockers.push_back(
         sapr::routing::transform_active_to_global(drc_circuit.modules.at("M"), drc_placements.at("M")));
 
@@ -1460,6 +1587,43 @@ void run_routing_evaluator_tests() {
     require(lcp_detail.required_space_by_node.contains("S1"), "LCP detailed route should report required routing space");
     require(lcp_detail.required_space_by_node.at("S1") >= 3.0, "required space should include route width and spacing");
     require(lcp_detail.detailed_cost > 0.0, "detailed routing should report local detailed cost");
+
+    const auto lcp_variant_eval = sapr::evaluate_routing(drc_circuit, lcp_request);
+    int left_lcp_variant_count = 0;
+    bool has_forced_detour_variant = false;
+    for (const auto& candidate : lcp_variant_eval.candidates) {
+        if (!candidate.path.success || candidate.segment_id != "N:left" ||
+            candidate.lcp_candidate_id != "LCP1:first") {
+            continue;
+        }
+        ++left_lcp_variant_count;
+        has_forced_detour_variant = has_forced_detour_variant ||
+                                     candidate.route_variant.find("avoid_pivot_") == 0;
+    }
+    // 验证完整物理几何保留 pin access 来源，且兼容接口输出的几何数量不变。
+    const auto access_candidate = std::find_if(
+        boundary_eval.candidates.begin(), boundary_eval.candidates.end(), [](const auto& candidate) { return candidate.path.success; });
+    require(access_candidate != boundary_eval.candidates.end(), "boundary case should expose a successful access candidate");
+    const double access_width = sapr::routing::effective_candidate_width(
+        boundary_circuit, boundary_eval.context, *access_candidate);
+    const auto access_details = sapr::routing::candidate_to_physical_route_details(
+        boundary_eval.context, *access_candidate, access_width);
+    const auto access_routes = sapr::routing::candidate_to_physical_route_segments(
+        boundary_eval.context, *access_candidate, access_width);
+    require(access_details.size() == access_routes.size(), "provenance geometry must preserve detailed route count");
+    require(
+        std::any_of(access_details.begin(), access_details.end(), [](const auto& segment) {
+            return sapr::routing::physical_route_segment_origin(segment) == "pin_access" &&
+                   !segment.pin_access_keys.empty();
+        }),
+        "active pin candidate should expose pin_access provenance with its pin key");
+    require(
+        std::any_of(access_details.begin(), access_details.end(), [](const auto& segment) {
+            return sapr::routing::physical_route_segment_origin(segment).find("main_route") != std::string::npos;
+        }),
+        "active pin candidate should retain main-route provenance");
+    require(left_lcp_variant_count >= 2, "LCP segment should retain physically distinct route variants");
+    require(has_forced_detour_variant, "LCP variants should include a forced-detour path when the base path is blocked");
 
     // LCP 与引脚重合时，单点 A* 路径是合法的零长度连接，不应导致整网 detailed traceback 失败。
     auto zero_length_lcp_eval = make_lcp_evaluation(drc_circuit, drc_placements);

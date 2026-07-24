@@ -7,6 +7,8 @@
 #include <sstream>
 #include <stdexcept>
 
+#include "sapr/routing/layer.hpp"
+
 namespace sapr {
 namespace {
 
@@ -176,6 +178,22 @@ void load_constraints(const std::filesystem::path& path, Circuit& circuit) {
             circuit.constraints.flows.push_back({f[1], f[2], f[3]});
         } else if (f[0] == "WIRE_WIDTH" && f.size() == 4) {
             circuit.constraints.wire_widths[f[1]] = {f[1], parse_double(f[2], path), parse_double(f[3], path)};
+        } else if (f[0] == "DEVICE_SPACING" && f.size() == 2) {
+            circuit.constraints.spacing_rules.device_spacing = parse_double(f[1], path);
+        } else if ((f[0] == "ACTIVE_ROUTE_SPACING" || f[0] == "DIFF_NET_ROUTE_SPACING") && f.size() == 3) {
+            const std::string& layer = f[1];
+            if (layer != "ALL") (void)routing::layer_to_index(layer);
+            auto& rules = f[0] == "ACTIVE_ROUTE_SPACING"
+                              ? circuit.constraints.spacing_rules.active_route_spacing
+                              : circuit.constraints.spacing_rules.diff_net_route_spacing;
+            if (rules.contains(layer)) throw std::runtime_error(path.string() + ": duplicate spacing rule for " + layer);
+            rules[layer] = parse_double(f[2], path);
+        } else if ((f[0] == "ACTIVE_REGION_BLOCK" || f[0] == "ACTIVE_REGION_ALLOW") && f.size() == 2) {
+            const std::string& layer = f[1];
+            if (layer != "ALL") (void)routing::layer_to_index(layer);
+            auto& rules = circuit.constraints.spacing_rules.active_region_block;
+            if (rules.contains(layer)) throw std::runtime_error(path.string() + ": duplicate active-region rule for " + layer);
+            rules[layer] = f[0] == "ACTIVE_REGION_BLOCK";
         } else {
             throw std::runtime_error(path.string() + ": unsupported constraint row");
         }

@@ -8,12 +8,18 @@
 
 namespace sapr::routing {
 
+// 标识障碍物的物理来源，供 DRC 与调试输出区分规则。
+enum class ObstacleKind { ActiveRegion, RoutedMetal, Generic };
+
 // 表示某一金属层上的矩形障碍物。
 struct Obstacle {
     Rect rect;
     int layer{};
     std::string reason;
     std::string owner;
+    ObstacleKind kind{ObstacleKind::Generic};
+    double keep_out{};
+    bool hard_block{};
 };
 
 // 管理障碍物集合，并允许 pin terminal 作为起终点例外。

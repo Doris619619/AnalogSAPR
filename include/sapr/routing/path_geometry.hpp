@@ -1,6 +1,7 @@
 // 文件职责：声明候选网格路径到金属占用线段的转换与短路检查工具。
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "sapr/model.hpp"
@@ -8,6 +9,27 @@
 #include "sapr/routing/path.hpp"
 
 namespace sapr::routing {
+
+class RoutingContext;
+
+// 表示完整物理金属段的来源；同一几何段可同时属于主路由与 pin access。
+struct PhysicalRouteSegment {
+    RouteSegment route;
+    bool main_route{};
+    std::vector<std::string> pin_access_keys;
+};
+
+// 返回物理金属段的稳定来源标签，供 DP 诊断 JSON 使用。
+std::string physical_route_segment_origin(const PhysicalRouteSegment& segment);
+
+// 提取带来源物理段中的几何，用于复用既有共享 DRC 接口。
+std::vector<RouteSegment> physical_route_segments_to_routes(const std::vector<PhysicalRouteSegment>& segments);
+
+// 按线宽约束计算候选的最终物理线宽，供 DP、detailed 和最终 DRC 使用同一规则。
+double effective_candidate_width(
+    const Circuit& circuit,
+    const RoutingContext& context,
+    const RouteCandidate& candidate);
 
 // 将 A* 候选路径压缩成同层共线的金属中心线段。
 std::vector<RouteSegment> candidate_to_route_segments(
@@ -22,6 +44,18 @@ std::vector<RouteSegment> candidate_to_route_segments(
     double width,
     const std::vector<Rect>& split_rects);
 
+// 生成候选可输出的完整物理金属：A* 主干、active 切段和两端专属 pin-access corridor。
+std::vector<RouteSegment> candidate_to_physical_route_segments(
+    const RoutingContext& context,
+    const RouteCandidate& candidate,
+    double width);
+
+// 生成候选的完整物理金属并保留主路由和 pin-access 来源，不改变几何去重语义。
+std::vector<PhysicalRouteSegment> candidate_to_physical_route_details(
+    const RoutingContext& context,
+    const RouteCandidate& candidate,
+    double width);
+
 // 判断两条已压缩金属线段是否形成同层异网短路。
 bool same_layer_short(const RouteSegment& lhs, const RouteSegment& rhs);
 
@@ -29,6 +63,12 @@ bool same_layer_short(const RouteSegment& lhs, const RouteSegment& rhs);
 bool routes_short_with_existing(
     const std::vector<RouteSegment>& routes,
     const std::vector<RouteSegment>& existing);
+
+// 判断一组新线段是否与既有异网线段违反同层最小边缘间距；间距为零时不构成违例。
+bool routes_violate_spacing_with_existing(
+    const std::vector<RouteSegment>& routes,
+    const std::vector<RouteSegment>& existing,
+    double spacing);
 
 // 合并同网同层同宽的共线重叠或相接线段，用于输出前清理重复金属段。
 std::vector<RouteSegment> merge_collinear_same_net_routes(

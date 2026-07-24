@@ -10,6 +10,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "sapr/constraints.hpp"
 #include "sapr/routing/path_geometry.hpp"
 
 namespace sapr::routing {
@@ -22,7 +23,6 @@ constexpr std::size_t kMaxRecordedCandidateEvents = 4096;
 constexpr std::size_t kMaxRecordedStatePruneEvents = 4096;
 
 // 为裁剪事件保留一条失败摘要，避免复制随子树合并增长的完整错误列表。
-std::vector<std::string> state_failure_summary(const RoutingDpState& state) {
 std::vector<std::string> state_failure_summary(const RoutingDpState& state) {
     if (!state.choice_message.empty()) return {state.choice_message};
     if (!state.failure_messages.empty()) return {state.failure_messages.front()};
@@ -61,6 +61,7 @@ struct AppendCandidateResult {
     std::string reason;
     std::string state_lcp_candidate_id;
     std::vector<std::string> occupied_route_conflicts;
+    std::vector<RoutingDpPhysicalRouteConflict> physical_route_conflicts;
 };
 
 // 返回 terminal 所属模块，LCP 或无法识别时返回空字符串。
@@ -151,6 +152,7 @@ void append_candidate_event(
                                        : result.state_lcp_candidate_id;
     event.reason = result.reason;
     event.occupied_route_conflicts = result.occupied_route_conflicts;
+    event.physical_route_conflicts = result.physical_route_conflicts;
     event.selected = result.accepted;
     events.push_back(std::move(event));
 }
@@ -170,6 +172,88 @@ std::vector<std::string> collect_occupied_route_conflicts(
                 occupied_route.net + ":" + occupied_route.layer + " (" +
                 std::to_string(occupied_route.x1) + "," + std::to_string(occupied_route.y1) + ")->(" +
                 std::to_string(occupied_route.x2) + "," + std::to_string(occupied_route.y2) + ")");
+            if (conflicts.size() >= kMaxConflictsPerCandidateEvent) return conflicts;
+        }
+    }
+    return conflicts;
+}
+
+// 格式化两个冲突金属段，供兼容旧版调试文本和结构化诊断复用。
+std::string route_conflict_summary(const RouteSegment& candidate_route, const RouteSegment& occupied_route);
+
+// 收集冲突双方的完整物理来源，保持与现有短路/间距几何判断完全一致。
+std::vector<RoutingDpPhysicalRouteConflict> collect_physical_route_conflicts(
+    const std::vector<PhysicalRouteSegment>& routes,
+    const std::vector<PhysicalRouteSegment>& existing,
+    const Circuit& circuit,
+    const std::string& reason) {
+    constexpr std::size_t kMaxConflictsPerEvent = 4;
+    std::vector<RoutingDpPhysicalRouteConflict> conflicts;
+    for (const auto& route : routes) {
+        for (const auto& occupied : existing) {
+            const bool conflict = reason == "occupied_route_short"
+                                      ? same_layer_short(route.route, occupied.route)
+                                      : routes_violate_spacing_with_existing(
+                                            {route.route}, {occupied.route},
+                                            diff_net_route_spacing(circuit, route.route.layer));
+            if (!conflict) continue;
+            conflicts.push_back({route, occupied});
+            if (conflicts.size() >= kMaxConflictsPerEvent) return conflicts;
+        }
+    }
+    return conflicts;
+}
+
+// 为旧测试或历史构造的 state 补齐默认主路由来源，确保诊断不会改变既有 DRC 结果。
+std::vector<PhysicalRouteSegment> physical_details_or_main(
+    const std::vector<RouteSegment>& routes,
+    const std::vector<PhysicalRouteSegment>& details) {
+    if (routes.size() == details.size()) return details;
+    std::vector<PhysicalRouteSegment> fallback;
+    fallback.reserve(routes.size());
+    for (const auto& route : routes) fallback.push_back({route, true, {}});
+    return fallback;
+}
+
+// 将结构化冲突转换为兼容既有调试脚本的文本摘要。
+std::vector<std::string> physical_conflict_summaries(const std::vector<RoutingDpPhysicalRouteConflict>& conflicts) {
+    std::vector<std::string> summaries;
+    summaries.reserve(conflicts.size());
+    for (const auto& conflict : conflicts) {
+        summaries.push_back(route_conflict_summary(conflict.candidate_segment.route, conflict.occupied_segment.route));
+    }
+    return summaries;
+}
+
+// 将两条发生物理冲突的金属段格式化为稳定摘要，供 DP 合并与 root 审计诊断复用。
+std::string route_conflict_summary(const RouteSegment& candidate_route, const RouteSegment& occupied_route) {
+    return candidate_route.net + ":" + candidate_route.layer + " (" +
+           std::to_string(candidate_route.x1) + "," + std::to_string(candidate_route.y1) + ")->(" +
+           std::to_string(candidate_route.x2) + "," + std::to_string(candidate_route.y2) + ") with " +
+           occupied_route.net + ":" + occupied_route.layer + " (" +
+           std::to_string(occupied_route.x1) + "," + std::to_string(occupied_route.y1) + ")->(" +
+           std::to_string(occupied_route.x2) + "," + std::to_string(occupied_route.y2) + ")";
+}
+
+// 收集短路或最小间距违例的有限摘要，避免 DP 调试事件随子树规模线性膨胀。
+std::vector<std::string> collect_route_compatibility_conflicts(
+    const std::vector<RouteSegment>& routes,
+    const std::vector<RouteSegment>& existing,
+    const Circuit& circuit,
+    const std::string& reason) {
+    constexpr std::size_t kMaxConflictsPerCandidateEvent = 4;
+    std::vector<std::string> conflicts;
+    for (const auto& route : routes) {
+        for (const auto& occupied : existing) {
+            bool conflicts_with_occupied = false;
+            if (reason == "occupied_route_short") {
+                conflicts_with_occupied = same_layer_short(route, occupied);
+            } else if (reason == "route_spacing") {
+                conflicts_with_occupied = routes_violate_spacing_with_existing(
+                    {route}, {occupied}, diff_net_route_spacing(circuit, route.layer));
+            }
+            if (!conflicts_with_occupied) continue;
+            conflicts.push_back(route_conflict_summary(route, occupied));
             if (conflicts.size() >= kMaxConflictsPerCandidateEvent) return conflicts;
         }
     }
@@ -212,38 +296,81 @@ bool merge_lcp_locations(RoutingDpState& target, const RoutingDpState& source) {
     return true;
 }
 
-// 合并左右 child state，形成当前 node 的 transition 起点。
-bool merge_child_state(RoutingDpState& target, const RoutingDpState& child, bool left_child) {
-    if (!merge_lcp_locations(target, child)) return false;
-    merge_unique_values(target.covered_terminals, child.covered_terminals);
-    merge_unique_values(target.covered_wire_segments, child.covered_wire_segments);
-    merge_unique_values(target.selected_transitions, child.selected_transitions);
-    merge_unique_values(target.failure_messages, child.failure_messages);
-    target.selected_candidates.insert(
-        target.selected_candidates.end(),
+// 表示 child state 合并的接受状态或明确的兼容性拒绝原因。
+struct MergeChildStateResult {
+    bool accepted{};
+    std::string reason;
+    std::vector<std::string> occupied_route_conflicts;
+    std::vector<RoutingDpPhysicalRouteConflict> physical_route_conflicts;
+};
+
+// 合并 child state 前验证 LCP、短路和间距；失败时 target 保持不变。
+MergeChildStateResult merge_child_state(
+    RoutingDpState& target,
+    const RoutingDpState& child,
+    bool left_child,
+    const Circuit& circuit) {
+    RoutingDpState merged = target;
+    if (!merge_lcp_locations(merged, child)) return {false, "lcp_binding_conflict", {}};
+    if (routes_short_with_existing(child.occupied_routes, merged.occupied_routes)) {
+        const auto conflicts = collect_physical_route_conflicts(
+            physical_details_or_main(child.occupied_routes, child.occupied_route_details),
+            physical_details_or_main(merged.occupied_routes, merged.occupied_route_details), circuit, "occupied_route_short");
+        return {false,
+                "occupied_route_short",
+                physical_conflict_summaries(conflicts),
+                conflicts};
+    }
+    const bool has_spacing_violation = std::any_of(
+        child.occupied_routes.begin(), child.occupied_routes.end(), [&](const RouteSegment& route) {
+            return routes_violate_spacing_with_existing(
+                {route}, merged.occupied_routes, diff_net_route_spacing(circuit, route.layer));
+        });
+    if (has_spacing_violation) {
+        const auto conflicts = collect_physical_route_conflicts(
+            physical_details_or_main(child.occupied_routes, child.occupied_route_details),
+            physical_details_or_main(merged.occupied_routes, merged.occupied_route_details), circuit, "route_spacing");
+        return {false,
+                "route_spacing",
+                physical_conflict_summaries(conflicts),
+                conflicts};
+    }
+    merge_unique_values(merged.covered_terminals, child.covered_terminals);
+    merge_unique_values(merged.covered_wire_segments, child.covered_wire_segments);
+    merge_unique_values(merged.selected_transitions, child.selected_transitions);
+    merge_unique_values(merged.failure_messages, child.failure_messages);
+    merged.selected_candidates.insert(
+        merged.selected_candidates.end(),
         child.selected_candidates.begin(),
         child.selected_candidates.end());
-    target.occupied_routes.insert(
-        target.occupied_routes.end(),
+    merged.occupied_routes.insert(
+        merged.occupied_routes.end(),
         child.occupied_routes.begin(),
         child.occupied_routes.end());
-    target.metrics.wirelength += child.metrics.wirelength;
-    target.metrics.bend_count += child.metrics.bend_count;
-    target.metrics.via_count += child.metrics.via_count;
-    target.penalty += child.penalty;
+    merged.occupied_route_details.insert(
+        merged.occupied_route_details.end(),
+        child.occupied_route_details.begin(),
+        child.occupied_route_details.end());
+    merged.metrics.wirelength += child.metrics.wirelength;
+    merged.metrics.bend_count += child.metrics.bend_count;
+    merged.metrics.via_count += child.metrics.via_count;
+    merged.penalty += child.penalty;
     if (left_child) {
-        target.parent_left = child.id;
+        merged.parent_left = child.id;
     } else {
-        target.parent_right = child.id;
+        merged.parent_right = child.id;
     }
-    recompute_state_cost(target);
-    return true;
+    recompute_state_cost(merged);
+    target = std::move(merged);
+    return {true, {}, {}, {}};
 }
 
 // 尝试把 candidate 加入 state，并维护 LCP 位置一致性。
+// 将候选加入 DP 状态前执行与 detailed 共用的短路和最小间距物理占用检查。
 AppendCandidateResult append_candidate_if_consistent(
     RoutingDpState& state,
     const RouteCandidate& candidate,
+    const Circuit& circuit,
     const RoutingContext& context) {
     AppendCandidateResult result;
     if (!candidate.path.success) {
@@ -251,13 +378,28 @@ AppendCandidateResult append_candidate_if_consistent(
             candidate.path.message.find("multi_terminal_missing") != std::string::npos ? "multi_terminal_missing" : "path_fail";
         return result;
     }
-    const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
-    auto candidate_routes = candidate_to_route_segments(context.grid(), candidate, width);
+    const double width = effective_candidate_width(circuit, context, candidate);
+    auto candidate_details = candidate_to_physical_route_details(context, candidate, width);
+    auto candidate_routes = physical_route_segments_to_routes(candidate_details);
     const bool has_short = routes_short_with_existing(candidate_routes, state.occupied_routes);
     if (has_short) {
-        result.occupied_route_conflicts = collect_occupied_route_conflicts(candidate_routes, state.occupied_routes);
+        result.physical_route_conflicts = collect_physical_route_conflicts(
+            candidate_details, physical_details_or_main(state.occupied_routes, state.occupied_route_details), circuit, "occupied_route_short");
+        result.occupied_route_conflicts = physical_conflict_summaries(result.physical_route_conflicts);
         result.has_short = true;
         result.reason = "occupied_route_short";
+        return result;
+    }
+    const bool has_spacing_violation = std::any_of(
+        candidate_routes.begin(), candidate_routes.end(), [&](const RouteSegment& route) {
+            return routes_violate_spacing_with_existing(
+                {route}, state.occupied_routes, diff_net_route_spacing(circuit, route.layer));
+        });
+    if (has_spacing_violation) {
+        result.physical_route_conflicts = collect_physical_route_conflicts(
+            candidate_details, physical_details_or_main(state.occupied_routes, state.occupied_route_details), circuit, "route_spacing");
+        result.occupied_route_conflicts = physical_conflict_summaries(result.physical_route_conflicts);
+        result.reason = "route_spacing";
         return result;
     }
     if (!candidate.lcp_id.empty()) {
@@ -289,6 +431,7 @@ AppendCandidateResult append_candidate_if_consistent(
     }
     state.selected_candidates.push_back(candidate);
     state.occupied_routes.insert(state.occupied_routes.end(), candidate_routes.begin(), candidate_routes.end());
+    state.occupied_route_details.insert(state.occupied_route_details.end(), candidate_details.begin(), candidate_details.end());
     add_candidate_metrics(state, candidate);
     append_unique(state.covered_terminals, candidate.from_terminal);
     append_unique(state.covered_terminals, candidate.to_terminal);
@@ -320,14 +463,17 @@ void append_candidate_packing_trace(
         transition);
 }
 
-// 收集论文 LCP topology 中必须被 DP 覆盖的唯一 wire segment id。
-std::vector<std::string> required_segment_keys(const RoutingEvaluationRequest& request) {
+// 收集必须被 DP 覆盖的唯一逻辑线段，包含论文 LCP topology 与 direct-net candidate。
+std::vector<std::string> required_segment_keys(
+    const RoutingEvaluationRequest& request,
+    const std::vector<RouteCandidate>& candidates) {
     std::vector<std::string> keys;
     for (const auto& topology : request.net_topologies) {
         for (const auto& segment : topology.segments) {
             append_unique(keys, segment_key(segment.net, segment.from, segment.to, segment.id));
         }
     }
+    for (const auto& candidate : candidates) append_unique(keys, candidate_segment_key(candidate));
     return keys;
 }
 
@@ -365,6 +511,43 @@ bool is_successful_root_state(
     if (!state_covers_required_segments(state, required_segments)) return false;
     if (!state_binds_required_lcps(state, required_lcps)) return false;
     return true;
+}
+
+// 审计完整 root state 的全部物理占用，并以结构化事件保留冲突来源。
+std::vector<RoutingDpRootAuditEvent> root_state_compatibility_events(const RoutingDpState& state, const Circuit& circuit) {
+    constexpr std::size_t kMaxRootStateFailures = 4;
+    std::vector<RoutingDpRootAuditEvent> events;
+    const auto details = physical_details_or_main(state.occupied_routes, state.occupied_route_details);
+    for (std::size_t index = 0; index < state.occupied_routes.size(); ++index) {
+        const auto& route = state.occupied_routes[index];
+        const std::vector<RouteSegment> existing(state.occupied_routes.begin(), state.occupied_routes.begin() + index);
+        if (routes_short_with_existing({route}, existing)) {
+            const std::vector<PhysicalRouteSegment> detail_existing(details.begin(), details.begin() + index);
+            const auto conflicts = collect_physical_route_conflicts(
+                {details[index]}, detail_existing, circuit, "occupied_route_short");
+            if (!conflicts.empty()) events.push_back({state.id, "occupied_route_short", conflicts});
+            if (events.size() >= kMaxRootStateFailures) return events;
+        }
+        if (routes_violate_spacing_with_existing({route}, existing, diff_net_route_spacing(circuit, route.layer))) {
+            const std::vector<PhysicalRouteSegment> detail_existing(details.begin(), details.begin() + index);
+            const auto conflicts = collect_physical_route_conflicts(
+                {details[index]}, detail_existing, circuit, "route_spacing");
+            if (!conflicts.empty()) events.push_back({state.id, "route_spacing", conflicts});
+            if (events.size() >= kMaxRootStateFailures) return events;
+        }
+    }
+    return events;
+}
+
+// 将 root 审计事件转换为既有失败文本，保持外部失败信息兼容。
+std::vector<std::string> root_state_compatibility_failures(const RoutingDpState& state, const Circuit& circuit) {
+    std::vector<std::string> failures;
+    for (const auto& event : root_state_compatibility_events(state, circuit)) {
+        for (const auto& conflict : physical_conflict_summaries(event.physical_route_conflicts)) {
+            failures.push_back("root_state_incompatible [" + event.reason + "]: " + conflict);
+        }
+    }
+    return failures;
 }
 
 // 在 DP 未成功但没有底层 A* failure 时，补充 topology 覆盖或 LCP 绑定的具体失败原因。
@@ -817,10 +1000,14 @@ bool is_local_segment_for_node(
 }
 
 // 为当前 node 生成基础状态：先合并左右 child state，再把当前 module terminal 标记为已覆盖。
+// 枚举并合并左右 child state，只保留通过共享物理 DRC 的兼容组合。
 std::vector<RoutingDpState> merge_child_states_for_node(
     const RoutingTreeNodeRef& node,
     const std::unordered_map<std::string, NodeRoutingDpResult>& result_by_node,
-    const PackingTraceIndex& trace_index) {
+    const PackingTraceIndex& trace_index,
+    const Circuit& circuit,
+    std::vector<RoutingDpStateMergeEvent>& state_merge_events,
+    bool& state_merge_events_truncated) {
     std::vector<const RoutingDpState*> left_states{nullptr};
     std::vector<const RoutingDpState*> right_states{nullptr};
     if (node.left.has_value()) {
@@ -848,8 +1035,27 @@ std::vector<RoutingDpState> merge_child_states_for_node(
             if (trace_step != trace_index.step_by_node.end()) state.contour_y = trace_step->second->contour_y;
             const auto trace_index_it = trace_index.index_by_node.find(node.id);
             if (trace_index_it != trace_index.index_by_node.end()) state.packing_step_index = trace_index_it->second;
-            if (left != nullptr && !merge_child_state(state, *left, true)) continue;
-            if (right != nullptr && !merge_child_state(state, *right, false)) continue;
+            if (left != nullptr) {
+                const auto merge_result = merge_child_state(state, *left, true, circuit);
+                if (!merge_result.accepted) continue;
+            }
+            if (right != nullptr) {
+                const auto merge_result = merge_child_state(state, *right, false, circuit);
+                if (!merge_result.accepted) {
+                    if (state_merge_events.size() < kMaxRecordedCandidateEvents) {
+                        state_merge_events.push_back(
+                            {node.id,
+                             left == nullptr ? -1 : left->id,
+                               right->id,
+                               merge_result.reason,
+                               merge_result.occupied_route_conflicts,
+                               merge_result.physical_route_conflicts});
+                    } else {
+                        state_merge_events_truncated = true;
+                    }
+                    continue;
+                }
+            }
             append_tree_node_modules(state.covered_terminals, node.module);
             merged.push_back(std::move(state));
         }
@@ -871,6 +1077,7 @@ std::vector<RoutingDpState> merge_child_states_for_node(
 void apply_segment_transition(
     std::vector<RoutingDpState>& states,
     const CandidateGroup& group,
+    const Circuit& circuit,
     const RoutingContext& context,
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
     const std::unordered_map<std::string, std::string>& lcp_space_by_id,
@@ -889,7 +1096,7 @@ void apply_segment_transition(
         for (const auto& candidate : group.candidates) {
             if (!candidate_matches_group(candidate, group)) continue;
             RoutingDpState next = state;
-            const auto append_result = append_candidate_if_consistent(next, candidate, context);
+            const auto append_result = append_candidate_if_consistent(next, candidate, circuit, context);
             append_candidate_event(candidate_events, candidate_events_truncated, group, state, candidate, append_result);
             if (!append_result.accepted) {
                 append_unique(rejection_reasons, append_result.reason);
@@ -938,6 +1145,7 @@ std::vector<RoutingDpState> build_states_for_node(
     const std::unordered_set<std::string>& subtree_modules,
     const ChildSubtreeModules& children,
     const std::vector<CandidateGroup>& groups,
+    const Circuit& circuit,
     const RoutingContext& context,
     const CandidateRouteCache& candidate_routes,
     const std::unordered_map<std::string, std::string>& lcp_owner_by_id,
@@ -949,14 +1157,20 @@ std::vector<RoutingDpState> build_states_for_node(
     int& pruned_states,
     std::vector<RoutingDpCandidateEvent>& candidate_events,
     bool& candidate_events_truncated,
+    std::vector<RoutingDpStateMergeEvent>& state_merge_events,
+    bool& state_merge_events_truncated,
     std::vector<RoutingDpStatePruneEvent>& state_prune_events) {
-    auto states = merge_child_states_for_node(node, result_by_node, trace_index);
+    auto states = merge_child_states_for_node(
+        node, result_by_node, trace_index, circuit, state_merge_events, state_merge_events_truncated);
     if (states.empty()) return states;
 
     for (const auto& group : groups) {
-        if (use_packing_time_segments) {
-            if (packing_time_segments == nullptr || !contains_value(*packing_time_segments, group.key)) continue;
+        const bool recorded_at_packing_step =
+            packing_time_segments != nullptr && contains_value(*packing_time_segments, group.key);
+        if (use_packing_time_segments && recorded_at_packing_step) {
+            // packing trace 已显式记录的线段严格按其记录节点激活。
         } else if (!is_local_segment_for_node(group, subtree_modules, children, lcp_owner_by_id)) {
+            // 未写入 LCP packing trace 的 direct net 在端点首次同属的最小子树激活。
             continue;
         }
         bool already_covered = true;
@@ -971,6 +1185,7 @@ std::vector<RoutingDpState> build_states_for_node(
         apply_segment_transition(
             states,
             group,
+            circuit,
             context,
             lcp_owner_by_id,
             lcp_space_by_id,
@@ -1008,8 +1223,6 @@ RoutingDpResult run_bottom_up_routing_dp(
     const RoutingContext& context,
     const std::vector<RouteCandidate>& candidates,
     int max_states_per_node) {
-    (void)circuit;
-    (void)context;
     RoutingDpResult result{};
     result.beam_width = max_states_per_node;
     result.state_prune_events = std::make_unique<std::vector<RoutingDpStatePruneEvent>>();
@@ -1023,7 +1236,7 @@ RoutingDpResult run_bottom_up_routing_dp(
     collect_post_order(*request.tree.root, nodes, visited, post_order);
     if (post_order.empty()) return result;
 
-    const auto required_segments = required_segment_keys(request);
+    const auto required_segments = required_segment_keys(request, candidates);
     const auto required_lcps = required_lcp_ids(request);
     const auto groups = make_candidate_groups(request, candidates);
     CandidateRouteCache candidate_routes;
@@ -1032,8 +1245,8 @@ RoutingDpResult run_bottom_up_routing_dp(
         std::vector<std::vector<RouteSegment>> group_routes;
         group_routes.reserve(group.candidates.size());
         for (const auto& candidate : group.candidates) {
-            const double width = candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
-            group_routes.push_back(candidate_to_route_segments(context.grid(), candidate, width));
+            const double width = effective_candidate_width(circuit, context, candidate);
+            group_routes.push_back(candidate_to_physical_route_segments(context, candidate, width));
         }
         candidate_routes.push_back(std::move(group_routes));
     }
@@ -1070,6 +1283,7 @@ RoutingDpResult run_bottom_up_routing_dp(
             subtree_modules,
             children,
             groups,
+            circuit,
             context,
             candidate_routes,
             lcp_owner_by_id,
@@ -1081,6 +1295,8 @@ RoutingDpResult run_bottom_up_routing_dp(
             result.dp_pruned_states,
             result.candidate_events,
             result.candidate_events_truncated,
+            result.state_merge_events,
+            result.state_merge_events_truncated,
             *result.state_prune_events);
         result.dp_nodes += 1;
         result.dp_states += static_cast<int>(node_result.states.size());
@@ -1090,16 +1306,32 @@ RoutingDpResult run_bottom_up_routing_dp(
 
     auto root_found = result_by_node.find(*request.tree.root);
     if (root_found == result_by_node.end() || root_found->second.states.empty()) return result;
-    const auto successful = std::find_if(
-        root_found->second.states.begin(),
-        root_found->second.states.end(),
-        [&](const RoutingDpState& state) {
-            return is_successful_root_state(state, required_segments, required_lcps);
-        });
-    result.success = successful != root_found->second.states.end();
+    const RoutingDpState* successful = nullptr;
+    for (const auto& state : root_found->second.states) {
+        if (!is_successful_root_state(state, required_segments, required_lcps)) continue;
+        const auto audit_events = root_state_compatibility_events(state, circuit);
+        if (audit_events.empty()) {
+            successful = &state;
+            break;
+        }
+        for (const auto& event : audit_events) {
+            if (result.root_audit_events.size() >= kMaxRecordedCandidateEvents) {
+                result.root_audit_events_truncated = true;
+                break;
+            }
+            result.root_audit_events.push_back(event);
+        }
+    }
+    result.success = successful != nullptr;
     result.best_state = result.success ? *successful : root_found->second.states.front();
     result.traceback_candidates = traceback_candidates_from_state(result.best_state);
     if (!result.success) {
+        for (const auto& state : root_found->second.states) {
+            if (!is_successful_root_state(state, required_segments, required_lcps)) continue;
+            for (const auto& failure : root_state_compatibility_failures(state, circuit)) {
+                append_unique(result.best_state.failure_messages, failure);
+            }
+        }
         append_success_check_failures(result.best_state, required_segments, required_lcps);
     }
     return result;

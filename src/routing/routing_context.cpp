@@ -1,6 +1,8 @@
 // 文件职责：实现由 Circuit 和 placement 构建多层布线环境的逻辑。
 #include "sapr/routing/routing_context.hpp"
 
+#include "sapr/constraints.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -51,22 +53,15 @@ GridConfig make_effective_grid_config(const Circuit& circuit, const GridConfig& 
     return adapted;
 }
 
-void add_access_line(ObstacleMap& obstacles, const Grid& grid, GridPoint start, GridPoint end) {
-    const int dx = (end.ix > start.ix) ? 1 : (end.ix < start.ix ? -1 : 0);
-    const int dy = (end.iy > start.iy) ? 1 : (end.iy < start.iy ? -1 : 0);
-    GridPoint current = start;
-    while (true) {
-        for (int layer = 0; layer < grid.layer_count(); ++layer) {
-            obstacles.add_terminal_point(GridPoint{current.ix, current.iy, layer});
-        }
-        if (current.ix == end.ix && current.iy == end.iy) break;
-        current.ix += dx;
-        current.iy += dy;
-    }
-}
+// 表示 pin access 的目标点及其不可由坐标截断推断的逃逸方向。
+struct PinAccessTarget {
+    Point point;
+    bool horizontal{};
+    int direction{};
+};
 
-// 选择 pin 到 active 外最近边界的逃逸目标点。
-Point pin_access_target(const Point& pin_location, const Rect& active, double escape) {
+// 选择 pin 到 active 外最近且仍位于芯片范围内的逃逸目标与方向。
+PinAccessTarget pin_access_target(const Point& pin_location, const Rect& active, double escape) {
     const Rect rect = normalize_rect(active);
     const double left = std::abs(pin_location.x - rect.x1);
     const double right = std::abs(rect.x2 - pin_location.x);
@@ -76,12 +71,14 @@ Point pin_access_target(const Point& pin_location, const Rect& active, double es
     struct AccessCandidate {
         double distance{};
         Point target;
+        bool horizontal{};
+        int direction{};
     };
     const std::vector<AccessCandidate> candidates{
-        {left, Point{rect.x1 - escape, pin_location.y}},
-        {right, Point{rect.x2 + escape, pin_location.y}},
-        {bottom, Point{pin_location.x, rect.y1 - escape}},
-        {top, Point{pin_location.x, rect.y2 + escape}},
+        {left, Point{rect.x1 - escape, pin_location.y}, true, -1},
+        {right, Point{rect.x2 + escape, pin_location.y}, true, 1},
+        {bottom, Point{pin_location.x, rect.y1 - escape}, false, -1},
+        {top, Point{pin_location.x, rect.y2 + escape}, false, 1},
     };
     const auto legal = std::min_element(
         candidates.begin(),
@@ -92,24 +89,67 @@ Point pin_access_target(const Point& pin_location, const Rect& active, double es
             if (lhs_legal != rhs_legal) return lhs_legal;
             return lhs.distance < rhs.distance;
         });
-    return Point{std::max(0.0, legal->target.x), std::max(0.0, legal->target.y)};
+    if (legal == candidates.end() || legal->target.x < 0.0 || legal->target.y < 0.0) {
+        throw std::runtime_error("pin has no in-chip access direction");
+    }
+    return PinAccessTarget{legal->target, legal->horizontal, legal->direction};
 }
 
-// 为 pin 选择离 active region 最近的一侧，并放行一条到 active 外的短 access corridor。
-void add_pin_access(
-    ObstacleMap& obstacles,
+// 返回可能使用该 pin 的 net 所需的最大默认线宽，保证 access point 对所有关联 net 都在 keep-out 外。
+double maximum_width_for_pin(const Circuit& circuit, const std::string& pin_key) {
+    double result = 1.0;
+    for (const auto& [net_name, net] : circuit.nets) {
+        if (std::find(net.terminals.begin(), net.terminals.end(), pin_key) == net.terminals.end()) continue;
+        const auto width = circuit.constraints.wire_widths.find(net_name);
+        if (width != circuit.constraints.wire_widths.end()) {
+            result = std::max(result, width->second.min_width);
+        }
+    }
+    return result;
+}
+
+// 计算引脚 access point 必须跨出的 keep-out 距离，并为网格吸附保留一个步长余量。
+double pin_access_clearance(const Circuit& circuit, const std::string& pin_key, int layer, double grid_step) {
+    return active_route_spacing(circuit, index_to_layer(layer)) +
+           maximum_width_for_pin(circuit, pin_key) / 2.0 + grid_step;
+}
+
+// 将 access 网格点沿既定逃逸方向推至 active keep-out 外，避免网格吸附把端点拉回禁入区。
+GridPoint push_access_outside_keep_out(
+    const Grid& grid,
+    GridPoint access,
+    const PinAccessTarget& target,
+    const Rect& active,
+    double clearance) {
+    const Rect rect = normalize_rect(active);
+    const auto outside = [&](const Point& point) {
+        return target.horizontal
+                   ? (target.direction < 0 ? point.x <= rect.x1 - clearance : point.x >= rect.x2 + clearance)
+                   : (target.direction < 0 ? point.y <= rect.y1 - clearance : point.y >= rect.y2 + clearance);
+    };
+    while (grid.in_bounds(access) && !outside(grid.grid_to_point(access))) {
+        if (target.horizontal) access.ix += target.direction;
+        else access.iy += target.direction;
+    }
+    return access;
+}
+
+// 在给定网格上计算 pin 的正交 access corridor 及其实际 A* access 格点，不直接修改上下文状态。
+std::pair<PinAccessCorridor, GridPoint> make_pin_access_corridor(
+    const Circuit& circuit,
     const Grid& grid,
     const GlobalPin& pin,
     const Rect& active) {
     const Rect rect = normalize_rect(active);
-    GridPoint start = grid.snap_to_grid(pin.location, pin.layer);
-    for (int layer = 0; layer < grid.layer_count(); ++layer) {
-        obstacles.add_terminal_point(GridPoint{start.ix, start.iy, layer});
-    }
-
-    const double escape = 2.0 * grid.step();
-    const Point target = pin_access_target(pin.location, rect, escape);
-    add_access_line(obstacles, grid, start, grid.snap_to_grid(target, pin.layer));
+    const double clearance = pin_access_clearance(circuit, pin.key, pin.layer, grid.step());
+    const PinAccessTarget target = pin_access_target(pin.location, rect, clearance);
+    const GridPoint access = push_access_outside_keep_out(
+        grid, grid.snap_to_grid(target.point, pin.layer), target, rect, clearance);
+    const Point access_point = grid.grid_to_point(access);
+    const Point bend = target.horizontal
+                           ? Point{access_point.x, pin.location.y}
+                           : Point{pin.location.x, access_point.y};
+    return {PinAccessCorridor{pin.key, pin.layer, pin.location, bend, access_point}, access};
 }
 
 }  // namespace
@@ -199,8 +239,10 @@ RoutingContext::RoutingContext(
     for (const auto& [_, global_pin] : global_pins_) {
         const auto active_it = active_by_module.find(global_pin.module);
         if (active_it != active_by_module.end() && contains_point(active_it->second, global_pin.location)) {
+            const int layer = std::clamp(global_pin.layer, 0, config.layer_count - 1);
+            const double clearance = pin_access_clearance(circuit_, global_pin.key, layer, config.step);
             include_point(
-                pin_access_target(global_pin.location, active_it->second, 2.0 * config.step),
+                pin_access_target(global_pin.location, active_it->second, clearance).point,
                 min_x,
                 min_y,
                 max_x,
@@ -213,6 +255,9 @@ RoutingContext::RoutingContext(
         min_x = min_y = 0.0;
         max_x = max_y = 0.0;
     }
+    // 芯片左/下边界固定为 0；即使最左器件不贴边，也必须为边界侧 pin access 保留网格点。
+    min_x = 0.0;
+    min_y = 0.0;
 
     const GridConfig effective_config =
         effective_grid_config_for_layout(circuit_, config, max_x - min_x, max_y - min_y);
@@ -228,18 +273,46 @@ RoutingContext::RoutingContext(
     }
 
     // active region 只阻挡器件所在低层 M1；M2+ 允许从器件上方跨过，避免被建成贯穿各层的垂直障碍柱。
-    constexpr int kActiveRegionLayer = 0;  // M1
-    for (const auto& [owner, active] : active_regions) {
-        obstacles_.add_obstacle(Obstacle{active, kActiveRegionLayer, "active_region", owner});
+    // 第一阶段网格只用于求出离散化后的真实 access 格点；若其越界，则将该格点纳入边界后重建正式网格。
+    bool expand_for_access = false;
+    for (const auto& [_, global_pin] : global_pins_) {
+        const auto active_it = active_by_module.find(global_pin.module);
+        if (active_it == active_by_module.end() || !contains_point(active_it->second, global_pin.location)) continue;
+        const auto [corridor, access] = make_pin_access_corridor(circuit_, *grid_, global_pin, active_it->second);
+        if (grid_->in_bounds(access)) continue;
+        include_point(corridor.access_point, min_x, min_y, max_x, max_y, has_bounds);
+        expand_for_access = true;
+    }
+    if (expand_for_access) {
+        grid_ = std::make_unique<Grid>(effective_config, min_x, min_y, max_x, max_y);
     }
 
-    for (const auto& [key, global_pin] : global_pins_) {
-        (void)key;
+    for (const auto& [owner, active] : active_regions) {
+        for (int layer = 0; layer < grid_->layer_count(); ++layer) {
+            const std::string layer_name = index_to_layer(layer);
+            if (!active_region_blocked(circuit_, layer_name)) continue;
+            obstacles_.add_obstacle(Obstacle{
+                active, layer, "active_region", owner, ObstacleKind::ActiveRegion,
+                active_route_spacing(circuit_, layer_name), true});
+        }
+    }
+
+    for (auto& [key, global_pin] : global_pins_) {
         const auto active_it = active_by_module.find(global_pin.module);
         if (active_it != active_by_module.end() && contains_point(active_it->second, global_pin.location)) {
-            add_pin_access(obstacles_, *grid_, global_pin, active_it->second);
+            const auto [corridor, access] = make_pin_access_corridor(circuit_, *grid_, global_pin, active_it->second);
+            if (!grid_->in_bounds(access)) {
+                throw std::runtime_error(
+                    "pin access point exceeds rebuilt routing grid: " + key +
+                    " access=(" + std::to_string(corridor.access_point.x) + "," +
+                    std::to_string(corridor.access_point.y) + ") grid=[(" +
+                    std::to_string(grid_->min_x()) + "," + std::to_string(grid_->min_y()) + ")-(" +
+                    std::to_string(grid_->max_x()) + "," + std::to_string(grid_->max_y()) + ")]");
+            }
+            pin_access_corridors_[key] = corridor;
+            global_pin.location = corridor.access_point;
         } else {
-            obstacles_.add_terminal_point(grid_->snap_to_grid(global_pin.location, global_pin.layer));
+            // 非 active 内 pin 无需障碍物例外；A* 起终点也必须通过统一 keep-out 检查。
         }
     }
 }
@@ -264,6 +337,10 @@ const std::vector<Rect>& RoutingContext::active_regions() const {
 // 返回全局 pin 查询表。
 const std::unordered_map<std::string, GlobalPin>& RoutingContext::global_pins() const {
     return global_pins_;
+}
+
+const std::unordered_map<std::string, PinAccessCorridor>& RoutingContext::pin_access_corridors() const {
+    return pin_access_corridors_;
 }
 
 // 根据 WIRE_WIDTH 约束返回 net 默认线宽。

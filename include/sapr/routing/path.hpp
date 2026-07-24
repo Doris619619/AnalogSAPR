@@ -43,6 +43,8 @@ struct RouteCandidate {
     double flow_penalty{};
     double current_density_penalty{};
     double coupling_cost{};
+    // 标识候选的物理寻路来源，供 DP 与 routing_debug.json 区分同绑定下的不同走廊。
+    std::string route_variant{"base"};
 };
 
 }  // namespace sapr::routing

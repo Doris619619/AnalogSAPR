@@ -1,6 +1,8 @@
 ﻿// 鏂囦欢鑱岃矗锛氬疄鐜?placement 鍒?A*/DP 甯冪嚎璇勪及缁撴灉鐨勫皝瑁呮祦绋嬨€?
 #include "sapr/routing_evaluator.hpp"
 
+#include "sapr/constraints.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <iterator>
@@ -21,7 +23,6 @@ namespace sapr {
 namespace {
 
 constexpr double kDetailedFailurePenalty = 100000.0;
-constexpr double kDetailedSpacing = 1.0;
 constexpr double kDetailedCouplingPenaltyPerPair = 100.0;
 constexpr double kDetailedFlowPenalty = 50000.0;
 constexpr double kDetailedCurrentDensityPenalty = 50000.0;
@@ -439,9 +440,126 @@ void filter_multi_terminal_unreachable_lcp_candidates(
                 candidate.source_lcp_candidate_id,
                 candidate.target_lcp_candidate_id,
                 candidate.path.message,
+                {},
+                0.0,
+                0.0,
             });
         }
     }
+}
+
+// 按 A* 预检查结果删除无法覆盖全部关联线段的 LCP 物理候选，避免其进入正式 DP 状态空间。
+RoutingEvaluationRequest filter_lcp_locations_by_access_reachability(
+    const RoutingEvaluationRequest& request,
+    const std::vector<routing::RouteCandidate>& preflight_candidates,
+    std::vector<LcpCandidateFilterEvent>* filter_events) {
+    RoutingEvaluationRequest filtered = request;
+    const auto coverages = collect_lcp_candidate_coverage(request, preflight_candidates);
+    std::unordered_map<std::string, bool> reachable_by_location;
+    for (const auto& coverage : coverages) {
+        reachable_by_location[lcp_location_key(coverage.lcp_id, coverage.candidate_id)] =
+            coverage.covers_all_incident_segments;
+    }
+
+    for (auto& point : filtered.linking_points) {
+        const WireSegmentRef* representative_segment = point.segments.empty() ? nullptr : &point.segments.front();
+        std::vector<PhysicalLocationCandidate> reachable;
+        reachable.reserve(point.location_candidates.size());
+        for (const auto& location : point.location_candidates) {
+            const bool reachable_from_all_endpoints =
+                reachable_by_location[lcp_location_key(point.id, location.id)];
+            if (reachable_from_all_endpoints) {
+                reachable.push_back(location);
+                continue;
+            }
+            if (filter_events != nullptr) {
+                filter_events->push_back(LcpCandidateFilterEvent{
+                    representative_segment == nullptr ? std::string{} : representative_segment->net,
+                    representative_segment == nullptr ? std::string{} : representative_segment->from,
+                    representative_segment == nullptr ? std::string{} : representative_segment->to,
+                    representative_segment == nullptr ? std::string{} : representative_segment->id,
+                    location.id,
+                    {},
+                    {},
+                    "unreachable_pin_access: LCP location cannot reach all incident segments",
+                    point.id,
+                    location.x,
+                    location.y,
+                });
+            }
+        }
+        point.location_candidates = std::move(reachable);
+    }
+
+    for (auto& space : filtered.space_nodes) {
+        for (auto& point : space.linking_points) {
+            const auto source = std::find_if(
+                filtered.linking_points.begin(), filtered.linking_points.end(),
+                [&](const LinkingControlPoint& candidate) { return candidate.id == point.id; });
+            if (source != filtered.linking_points.end()) point.location_candidates = source->location_candidates;
+        }
+    }
+    return filtered;
+}
+
+// 表示同一端点绑定下由不同寻路策略得到的一条物理候选路径。
+struct PhysicalRouteVariant {
+    std::string id;
+    routing::GridPath path;
+};
+
+// 判断两条网格路径是否占用完全相同的物理网格点序列。
+bool same_grid_path(const routing::GridPath& lhs, const routing::GridPath& rhs) {
+    if (lhs.points.size() != rhs.points.size()) return false;
+    for (std::size_t index = 0; index < lhs.points.size(); ++index) {
+        const auto& left = lhs.points[index];
+        const auto& right = rhs.points[index];
+        if (left.ix != right.ix || left.iy != right.iy || left.layer != right.layer) return false;
+    }
+    return true;
+}
+
+// 为同一 LCP 物理绑定生成受限数量的不同走廊，避免只保留默认 A* 的单一路径。
+std::vector<PhysicalRouteVariant> generate_physical_route_variants(
+    const routing::RoutingContext& context,
+    const routing::GridPoint& start,
+    const routing::GridPoint& goal,
+    double wire_width) {
+    constexpr std::size_t kMaxVariants = 2;
+    routing::AStarConfig base_config;
+    base_config.wire_width = wire_width;
+    auto base_path = routing::find_astar_path(context.grid(), context.obstacles(), start, goal, base_config);
+    if (!base_path.success) return {{"base", std::move(base_path)}};
+
+    std::vector<PhysicalRouteVariant> variants;
+    variants.reserve(kMaxVariants);
+    variants.push_back({"base", std::move(base_path)});
+    const auto append_if_distinct = [&](std::string id, routing::GridPath path) {
+        if (!path.success || variants.size() >= kMaxVariants) return;
+        for (const auto& existing : variants) {
+            if (same_grid_path(existing.path, path)) return;
+        }
+        variants.push_back({std::move(id), std::move(path)});
+    };
+
+    const auto& base_points = variants.front().path.points;
+    const std::size_t pivot_index = base_points.size() / 2;
+    if (pivot_index > 0 && pivot_index + 1 < base_points.size()) {
+        const auto& pivot = base_points[pivot_index];
+        const auto pivot_xy = context.grid().grid_to_point(pivot);
+        auto detour_obstacles = context.obstacles();
+        detour_obstacles.add_obstacle(routing::Obstacle{
+            Rect{pivot_xy.x, pivot_xy.y, pivot_xy.x, pivot_xy.y},
+            pivot.layer,
+            "candidate_diversification",
+            "lcp_route_variant",
+            routing::ObstacleKind::Generic,
+        });
+        append_if_distinct(
+            "avoid_pivot_" + std::to_string(pivot_index),
+            routing::find_astar_path(context.grid(), detour_obstacles, start, goal, base_config));
+    }
+    return variants;
 }
 
 // 涓?LCP 鎷撴墤涓殑姣忔潯閫昏緫 segment 鐢熸垚 A* 鍊欓€夎矾寰勩€?
@@ -465,6 +583,7 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
 
     constexpr std::size_t kBasePairwiseCandidatesPerSegment = 32;
     constexpr std::size_t kMaxPairwiseCandidatesPerSegment = 96;
+    constexpr std::size_t kMaxAlternatePhysicalCandidatesPerSegment = 1;
     for (const auto& [_, segment] : segment_by_id) {
         std::vector<std::string> lcp_endpoints;
         if (lcp_by_id.contains(segment.from)) lcp_endpoints.push_back(segment.from);
@@ -523,6 +642,7 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
                 kMaxPairwiseCandidatesPerSegment);
         }
 
+        std::size_t alternate_physical_candidates = 0;
         for (const auto& binding : bindings) {
             const auto start = endpoint_grid_point(context, lcp_by_id, binding.by_lcp, segment, segment.from);
             const auto goal = endpoint_grid_point(context, lcp_by_id, binding.by_lcp, segment, segment.to);
@@ -550,12 +670,17 @@ std::vector<routing::RouteCandidate> generate_lcp_route_candidates(
                 candidates.push_back(std::move(candidate));
                 continue;
             }
-            routing::AStarConfig config;
-            config.wire_width = candidate.wire_width;
-            candidate.path = routing::find_astar_path(context.grid(), context.obstacles(), *start, *goal, config);
             for (const auto& [__, location] : binding.by_lcp) candidate.coupling_cost += location.penalty;
-            annotate_candidate(circuit, candidate, 50000.0, 50000.0, segment);
-            candidates.push_back(std::move(candidate));
+            const auto variants = generate_physical_route_variants(context, *start, *goal, candidate.wire_width);
+            for (std::size_t variant_index = 0; variant_index < variants.size(); ++variant_index) {
+                if (variant_index > 0 && alternate_physical_candidates >= kMaxAlternatePhysicalCandidatesPerSegment) break;
+                auto physical_candidate = candidate;
+                physical_candidate.route_variant = variants[variant_index].id;
+                physical_candidate.path = variants[variant_index].path;
+                annotate_candidate(circuit, physical_candidate, 50000.0, 50000.0, segment);
+                candidates.push_back(std::move(physical_candidate));
+                if (variant_index > 0) ++alternate_physical_candidates;
+            }
         }
     }
     if (raw_candidates != nullptr) *raw_candidates = candidates;
@@ -772,12 +897,7 @@ double detailed_width_for_candidate(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate) {
-    double width = candidate.wire_width > 0.0 ? candidate.wire_width : evaluation.context.default_width_for_net(candidate.net);
-    const auto constraint = circuit.constraints.wire_widths.find(candidate.net);
-    if (constraint == circuit.constraints.wire_widths.end()) return width;
-    width = std::max(width, constraint->second.min_width);
-    if (constraint->second.max_width > 0.0) width = std::min(width, constraint->second.max_width);
-    return width;
+    return routing::effective_candidate_width(circuit, evaluation.context, candidate);
 }
 
 // 杩斿洖鏃ц皟璇曟帴鍙ｄ娇鐢ㄧ殑绾垮锛屼笉渚濊禆 Circuit 浠ヤ繚鎸佸叕寮€鍑芥暟绛惧悕绋冲畾銆?
@@ -852,7 +972,8 @@ void append_path_segments(
 }
 
 // 灏嗕竴鏉?A* 缃戞牸璺緞鎸?detailed routing 绾垮瑙勫垯鍘嬬缉鎴?route segment銆?
-std::vector<RouteSegment> detailed_path_segments(
+// 将一条 A* 网格路径压缩成中间金属线段；不包含固定的 pin access corridor。
+std::vector<RouteSegment> astar_path_segments(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation,
     const routing::RouteCandidate& candidate) {
@@ -862,6 +983,80 @@ std::vector<RouteSegment> detailed_path_segments(
         candidate,
         width,
         evaluation.context.active_regions());
+}
+
+// 判断一条金属线段是否完整覆盖同层、正交的 A* 网格边，避免压缩后丢失路径连通性。
+bool route_segment_covers_grid_edge(
+    const RouteSegment& route,
+    const routing::Point& start,
+    const routing::Point& end,
+    int layer) {
+    if (routing::layer_to_index(route.layer) != layer) return false;
+    if (same_coord(start.y, end.y)) {
+        if (!same_coord(route.y1, route.y2) || !same_coord(route.y1, start.y)) return false;
+        const double edge_min = std::min(start.x, end.x);
+        const double edge_max = std::max(start.x, end.x);
+        const double route_min = std::min(route.x1, route.x2);
+        const double route_max = std::max(route.x1, route.x2);
+        return route_min <= edge_min + 1e-9 && route_max + 1e-9 >= edge_max;
+    }
+    if (same_coord(start.x, end.x)) {
+        if (!same_coord(route.x1, route.x2) || !same_coord(route.x1, start.x)) return false;
+        const double edge_min = std::min(start.y, end.y);
+        const double edge_max = std::max(start.y, end.y);
+        const double route_min = std::min(route.y1, route.y2);
+        const double route_max = std::max(route.y1, route.y2);
+        return route_min <= edge_min + 1e-9 && route_max + 1e-9 >= edge_max;
+    }
+    return false;
+}
+
+// 验证 A* 网格路径可无损转换为 routing.txt 金属段；跨层步由原路径的 via 表示，不要求平面金属段。
+bool astar_path_converts_to_segments(
+    const routing::Grid& grid,
+    const routing::RouteCandidate& candidate,
+    const std::vector<RouteSegment>& routes) {
+    if (!candidate.path.success || candidate.path.points.empty()) return false;
+    if (candidate.path.points.size() == 1) return true;
+    for (std::size_t index = 1; index < candidate.path.points.size(); ++index) {
+        const auto& start = candidate.path.points[index - 1];
+        const auto& end = candidate.path.points[index];
+        if (start.ix == end.ix && start.iy == end.iy && start.layer != end.layer) continue;
+        if (start.layer != end.layer || (start.ix != end.ix && start.iy != end.iy)) return false;
+        const auto start_xy = grid.grid_to_point(start);
+        const auto end_xy = grid.grid_to_point(end);
+        if (same_coord(start_xy.x, end_xy.x) && same_coord(start_xy.y, end_xy.y)) continue;
+        const bool covered = std::any_of(routes.begin(), routes.end(), [&](const RouteSegment& route) {
+            return route_segment_covers_grid_edge(route, start_xy, end_xy, start.layer);
+        });
+        if (!covered) return false;
+    }
+    return true;
+}
+
+// 生成 detailed 候选的完整物理金属，复用 DP 选择阶段使用的共享几何接口。
+std::vector<RouteSegment> detailed_path_segments(
+    const Circuit& circuit,
+    const RoutingEvaluation& evaluation,
+    const routing::RouteCandidate& candidate) {
+    return routing::candidate_to_physical_route_segments(
+        evaluation.context, candidate, detailed_width_for_candidate(circuit, evaluation, candidate));
+}
+
+// 在 bottom-up DP 前剔除无法表达为连续金属段的 A* 候选；不检查动态短路、耦合或 detailed 顺序。
+void reject_nonconvertible_astar_candidates(
+    const routing::RoutingContext& context,
+    std::vector<routing::RouteCandidate>& candidates) {
+    for (auto& candidate : candidates) {
+        if (!candidate.path.success) continue;
+        const double width =
+            candidate.wire_width > 0.0 ? candidate.wire_width : context.default_width_for_net(candidate.net);
+        const auto routes = routing::candidate_to_route_segments(
+            context.grid(), candidate, width, context.active_regions());
+        if (astar_path_converts_to_segments(context.grid(), candidate, routes)) continue;
+        candidate.path.success = false;
+        candidate.path.message = "A* path cannot be converted into connected route segments";
+    }
 }
 
 // 琛ㄧず detailed routing 鍚堟硶鍖栧悗瀹為檯閲囩敤鐨勫€欓€夊拰閲戝睘绾挎銆?
@@ -979,7 +1174,9 @@ bool same_grid_point(const routing::GridPoint& lhs, const routing::GridPoint& rh
 
 // 判断候选金属线段是否违反 active-region DRC；在 detailed 合法化前用于触发重布线。
 bool routes_violate_active_regions(
+    const Circuit& circuit,
     const RoutingEvaluationRequest& request,
+    const routing::RoutingContext& context,
     const std::vector<RouteSegment>& routes);
 
 std::optional<std::vector<RouteSegment>> legal_routes_without_short(
@@ -1084,22 +1281,6 @@ routing::PathMetrics route_metrics_from_candidate_path(
 }
 
 // 纭鍘嬬缉鍚庣殑閲戝睘绾挎浠嶈兘杩炴帴鍒板師濮嬭捣缁堢偣鍧愭爣锛涚鐐瑰眰宸敱 A* path 鐨?via move 琛ㄧず銆?
-bool route_segments_connect_path_endpoints(
-    const std::vector<RouteSegment>& routes,
-    const routing::Grid& grid,
-    const routing::GridPoint& start,
-    const routing::GridPoint& goal) {
-    if (routes.empty()) return false;
-    const auto start_xy = grid.grid_to_point(start);
-    const auto goal_xy = grid.grid_to_point(goal);
-    const auto& first = routes.front();
-    const auto& last = routes.back();
-    return same_coord(first.x1, start_xy.x) &&
-           same_coord(first.y1, start_xy.y) &&
-           same_coord(last.x2, goal_xy.x) &&
-           same_coord(last.y2, goal_xy.y);
-}
-
 // 鎸夎鏂?detailed routing 璇箟瀵瑰€欓€夊仛灞€閮ㄥ悎娉曞寲锛氭浛浠ｅ€欓€変紭鍏堬紝涓嶈繘琛屽厤璐规暣鏉℃崲灞傘€?
 // 灏嗗凡甯冨紓缃?detailed 閲戝睘娉ㄥ唽涓?A* 闅滅锛岄噸鏂板鎵句竴鏉＄湡瀹炲惈 via 鎴愭湰鐨勫悎娉曞寲璺緞銆?
 // 鐢熸垚鍊欓€夌殑 detailed 绾挎锛屽苟鎷掔粷鍘嬬缉鍚庢棤娉曡繛鎺ュ師濮嬭矾寰勮捣缁堢偣鐨勭粨鏋溿€?
@@ -1116,16 +1297,13 @@ std::optional<std::vector<RouteSegment>> legal_candidate_routes(
     }
     // LCP 与引脚落在同一网格点时，A* 正确返回单点路径；该连接无需写入金属线段。
     if (candidate.path.points.size() == 1) return std::vector<RouteSegment>{};
-    auto routes = detailed_path_segments(circuit, evaluation, candidate);
-    if (!route_segments_connect_path_endpoints(
-            routes,
-            evaluation.context.grid(),
-            candidate.path.points.front(),
-            candidate.path.points.back())) {
-        if (failure_reason != nullptr) *failure_reason = "candidate route segments do not connect endpoints";
+    const auto middle_routes = astar_path_segments(circuit, evaluation, candidate);
+    if (!astar_path_converts_to_segments(evaluation.context.grid(), candidate, middle_routes)) {
+        if (failure_reason != nullptr) *failure_reason = "A* path cannot be converted into connected route segments";
         return std::nullopt;
     }
-    if (routes_violate_active_regions(request, routes)) {
+    auto routes = detailed_path_segments(circuit, evaluation, candidate);
+    if (routes_violate_active_regions(circuit, request, evaluation.context, routes)) {
         if (failure_reason != nullptr) *failure_reason = "candidate route segments cross active region";
         return std::nullopt;
     }
@@ -1163,6 +1341,8 @@ std::optional<DetailedLegalization> reroute_candidate_avoiding_detailed_routes(
             routing::layer_to_index(route.layer),
             "detailed_route",
             route.net,
+            routing::ObstacleKind::RoutedMetal,
+            diff_net_route_spacing(circuit, route.layer),
         });
     }
 
@@ -1209,12 +1389,13 @@ std::optional<DetailedLegalization> reroute_candidate_avoiding_detailed_routes(
             routing::RouteCandidate rerouted = candidate;
             rerouted.path = std::move(path);
             rerouted.path.points = std::move(full_points);
-            auto routes = detailed_path_segments(circuit, evaluation, rerouted);
-            if (!route_segments_connect_path_endpoints(routes, evaluation.context.grid(), start, goal)) {
-                last_failure = "reroute route segments do not connect endpoints";
+            const auto middle_routes = astar_path_segments(circuit, evaluation, rerouted);
+            if (!astar_path_converts_to_segments(evaluation.context.grid(), rerouted, middle_routes)) {
+                last_failure = "reroute A* path cannot be converted into connected route segments";
                 continue;
             }
-            if (routes_violate_active_regions(request, routes)) {
+            auto routes = detailed_path_segments(circuit, evaluation, rerouted);
+            if (routes_violate_active_regions(circuit, request, evaluation.context, routes)) {
                 last_failure = "reroute route segments cross active region";
                 continue;
             }
@@ -1239,6 +1420,7 @@ std::optional<DetailedLegalization> reroute_candidate_avoiding_detailed_routes(
 }
 
 // 鎸夎鏂?detailed routing 璇箟瀵瑰€欓€夊仛灞€閮ㄥ悎娉曞寲锛氬悓 LCP 缁戝畾鍐呯殑鏇夸唬璺緞浼樺厛锛岀劧鍚?A* reroute銆?
+// 成功 DP 时只合法化其精确 traceback 路径，禁止 detailed 替换候选或重新寻路。
 DetailedLegalization legalize_detailed_candidate(
     const Circuit& circuit,
     const RoutingEvaluationRequest& request,
@@ -1246,20 +1428,22 @@ DetailedLegalization legalize_detailed_candidate(
     const routing::RouteCandidate& selected,
     const std::vector<RouteSegment>& occupied_routes) {
     std::vector<const routing::RouteCandidate*> attempts{&selected};
-    for (const auto& candidate : evaluation.candidates) {
-        if (!candidate.path.success || !same_logical_candidate_pair(candidate, selected)) continue;
-        // 鏈?LCP 鏃剁姝㈡崲鍒颁笉鍚?lcp_candidate_id锛岄伩鍏嶅悇鏀矾鎷嗘暎 DP 涓€鑷存€с€?
-        if (!same_lcp_location_binding(candidate, selected)) continue;
-        bool duplicate = false;
-        for (const auto* existing : attempts) {
-            if (existing == &candidate ||
-                (existing->segment_id == candidate.segment_id &&
-                 existing->lcp_candidate_id == candidate.lcp_candidate_id &&
-                 same_candidate_path(*existing, candidate))) {
-                duplicate = true;
+    const bool lock_dp_traceback = evaluation.bottom_up_dp.has_value() && evaluation.bottom_up_dp->success;
+    if (!lock_dp_traceback) {
+        for (const auto& candidate : evaluation.candidates) {
+            if (!candidate.path.success || !same_logical_candidate_pair(candidate, selected)) continue;
+            if (!same_lcp_location_binding(candidate, selected)) continue;
+            bool duplicate = false;
+            for (const auto* existing : attempts) {
+                if (existing == &candidate ||
+                    (existing->segment_id == candidate.segment_id &&
+                     existing->lcp_candidate_id == candidate.lcp_candidate_id &&
+                     same_candidate_path(*existing, candidate))) {
+                    duplicate = true;
+                }
             }
+            if (!duplicate) attempts.push_back(&candidate);
         }
-        if (!duplicate) attempts.push_back(&candidate);
     }
 
     std::optional<DetailedLegalization> best_legal;
@@ -1287,6 +1471,12 @@ DetailedLegalization legalize_detailed_candidate(
         }
     }
     if (best_legal.has_value()) return std::move(*best_legal);
+
+    if (lock_dp_traceback) {
+        failure_messages.push_back(
+            selected.net + ": exact DP traceback candidate cannot be legalized without replacement");
+        return DetailedLegalization{false, selected, {}, {}, false, false, std::move(failure_messages)};
+    }
 
     for (const auto* candidate : attempts) {
         std::string failure_reason;
@@ -1561,11 +1751,13 @@ void append_traced_detailed_path(
 
 // 鏍规嵁 detailed route 鐨勫疄闄呯嚎瀹芥洿鏂版墍灞?space node 鐨勯鐣欑┖闂撮渶姹傘€?
 void update_space_requirement(
+    const Circuit& circuit,
     DetailedRoutingResult& result,
     const std::string& space_node_id,
-    double route_width) {
+    double route_width,
+    const std::string& layer) {
     if (space_node_id.empty()) return;
-    const double required = route_width + kDetailedSpacing;
+    const double required = route_width + diff_net_route_spacing(circuit, layer);
     const auto found = result.required_space_by_node.find(space_node_id);
     if (found == result.required_space_by_node.end()) {
         result.required_space_by_node[space_node_id] = required;
@@ -1664,7 +1856,7 @@ std::optional<double> access_distance_from_pin_to_boundary(
 }
 
 // 鍙厑璁哥湡瀹?pin 闄勮繎鐨勪竴灏忔 active 閫冮€歌蛋绾匡紝绂佹鐢?pin 绔偣璞佸厤闀胯窛绂绘í绌?active銆?
-bool route_is_local_pin_access(
+[[maybe_unused]] bool route_is_local_pin_access(
     const RoutingEvaluationRequest& request,
     const RouteSegment& route,
     const Rect& active) {
@@ -1707,19 +1899,51 @@ bool route_is_local_pin_access(
     return false;
 }
 
+// 判断线段是否与某个同网引脚登记的正交逃逸走廊段完全一致。
+bool route_is_registered_pin_access(
+    const Circuit& circuit,
+    const routing::RoutingContext& context,
+    const RouteSegment& route) {
+    const auto route_matches = [&](const routing::Point& start, const routing::Point& end) {
+        const bool same_direction =
+            same_coord(route.x1, start.x) && same_coord(route.y1, start.y) &&
+            same_coord(route.x2, end.x) && same_coord(route.y2, end.y);
+        const bool reverse_direction =
+            same_coord(route.x1, end.x) && same_coord(route.y1, end.y) &&
+            same_coord(route.x2, start.x) && same_coord(route.y2, start.y);
+        return same_direction || reverse_direction;
+    };
+    for (const auto& [pin_key, access] : context.pin_access_corridors()) {
+        if (route.layer != routing::index_to_layer(access.layer)) continue;
+        const auto net = circuit.nets.find(route.net);
+        if (net == circuit.nets.end() ||
+            std::find(net->second.terminals.begin(), net->second.terminals.end(), pin_key) == net->second.terminals.end()) {
+            continue;
+        }
+        if (route_matches(access.pin_location, access.bend_point) ||
+            route_matches(access.bend_point, access.access_point)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 鏀堕泦 detailed route 绌胯秺 active region 鐨勫熀纭€ DRC 杩濆弽绾挎绱㈠紩銆?
 // 浠呮鏌?M1锛歛ctive region 瀵瑰簲鍣ㄤ欢浣庡眰鍗犵敤锛岄珮灞傞噾灞炶法杩囦笉绠?active crossing銆?
 std::vector<std::size_t> collect_active_region_crossings(
+    const Circuit& circuit,
     const RoutingEvaluationRequest& request,
+    const routing::RoutingContext& context,
     const std::vector<RouteSegment>& routes) {
     std::vector<std::size_t> violations;
     for (std::size_t index = 0; index < routes.size(); ++index) {
         const auto& route = routes[index];
-        if (route.layer != "M1") continue;
+        if (!active_region_blocked(circuit, route.layer)) continue;
         const Rect metal = route_to_rect(route);
         for (const auto& active : request.active_region_blockers) {
-            if (!routing::intersects(metal, active)) continue;
-            if (route_is_local_pin_access(request, route, active)) continue;
+            const Rect keep_out = routing::expand_rect(active, active_route_spacing(circuit, route.layer));
+            if (!routing::intersects(metal, keep_out)) continue;
+            if (route_is_registered_pin_access(circuit, context, route)) continue;
             violations.push_back(index);
             break;
         }
@@ -1742,6 +1966,7 @@ void append_detailed_transition_outcome(
         candidate.lcp_id,
         candidate.source_lcp_id,
         candidate.target_lcp_id,
+        candidate.route_variant,
         selected_by_dp,
         true,
         legalized,
@@ -1753,9 +1978,11 @@ void append_detailed_transition_outcome(
 
 // 判断整组候选金属是否包含 active-region DRC，供 detailed 候选筛选和 A* 重布线共用。
 bool routes_violate_active_regions(
+    const Circuit& circuit,
     const RoutingEvaluationRequest& request,
+    const routing::RoutingContext& context,
     const std::vector<RouteSegment>& routes) {
-    return !collect_active_region_crossings(request, routes).empty();
+    return !collect_active_region_crossings(circuit, request, context, routes).empty();
 }
 
 // 鍒ゆ柇涓ゆ潯鍚屽眰寮傜綉绾挎鏄惁瀛樺湪杩戣窛绂诲钩琛岃€﹀悎椋庨櫓銆?
@@ -1790,11 +2017,12 @@ bool near_parallel_coupling(const RouteSegment& lhs, const RouteSegment& rhs, do
 }
 
 // 鏀堕泦 detailed route 鐨勫悓灞傚钩琛岃€﹀悎绾挎瀵广€?
-[[maybe_unused]] std::vector<std::pair<std::size_t, std::size_t>> collect_detailed_coupling_pairs(const std::vector<RouteSegment>& routes) {
+[[maybe_unused]] std::vector<std::pair<std::size_t, std::size_t>> collect_detailed_coupling_pairs(
+    const Circuit& circuit, const std::vector<RouteSegment>& routes) {
     std::vector<std::pair<std::size_t, std::size_t>> pairs;
     for (std::size_t i = 0; i < routes.size(); ++i) {
         for (std::size_t j = i + 1; j < routes.size(); ++j) {
-            if (near_parallel_coupling(routes[i], routes[j], kDetailedSpacing)) pairs.push_back({i, j});
+            if (near_parallel_coupling(routes[i], routes[j], diff_net_route_spacing(circuit, routes[i].layer))) pairs.push_back({i, j});
         }
     }
     return pairs;
@@ -1828,12 +2056,14 @@ double parallel_overlap_length(const RouteSegment& lhs, const RouteSegment& rhs,
 }
 
 // 鏀堕泦 detailed route 鐨勫悓灞傚钩琛岃€﹀悎绾挎瀵癸紝骞惰褰曞疄闄呴噸鍙犻暱搴︺€?
-std::vector<CouplingFinding> collect_detailed_coupling_findings(const std::vector<RouteSegment>& routes) {
+std::vector<CouplingFinding> collect_detailed_coupling_findings(
+    const Circuit& circuit, const std::vector<RouteSegment>& routes) {
     std::vector<CouplingFinding> findings;
     for (std::size_t i = 0; i < routes.size(); ++i) {
         for (std::size_t j = i + 1; j < routes.size(); ++j) {
-            const double overlap = parallel_overlap_length(routes[i], routes[j], kDetailedSpacing);
-            if (overlap > 0.0) findings.push_back({i, j, overlap, kDetailedSpacing});
+            const double spacing = diff_net_route_spacing(circuit, routes[i].layer);
+            const double overlap = parallel_overlap_length(routes[i], routes[j], spacing);
+            if (overlap > 0.0) findings.push_back({i, j, overlap, spacing});
         }
     }
     return findings;
@@ -1881,6 +2111,24 @@ int detailed_net_rank(const Circuit& circuit, const std::string& net) {
     return 3;
 }
 
+// 收集同层异网金属未满足 PDK 最小边缘间距的线段对。
+std::vector<std::pair<std::size_t, std::size_t>> collect_diff_net_spacing_violations(
+    const Circuit& circuit,
+    const std::vector<RouteSegment>& routes) {
+    std::vector<std::pair<std::size_t, std::size_t>> findings;
+    for (std::size_t left = 0; left < routes.size(); ++left) {
+        for (std::size_t right = left + 1; right < routes.size(); ++right) {
+            if (routes[left].net == routes[right].net || routes[left].layer != routes[right].layer) continue;
+            const double spacing = diff_net_route_spacing(circuit, routes[left].layer);
+            if (spacing <= 0.0) continue;
+            if (routing::intersects(routing::expand_rect(route_to_rect(routes[left]), spacing), route_to_rect(routes[right]))) {
+                findings.push_back({left, right});
+            }
+        }
+    }
+    return findings;
+}
+
 std::vector<const routing::NetRouteChoice*> ordered_detailed_routes(
     const Circuit& circuit,
     const RoutingEvaluation& evaluation) {
@@ -1897,18 +2145,11 @@ std::vector<routing::RouteCandidate> selected_candidates_for_detailed_routing(
     const RoutingEvaluation& evaluation) {
     if (evaluation.bottom_up_dp.has_value()) {
         if (evaluation.bottom_up_dp->success) {
-            std::vector<routing::RouteCandidate> selected = evaluation.bottom_up_dp->traceback_candidates;
-            std::unordered_set<std::string> covered_nets;
-            for (const auto& candidate : selected) covered_nets.insert(candidate.net);
-            for (const auto& net_route : evaluation.global_routing.net_routes) {
-                if (!net_route.success || covered_nets.contains(net_route.net)) continue;
-                selected.insert(
-                    selected.end(),
-                    net_route.selected_candidates.begin(),
-                    net_route.selected_candidates.end());
-            }
-            return selected;
+            // 成功 DP 的 traceback 已覆盖 LCP 与 direct net；禁止由 global routing 补入未参与 DP 的路径。
+            return evaluation.bottom_up_dp->traceback_candidates;
         }
+        // 统一 DP 不可行时不能回退到未纳入 state 的 global 路径，否则会重新引入阶段不一致。
+        return {};
     }
     std::vector<routing::RouteCandidate> candidates;
     for (const auto& net_route : evaluation.global_routing.net_routes) {
@@ -2134,6 +2375,7 @@ RoutingEvaluation evaluate_routing(
     for (auto& candidate : candidates) {
         annotate_candidate(circuit, candidate, 50000.0, 50000.0);
     }
+    reject_nonconvertible_astar_candidates(context, candidates);
     return make_evaluation(std::move(context), std::move(candidates), circuit);
 }
 
@@ -2154,7 +2396,12 @@ RoutingEvaluation evaluate_routing(
     std::vector<routing::RouteCandidate> debug_candidates = direct_candidates;
     std::vector<LcpCandidateFilterEvent> lcp_candidate_filter_events;
     const auto lcp_nets = nets_with_lcp_topology(request);
+    RoutingEvaluationRequest routable_request = request;
     if (!lcp_nets.empty()) {
+        // 先使用完整 LCP 候选执行只读 A* 覆盖预检查，再把不可从全部关联端点到达的位置排除。
+        const auto preflight_candidates = generate_lcp_route_candidates(context, request, circuit);
+        routable_request = filter_lcp_locations_by_access_reachability(
+            request, preflight_candidates, &lcp_candidate_filter_events);
         candidates.erase(
             std::remove_if(
                 candidates.begin(),
@@ -2170,7 +2417,7 @@ RoutingEvaluation evaluate_routing(
         std::vector<routing::RouteCandidate> raw_lcp_candidates;
         auto lcp_candidates = generate_lcp_route_candidates(
             context,
-            request,
+            routable_request,
             circuit,
             &raw_lcp_candidates,
             &lcp_candidate_filter_events);
@@ -2183,7 +2430,10 @@ RoutingEvaluation evaluate_routing(
             std::make_move_iterator(raw_lcp_candidates.begin()),
             std::make_move_iterator(raw_lcp_candidates.end()));
     }
-    if (request.net_topologies.empty() || !request.tree.root.has_value()) {
+    // 仅过滤无法保真输出的 A* 几何候选，保持论文规定的动态 detailed routing 在 DP traceback 之后执行。
+    reject_nonconvertible_astar_candidates(context, candidates);
+    reject_nonconvertible_astar_candidates(context, debug_candidates);
+    if (routable_request.net_topologies.empty() || !routable_request.tree.root.has_value()) {
         return make_evaluation(
             std::move(context),
             std::move(candidates),
@@ -2194,7 +2444,7 @@ RoutingEvaluation evaluate_routing(
             std::move(lcp_candidate_filter_events));
     }
     auto bottom_up_dp = routing::run_bottom_up_routing_dp(
-        circuit, request, context, candidates, request.dp_beam_width);
+        circuit, routable_request, context, candidates, routable_request.dp_beam_width);
     if (!bottom_up_dp.success) {
         if (request.strict_lcp_dp && !lcp_nets.empty()) {
             return make_evaluation(
@@ -2255,7 +2505,7 @@ DetailedRoutingResult run_detailed_routing(
             has_dp_traceback);
     const int dp_state_id = has_dp_traceback ? evaluation.bottom_up_dp->best_state.id : -1;
     const std::string tree_node = has_dp_traceback ? evaluation.bottom_up_dp->best_state.tree_node : std::string{};
-    // 判断 detailed 候选是否来自 DP traceback；未覆盖 net 的全局候选会被标记为非 DP 选择。
+    // 仅当物理走廊和网格路径均一致时，候选才可标记为 DP traceback 的原始物理路径。
     const auto selected_by_dp = [&](const routing::RouteCandidate& candidate) {
         if (!has_dp_traceback) return false;
         return std::any_of(
@@ -2268,7 +2518,9 @@ DetailedRoutingResult run_detailed_routing(
                        traceback.segment_id == candidate.segment_id &&
                        traceback.lcp_candidate_id == candidate.lcp_candidate_id &&
                        traceback.source_lcp_candidate_id == candidate.source_lcp_candidate_id &&
-                       traceback.target_lcp_candidate_id == candidate.target_lcp_candidate_id;
+                       traceback.target_lcp_candidate_id == candidate.target_lcp_candidate_id &&
+                       traceback.route_variant == candidate.route_variant &&
+                       same_candidate_path(traceback, candidate);
             });
     };
     if (evaluation.bottom_up_dp.has_value() && !evaluation.bottom_up_dp->success) {
@@ -2325,9 +2577,13 @@ DetailedRoutingResult run_detailed_routing(
         for (const auto& space_node_id : space_node_ids) {
             routed_space_nodes.insert(space_node_id);
             update_space_requirement(
+                circuit,
                 result,
                 space_node_id,
-                detailed_width_for_candidate(circuit, evaluation, actual_candidate));
+                detailed_width_for_candidate(circuit, evaluation, actual_candidate),
+                actual_candidate.path.points.empty()
+                    ? "M1"
+                    : routing::index_to_layer(actual_candidate.path.points.front().layer));
         }
         for (const auto& candidate_lcp_id : lcp_ids_for_candidate(topology_index, actual_candidate)) {
             if (topology_index.lcp_without_location.contains(candidate_lcp_id)) {
@@ -2366,7 +2622,12 @@ DetailedRoutingResult run_detailed_routing(
 
         if (is_lcp_net) {
             auto net_legal = legalize_lcp_net(
-                circuit, request, evaluation, group, result.routes, request.allow_lcp_location_negotiation);
+                circuit,
+                request,
+                evaluation,
+                group,
+                result.routes,
+                request.allow_lcp_location_negotiation && !has_dp_traceback);
             if (!net_legal.success) {
                 for (const auto& failure : net_legal.failure_messages) {
                     trace.warnings.push_back(failure);
@@ -2428,9 +2689,10 @@ DetailedRoutingResult run_detailed_routing(
     }
     // 在最终全局 DRC 前保留已成功 detailed legalization 的路线，避免 routes 清空后丢失诊断证据。
     result.raw_routes = result.routes;
-    const auto drc_routes = collect_active_region_crossings(request, result.routes);
+    const auto drc_routes = collect_active_region_crossings(circuit, request, evaluation.context, result.routes);
     const auto short_pairs = collect_same_layer_shorts(result.routes);
-    result.design_rule_violations = static_cast<int>(drc_routes.size() + short_pairs.size());
+    const auto spacing_pairs = collect_diff_net_spacing_violations(circuit, result.routes);
+    result.design_rule_violations = static_cast<int>(drc_routes.size() + short_pairs.size() + spacing_pairs.size());
     for (const auto route_index : drc_routes) {
         const auto& route = result.routes[route_index];
         const std::string message =
@@ -2449,8 +2711,16 @@ DetailedRoutingResult run_detailed_routing(
         result.report.design_rule_segments.push_back(message);
         result.report.warnings.push_back("same-layer short DRC " + message);
     }
+    for (const auto& [left_index, right_index] : spacing_pairs) {
+        const auto& left = result.routes[left_index];
+        const auto& right = result.routes[right_index];
+        const std::string message = left.net + "<->" + right.net + ":" + left.layer + ":" +
+                                    std::to_string(left_index) + "," + std::to_string(right_index);
+        result.report.design_rule_segments.push_back(message);
+        result.report.warnings.push_back("diff-net spacing DRC " + message);
+    }
     result.design_rule_penalty = 100000.0 * static_cast<double>(result.design_rule_violations);
-    const auto coupling_pairs = collect_detailed_coupling_findings(result.routes);
+    const auto coupling_pairs = collect_detailed_coupling_findings(circuit, result.routes);
     for (const auto& coupling : coupling_pairs) {
         result.coupling_penalty +=
             kDetailedCouplingPenaltyPerPair * coupling.overlap_length / std::max(coupling.spacing, 1e-9);
@@ -2462,7 +2732,8 @@ DetailedRoutingResult run_detailed_routing(
             " overlap=" + std::to_string(coupling.overlap_length));
     }
     for (const auto& space_node_id : routed_space_nodes) {
-        result.coupling_space_by_node[space_node_id] = result.coupling_penalty > 0.0 ? kDetailedSpacing : 0.0;
+        result.coupling_space_by_node[space_node_id] =
+            result.coupling_penalty > 0.0 ? diff_net_route_spacing(circuit, "M1") : 0.0;
     }
     if (result.design_rule_violations > 0) {
         result.routing_failure_penalty += kDetailedFailurePenalty * static_cast<double>(result.design_rule_violations);

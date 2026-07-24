@@ -94,11 +94,20 @@ struct WireWidthConstraint {
 };
 
 // 姹囨€荤數璺殑鍏ㄩ儴绾︽潫銆?
+// 表示从输入 PDK 文件读取的间距和 active 穿越规则。
+struct SpacingRules {
+    double device_spacing{5.0};
+    std::unordered_map<std::string, double> active_route_spacing;
+    std::unordered_map<std::string, double> diff_net_route_spacing;
+    std::unordered_map<std::string, bool> active_region_block;
+};
+
 struct Constraints {
     std::vector<SymmetryPair> symmetry_pairs;
     std::vector<SymmetrySelf> symmetry_selfs;
     std::unordered_map<std::string, WireWidthConstraint> wire_widths;
     std::vector<FlowConstraint> flows;
+    SpacingRules spacing_rules;
 };
 
 // 琛ㄧず瀹屾暣鐨勭畻娉曡緭鍏ワ紝骞朵繚瀛樼ǔ瀹氱殑鍘熷椤哄簭銆?
@@ -251,7 +260,6 @@ struct Solution {
 
 // 閰嶇疆姹傝В鍣ㄧ殑纭畾鎬у弬鏁板拰璁烘枃浠ｄ环鍑芥暟鏉冮噸銆?
 struct SolverConfig {
-    double spacing{5.0};
     double row_width{40.0};
     unsigned int seed{1};
     int sa_iterations{250};
@@ -533,6 +541,8 @@ struct DetailedTransitionOutcome {
     std::string lcp_id;
     std::string source_lcp_id;
     std::string target_lcp_id;
+    // 保存 detailed 实际落地的物理走廊标识，验证其是否与 DP traceback 的精确路径一致。
+    std::string route_variant;
     bool selected_by_dp{};
     bool detailed_attempted{};
     bool detailed_legalized{};
