@@ -40,6 +40,17 @@ VIA_COLOR = "#212121"
 # 最终选用 LCP 的标记颜色（与 btree 图中 LCP 点风格接近）。
 LCP_FACE_COLOR = "#EDE7F6"
 LCP_EDGE_COLOR = "#4527A0"
+# active region（布线禁区）填充/描边，便于对照 A* 障碍。
+ACTIVE_REGION_FACE = "#FFCC80"
+ACTIVE_REGION_EDGE = "#EF6C00"
+ACTIVE_REGION_ALPHA = 0.45
+# 与 C++ GridConfig / pin_access_target 默认一致。
+ROUTING_GRID_MARGIN_UM = 5.0
+ROUTING_GRID_STEP_UM = 1.0
+ROUTING_GRID_EDGE = "#546E7A"
+ROUTING_GRID_LINEWIDTH = 1.6
+# routing_context.cpp：escape = 2 * grid.step()
+ROUTING_PIN_ACCESS_ESCAPE_UM = 2.0 * ROUTING_GRID_STEP_UM
 
 # MOS 常用 pin 的优先方位：上/右/下/左。
 PIN_CARDINAL_PREFERENCE = {
@@ -341,6 +352,15 @@ def transform_point(x: float, y: float, module: Module, placement: Placement) ->
 # 返回器件外接框四角的全局坐标，用于绘制器件多边形。
 def module_corners(module: Module, placement: Placement) -> list[tuple[float, float]]:
     local = [(0.0, 0.0), (module.width, 0.0), (module.width, module.height), (0.0, module.height)]
+    return [transform_point(x, y, module, placement) for x, y in local]
+
+
+# 返回 active region 四角的全局坐标；面积过小则返回空（跳过绘制）。
+def active_region_corners(module: Module, placement: Placement) -> list[tuple[float, float]]:
+    x1, y1, x2, y2 = module.active
+    if abs(x2 - x1) < 1e-9 or abs(y2 - y1) < 1e-9:
+        return []
+    local = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
     return [transform_point(x, y, module, placement) for x, y in local]
 
 
@@ -722,11 +742,96 @@ def draw_module_pins(
             )
 
 
+# 模仿 C++ pin_access_target：选距 pin 最近且尽量非负的 active 外逃逸点。
+def pin_access_target_point(
+    pin_x: float,
+    pin_y: float,
+    active_global: tuple[float, float, float, float],
+    escape: float = ROUTING_PIN_ACCESS_ESCAPE_UM,
+) -> tuple[float, float]:
+    x1, y1, x2, y2 = active_global
+    ax1, ax2 = (x1, x2) if x1 <= x2 else (x2, x1)
+    ay1, ay2 = (y1, y2) if y1 <= y2 else (y2, y1)
+    candidates = [
+        (abs(pin_x - ax1), (ax1 - escape, pin_y)),
+        (abs(ax2 - pin_x), (ax2 + escape, pin_y)),
+        (abs(pin_y - ay1), (pin_x, ay1 - escape)),
+        (abs(ay2 - pin_y), (pin_x, ay2 + escape)),
+    ]
+
+    def sort_key(item: tuple[float, tuple[float, float]]) -> tuple[int, float]:
+        distance, (tx, ty) = item
+        legal = tx >= 0.0 and ty >= 0.0
+        return (0 if legal else 1, distance)
+
+    _distance, (tx, ty) = min(candidates, key=sort_key)
+    return max(0.0, tx), max(0.0, ty)
+
+
+# 按 C++ Grid 构造规则估算 A* 合法布线大矩形。
+# 包围盒含 module BB、active、pin、pin_access 逃逸点、LCP；右/上 +margin，左/下不低于 0。
+def compute_routing_grid_boundary(
+    placed_modules: list[tuple[Module, Placement, list[tuple[float, float]]]],
+    pin_by_module: dict[str, list[Pin]] | None = None,
+    lcps: list[SelectedLcp] | None = None,
+    margin_um: float = ROUTING_GRID_MARGIN_UM,
+    step_um: float = ROUTING_GRID_STEP_UM,
+) -> tuple[float, float, float, float] | None:
+    xs: list[float] = []
+    ys: list[float] = []
+    for module, placement, corners in placed_modules:
+        xs.extend(x for x, _y in corners)
+        ys.extend(y for _x, y in corners)
+        active_pts = active_region_corners(module, placement)
+        for x, y in active_pts:
+            xs.append(x)
+            ys.append(y)
+        if not active_pts or not pin_by_module:
+            continue
+        ax = [x for x, _y in active_pts]
+        ay = [y for _x, y in active_pts]
+        active_global = (min(ax), min(ay), max(ax), max(ay))
+        for pin in pin_by_module.get(module.module_id, []):
+            gx, gy = transform_point(pin.x, pin.y, module, placement)
+            xs.append(gx)
+            ys.append(gy)
+            # 与 routing_context：pin 在 active 内时，access 逃逸点并入网格包围盒。
+            if (
+                active_global[0] - 1e-9 <= gx <= active_global[2] + 1e-9
+                and active_global[1] - 1e-9 <= gy <= active_global[3] + 1e-9
+            ):
+                access_x, access_y = pin_access_target_point(gx, gy, active_global)
+                xs.append(access_x)
+                ys.append(access_y)
+    for lcp in lcps or []:
+        xs.append(lcp.x)
+        ys.append(lcp.y)
+    if not xs:
+        return None
+    content_min_x = min(xs)
+    content_min_y = min(ys)
+    content_max_x = max(xs)
+    content_max_y = max(ys)
+    # 与 grid.cpp 一致：左/下夹到 >=0，右/上只加 margin，再按 step 取整。
+    low_x = max(0.0, min(content_min_x, content_max_x))
+    low_y = max(0.0, min(content_min_y, content_max_y))
+    high_x = max(content_min_x, content_max_x) + margin_um
+    high_y = max(content_min_y, content_max_y) + margin_um
+    if step_um <= 0.0:
+        return low_x, low_y, high_x, high_y
+    x1 = math.floor(low_x / step_um) * step_um
+    y1 = math.floor(low_y / step_um) * step_um
+    x2 = math.ceil(high_x / step_um) * step_um
+    y2 = math.ceil(high_y / step_um) * step_um
+    return x1, y1, x2, y2
+
+
 # 计算合图/分图共用的坐标范围。
 def compute_bounds(
     placed_modules: list[tuple[Module, Placement, list[tuple[float, float]]]],
     routes: list[Route],
     lcps: list[SelectedLcp] | None = None,
+    pin_by_module: dict[str, list[Pin]] | None = None,
 ) -> tuple[tuple[float, float], tuple[float, float]]:
     all_x: list[float] = []
     all_y: list[float] = []
@@ -740,6 +845,11 @@ def compute_bounds(
     for lcp in lcps or []:
         all_x.append(lcp.x)
         all_y.append(lcp.y)
+    boundary = compute_routing_grid_boundary(placed_modules, pin_by_module, lcps)
+    if boundary is not None:
+        x1, y1, x2, y2 = boundary
+        all_x.extend([x1, x2])
+        all_y.extend([y1, y2])
     if not all_x:
         all_x = [0.0, 100.0]
         all_y = [0.0, 100.0]
@@ -835,6 +945,23 @@ def draw_layout_axes(
     ax.set_ylim(ylim)
     ax.grid(True, color="#EEEEEE", linewidth=0.5, alpha=0.7)
 
+    routing_boundary = compute_routing_grid_boundary(placed_modules, pin_by_module, lcps)
+    if routing_boundary is not None:
+        bx1, by1, bx2, by2 = routing_boundary
+        # 虚线大矩形：A* 可走区域近似（placement 包围盒 + margin）。
+        ax.add_patch(
+            mpatches.Rectangle(
+                (bx1, by1),
+                bx2 - bx1,
+                by2 - by1,
+                fill=False,
+                edgecolor=ROUTING_GRID_EDGE,
+                linewidth=ROUTING_GRID_LINEWIDTH,
+                linestyle=(0, (6, 4)),
+                zorder=2,
+            )
+        )
+
     sorted_routes = sorted(routes, key=lambda route: -max(abs(route.x2 - route.x1), abs(route.y2 - route.y1)))
     for route in sorted_routes[:5000]:
         # 合图与分图层统一按 net 上色，避免同层异网糊成一种颜色。
@@ -893,6 +1020,21 @@ def draw_layout_axes(
             zorder=3,
         )
         ax.add_patch(patch)
+        active_corners = active_region_corners(module, placement)
+        if active_corners:
+            # 叠在 BB 之上、走线之下，对照布线是否误穿 active。
+            ax.add_patch(
+                mpatches.Polygon(
+                    active_corners,
+                    closed=True,
+                    facecolor=ACTIVE_REGION_FACE,
+                    edgecolor=ACTIVE_REGION_EDGE,
+                    linewidth=1.0,
+                    alpha=ACTIVE_REGION_ALPHA,
+                    hatch="////",
+                    zorder=4,
+                )
+            )
         draw_module_label(ax, module, corners)
         if show_pins:
             draw_module_pins(
@@ -916,6 +1058,25 @@ def draw_layout_axes(
     for device_type in sorted({module.device_type for module, _placement, _corners in placed_modules}):
         color = DEV_COLORS.get(device_type, DEV_COLORS["unknown"])
         legend.append(mpatches.Patch(facecolor=color, edgecolor=color, alpha=0.35, label=device_type))
+    legend.append(
+        mpatches.Patch(
+            facecolor=ACTIVE_REGION_FACE,
+            edgecolor=ACTIVE_REGION_EDGE,
+            alpha=ACTIVE_REGION_ALPHA,
+            hatch="////",
+            label="active region (no route)",
+        )
+    )
+    if routing_boundary is not None:
+        legend.append(
+            mpatches.Patch(
+                facecolor="none",
+                edgecolor=ROUTING_GRID_EDGE,
+                linewidth=ROUTING_GRID_LINEWIDTH,
+                linestyle=(0, (6, 4)),
+                label="routing grid boundary",
+            )
+        )
     # 图例始终按本图出现的 net 列出颜色。
     nets_in_view = list(dict.fromkeys(route.net for route in routes))
     for net in nets_in_view:
@@ -1026,7 +1187,7 @@ def render_layout(
         corners = module_corners(module, placement)
         placed_modules.append((module, placement, corners))
 
-    xlim, ylim = compute_bounds(placed_modules, routes, lcps)
+    xlim, ylim = compute_bounds(placed_modules, routes, lcps, pin_by_module)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 合图：凡在任意层接到的 pin 都标红；分图层：只标本层端点附近的 pin。

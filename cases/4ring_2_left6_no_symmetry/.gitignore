@@ -1,7 +1,1 @@
-# 忽略各实验输出目录下的 btree 迭代大文件夹
-btree/
-
-# 本地 SA / 调试运行产物，不纳入版本库
-fix_sam/
-test_by_myself*/
-output_*/
+# 运行产物由仓库根目录 .gitignore 统一忽略（只保留 input/）

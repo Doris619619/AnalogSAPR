@@ -11,23 +11,17 @@ Makefile
 *.obj
 *.a
 *.lib
-output/cpp_stage*/
 
-# 根目录 output/ 下默认 run 的即时产物（保留子目录里已入库的实验）
-/output/analysis/
-/output/btree/
-/output/*.png
-/output/*.txt
-/output/*.json
-/output/*.xlsx
+# 根目录默认/历史运行产物
+/output/
+/tmp/
 
-# 各 case 下本地跑出来的 SA / 调试结果
-cases/*/test_by_myself*/
-cases/*/fix_sam/
-cases/*/output_*/
-
-# 临时诊断运行产物
-tmp/
+# 各 case：只保留 input/ 与 case 级 .gitignore，其余运行产物全部忽略
+cases/**
+!cases/*/
+!cases/*/.gitignore
+!cases/*/input/
+!cases/*/input/**
 
 # Python 缓存
 tools/__pycache__/
@@ -39,4 +33,3 @@ tools/__pycache__/
 .vscode/
 *.code-workspace
 *.user
-
