@@ -1,8 +1,0 @@
-{
-  "sa_iterations": 2,
-  "recorded": 2,
-  "iterations": [
-    {"index": 1, "total": 2, "move": "module-rotate", "accept": true, "next_cost": 2.3963235294117649, "current_cost": 2.3963235294117649, "best_cost": 2.3963235294117649, "temperature": 5},
-    {"index": 2, "total": 2, "move": "lcp-split", "accept": true, "next_cost": 2.3963235294117649, "current_cost": 2.3963235294117649, "best_cost": 2.3963235294117649, "temperature": 4.7999999999999998}
-  ]
-}

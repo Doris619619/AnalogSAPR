@@ -1,4 +1,0 @@
-# module       x           y           angle  orient
-
-MP8            20.00      10.00      0      R0
-MP15           26.00      10.00      0      R0
