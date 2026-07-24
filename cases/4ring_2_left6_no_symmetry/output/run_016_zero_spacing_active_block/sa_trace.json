@@ -1,0 +1,30 @@
+{
+  "sa_iterations": 30,
+  "recorded": 22,
+  "terminated_early": true,
+  "termination_reason": "best-cost improvement stayed within 0.000001 for 20 consecutive iterations",
+  "iterations": [
+    {"index": 1, "total": 30, "move": "module-swap", "changed": true, "accept": true, "next_cost": 5.312084208685163, "current_cost": 5.312084208685163, "best_cost": 5.312084208685163, "temperature": 5},
+    {"index": 2, "total": 30, "move": "module-rotate", "changed": true, "accept": true, "next_cost": 5.1074095324917437, "current_cost": 5.1074095324917437, "best_cost": 5.1074095324917437, "temperature": 4.7999999999999998},
+    {"index": 3, "total": 30, "move": "module-rotate", "changed": true, "accept": true, "next_cost": 5.1948664478672839, "current_cost": 5.1948664478672839, "best_cost": 5.1074095324917437, "temperature": 4.6079999999999997},
+    {"index": 4, "total": 30, "move": "module-swap", "changed": true, "accept": true, "next_cost": 6.1577375714422509, "current_cost": 6.1577375714422509, "best_cost": 5.1074095324917437, "temperature": 4.4236799999999992},
+    {"index": 5, "total": 30, "move": "module-swap", "changed": true, "accept": false, "next_cost": 100003.44533311963, "current_cost": 6.1577375714422509, "best_cost": 5.1074095324917437, "temperature": 4.2467327999999993},
+    {"index": 6, "total": 30, "move": "module-rotate", "changed": true, "accept": false, "next_cost": 100003.96140013008, "current_cost": 6.1577375714422509, "best_cost": 5.1074095324917437, "temperature": 4.076863487999999},
+    {"index": 7, "total": 30, "move": "lcp-swap", "changed": true, "accept": true, "next_cost": 5.9285937034773806, "current_cost": 5.9285937034773806, "best_cost": 5.1074095324917437, "temperature": 3.9137889484799988},
+    {"index": 8, "total": 30, "move": "lcp-swap", "changed": true, "accept": true, "next_cost": 6.1577375714422509, "current_cost": 6.1577375714422509, "best_cost": 5.1074095324917437, "temperature": 3.7572373905407987},
+    {"index": 9, "total": 30, "move": "lcp-swap", "changed": true, "accept": true, "next_cost": 5.9285937034773806, "current_cost": 5.9285937034773806, "best_cost": 5.1074095324917437, "temperature": 3.6069478949191667},
+    {"index": 10, "total": 30, "move": "lcp-delete-insert", "changed": true, "accept": true, "next_cost": 5.6608770690884143, "current_cost": 5.6608770690884143, "best_cost": 5.1074095324917437, "temperature": 3.4626699791224},
+    {"index": 11, "total": 30, "move": "module-rotate", "changed": true, "accept": false, "next_cost": 1200003.9694924736, "current_cost": 5.6608770690884143, "best_cost": 5.1074095324917437, "temperature": 3.324163179957504},
+    {"index": 12, "total": 30, "move": "module-delete-insert", "changed": true, "accept": true, "next_cost": 6.0456899111989131, "current_cost": 6.0456899111989131, "best_cost": 5.1074095324917437, "temperature": 3.1911966527592037},
+    {"index": 13, "total": 30, "move": "lcp-swap", "changed": true, "accept": true, "next_cost": 6.4180119820883199, "current_cost": 6.4180119820883199, "best_cost": 5.1074095324917437, "temperature": 3.0635487866488353},
+    {"index": 14, "total": 30, "move": "module-rotate", "changed": true, "accept": true, "next_cost": 6.3465446873311402, "current_cost": 6.3465446873311402, "best_cost": 5.1074095324917437, "temperature": 2.9410068351828818},
+    {"index": 15, "total": 30, "move": "module-delete-insert", "changed": true, "accept": false, "next_cost": 2500003.8488417706, "current_cost": 6.3465446873311402, "best_cost": 5.1074095324917437, "temperature": 2.8233665617755666},
+    {"index": 16, "total": 30, "move": "module-delete-insert", "changed": true, "accept": false, "next_cost": 1800004.3401758927, "current_cost": 6.3465446873311402, "best_cost": 5.1074095324917437, "temperature": 2.710431899304544},
+    {"index": 17, "total": 30, "move": "lcp-delete-insert", "changed": true, "accept": true, "next_cost": 6.3128675252115132, "current_cost": 6.3128675252115132, "best_cost": 5.1074095324917437, "temperature": 2.6020146233323622},
+    {"index": 18, "total": 30, "move": "lcp-swap", "changed": true, "accept": false, "next_cost": 1200004.1077710642, "current_cost": 6.3128675252115132, "best_cost": 5.1074095324917437, "temperature": 2.4979340383990678},
+    {"index": 19, "total": 30, "move": "lcp-delete-insert", "changed": true, "accept": true, "next_cost": 6.0720980794032213, "current_cost": 6.0720980794032213, "best_cost": 5.1074095324917437, "temperature": 2.3980166768631048},
+    {"index": 20, "total": 30, "move": "module-rotate", "changed": true, "accept": false, "next_cost": 3000004.309469026, "current_cost": 6.0720980794032213, "best_cost": 5.1074095324917437, "temperature": 2.3020960097885808},
+    {"index": 21, "total": 30, "move": "module-delete-insert", "changed": true, "accept": false, "next_cost": 1300002.9463713835, "current_cost": 6.0720980794032213, "best_cost": 5.1074095324917437, "temperature": 2.2100121693970376},
+    {"index": 22, "total": 30, "move": "module-rotate", "changed": true, "accept": false, "next_cost": 4500003.7287664637, "current_cost": 6.0720980794032213, "best_cost": 5.1074095324917437, "temperature": 2.1216116826211562}
+  ]
+}
